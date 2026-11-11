@@ -49,6 +49,8 @@ Infill:
 
 Printer:
   --profile <path>            Printer, filament and process profile.
+  --flow <f>                  Extrusion multiplier 0.5..1.5, overriding the
+                              profile. 1.0 prints the geometric volume.
   --gcode <path>              Emit G-code for the whole job (needs --profile,
                               plans every layer, then verifies the result).
   --check-gcode <path>        Verify an existing G-code file and exit.
@@ -98,6 +100,7 @@ struct Options {
     metrics_res: Option<f64>,
     profile: Option<PathBuf>,
     profile_config: Option<PrinterConfig>,
+    flow: Option<f64>,
     gcode: Option<PathBuf>,
     check_gcode: Option<PathBuf>,
 }
@@ -121,6 +124,7 @@ impl Options {
             metrics_res: None,
             profile: None,
             profile_config: None,
+            flow: None,
             gcode: None,
             check_gcode: None,
         }
@@ -285,6 +289,13 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.check_gcode = Some(PathBuf::from(next_value(&mut arguments, "--check-gcode")?))
             }
             "--strict" => o.settings.strict_slices = true,
+            "--flow" => {
+                let value = number(&next_value(&mut arguments, "--flow")?, "--flow")?;
+                if !(0.5..=1.5).contains(&value) {
+                    return Err("--flow must be within 0.5..1.5".to_owned());
+                }
+                o.flow = Some(value);
+            }
             "--metrics" => {
                 o.metrics_res = Some(positive(
                     &next_value(&mut arguments, "--metrics")?,
@@ -314,6 +325,11 @@ fn run_cli() -> Result<(), String> {
     }
     if let Some(config) = o.profile_config.clone() {
         o.apply_profile(&config);
+    }
+    if let Some(flow) = o.flow {
+        if let Some(cfg) = o.profile_config.as_mut() {
+            cfg.flow = flow;
+        }
     }
 
     if o.no_infill {

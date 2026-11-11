@@ -143,6 +143,20 @@ or fail 'the second G-code run failed'
 cmp -s "$tmp/cube.gcode" "$tmp/cube2.gcode"; or fail 'two identical G-code runs differ'
 printf 'Verified: 100 layers, expected filament total, byte-identical reruns.\n'
 
+section 'Flow override changes the extrusion'
+$bin fixtures/cube.stl --profile profiles/voron_klipper.cfg --flow 1.0 \
+    --out-dir "$tmp/flow" --gcode "$tmp/flow.gcode" >"$tmp/flow.log"
+    or fail 'the flow override was rejected'
+string match -q -- '*G-code: 100 layers, 1340.0*' (cat "$tmp/flow.log")
+    or fail 'flow 1.0 did not raise the filament total to 1340.0 mm'
+$bin --check-gcode "$tmp/flow.gcode" --profile profiles/voron_klipper.cfg --flow 1.0 \
+    | grep -q 'verify RESULT PASS'
+    or fail 'the flow-1.0 file failed its own verification'
+$bin fixtures/cube.stl --profile profiles/voron_klipper.cfg --flow 2.5 \
+    --out-dir "$tmp/flowbad" >"$tmp/flowbad.log" 2>&1
+    and fail 'an out-of-range flow was accepted'
+printf 'Verified: flow 0.95 gives 1273.0 mm, flow 1.0 gives 1340.0 mm.\n'
+
 section 'The verifier rejects an unsafe file'
 printf 'G1 X9999 Y0 F100\n' >"$tmp/bad.gcode"
 $bin --check-gcode "$tmp/bad.gcode" --profile profiles/voron_klipper.cfg >"$tmp/bad.log" 2>&1
