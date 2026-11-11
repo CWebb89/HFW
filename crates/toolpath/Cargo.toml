@@ -1,0 +1,17 @@
+[package]
+name = "hfw-toolpath"
+description = "Layer path assembly, coverage metrics and diagnostic export."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-geometry = { path = "../geometry" }
+hfw-kernel = { path = "../kernel" }
+hfw-slicing = { path = "../slicing" }
+hfw-walls = { path = "../walls" }
+hfw-infill = { path = "../infill" }
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "hfw-geometry"
+description = "Checked integer nanometre planar geometry for deterministic slicing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

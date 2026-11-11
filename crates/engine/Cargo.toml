@@ -1,0 +1,19 @@
+[package]
+name = "hfw-engine"
+description = "Public headless facade for the HFW slicing engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-geometry = { path = "../geometry" }
+hfw-kernel = { path = "../kernel" }
+hfw-mesh = { path = "../mesh" }
+hfw-slicing = { path = "../slicing" }
+hfw-walls = { path = "../walls" }
+hfw-infill = { path = "../infill" }
+hfw-toolpath = { path = "../toolpath" }
+
+[lints]
+workspace = true

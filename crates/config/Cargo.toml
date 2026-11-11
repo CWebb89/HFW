@@ -1,0 +1,10 @@
+[package]
+name = "hfw-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Printer, filament and process profiles for the HFW slicing engine"
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+//! G-code emission and an independent safety verifier.
+//!
+//! The writer turns planned bead paths into machine commands. Each segment's
+//! extrusion is derived from the segment's own width, so a variable-width bead
+//! is correct on firmware that knows nothing about variable widths: the `E`
+//! value carries the volume. The `;WIDTH:` comments are annotation only.
+//!
+//! The verifier re-reads the finished file as text and applies printer physics
+//! to it, rather than trusting the writer's bookkeeping. It is the only check
+//! that can catch a bug in the writer, because it shares no state with it.
+
+#![forbid(unsafe_code)]
+
+mod error;
+mod writer;
+
+pub mod verify;
+
+pub use error::GcodeError;
+pub use verify::{verify, VerifyReport};
+pub use writer::{generate, Feature, Gcode, GcodeStats, ModelExtent, Path};

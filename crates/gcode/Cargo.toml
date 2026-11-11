@@ -1,0 +1,20 @@
+[package]
+name = "hfw-gcode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "G-code emission and independent safety verification for the HFW engine"
+
+[dependencies]
+hfw-config = { path = "../config" }
+hfw-kernel = { path = "../kernel" }
+hfw-toolpath = { path = "../toolpath" }
+hfw-walls = { path = "../walls" }
+
+[dev-dependencies]
+hfw-engine = { path = "../engine" }
+hfw-mesh = { path = "../mesh" }
+
+[lints]
+workspace = true

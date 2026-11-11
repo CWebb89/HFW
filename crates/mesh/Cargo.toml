@@ -1,0 +1,13 @@
+[package]
+name = "hfw-mesh"
+description = "Indexed triangle meshes, STL import, topology diagnostics and conservative repair."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-geometry = { path = "../geometry" }
+
+[lints]
+workspace = true

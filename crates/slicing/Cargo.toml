@@ -1,0 +1,14 @@
+[package]
+name = "hfw-slicing"
+description = "Layer scheduling, triangle-plane intersection and deterministic contour assembly."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-geometry = { path = "../geometry" }
+hfw-mesh = { path = "../mesh" }
+
+[lints]
+workspace = true

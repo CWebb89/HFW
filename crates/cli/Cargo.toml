@@ -1,0 +1,15 @@
+[package]
+name = "hfw-cli"
+description = "Headless command-line front end for the HFW slicing engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-config = { path = "../config" }
+hfw-engine = { path = "../engine" }
+hfw-gcode = { path = "../gcode" }
+
+[lints]
+workspace = true

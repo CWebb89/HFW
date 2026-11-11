@@ -1,0 +1,13 @@
+[package]
+name = "hfw-walls"
+description = "Distance field, medial axis and variable-width wall generation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-kernel = { path = "../kernel" }
+
+[lints]
+workspace = true

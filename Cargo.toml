@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/geometry",
+    "crates/kernel",
+    "crates/mesh",
+    "crates/slicing",
+    "crates/walls",
+    "crates/infill",
+    "crates/toolpath",
+    "crates/config",
+    "crates/gcode",
+    "crates/engine",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.8.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
