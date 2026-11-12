@@ -33,6 +33,17 @@ pub enum Kind {
     Infill,
     /// Solid skin line.
     Solid,
+    /// Adhesion brim loop, outside the part on the first layer.
+    Brim,
+    /// Skin line printed over air, anchored at both ends.
+    Bridge,
+    /// Crossing strand laid down before the bridge fill, so the fill spans
+    /// material instead of bare air.
+    BridgeAnchor,
+    /// Sacrificial column under an overhang.
+    Support,
+    /// Dense top layers of a support column, in contact with the part.
+    SupportInterface,
 }
 
 impl Kind {
@@ -578,4 +589,79 @@ pub fn generate(region: &Region, p: &Params, mode: Mode) -> Result<Output, Walls
         ridge: ridge_dbg,
         stats,
     })
+}
+
+/// Solid adhesion pad around one layer's boundary.
+///
+/// The band from `gap` to `gap + loops * w` outside the part is filled with
+/// raster lines one bead wide, spaced `w` apart, so the brim is a continuous
+/// sheet rather than a set of rings with valleys between them. Line ends are
+/// clipped to the band by the distance field, which makes the pad follow the
+/// part outline — a round part gets a round brim. A single closed contour at
+/// the outer level finishes the edge, because the raster staircase alone reads
+/// as a polygon.
+///
+/// Rows are sampled every `max(1, round(w / h))` grid rows so the bead pitch
+/// matches the extrusion width regardless of field resolution.
+pub fn brim(region: &Region, p: &Params, loops: usize, gap: f64) -> Result<Vec<Line>, WallsError> {
+    if loops == 0 || region.is_empty() {
+        return Ok(Vec::new());
+    }
+    let band = loops as f64 * p.w;
+    let reach = gap + band + p.w;
+    let rb = region.bounds().grown(reach + 6.0 * p.h + p.w);
+    let index = SegIndex::new(region.segments(), rb, 6.0 * p.h);
+    let grid = Grid::covering(region.bounds().grown(reach + 2.0 * p.h), p.h);
+    let inside = field::scan_inside(region, &grid);
+    let n = grid.len();
+    let (lo, hi) = (gap, gap + band);
+    let mut dist = vec![0.0f64; n];
+    for (id, flag) in inside.iter().enumerate() {
+        if *flag {
+            continue;
+        }
+        dist[id] = match index.nearest(grid.pos_id(id), hi + p.w) {
+            Some(hit) => hit.d,
+            None => hi + p.w,
+        };
+    }
+    let stride = ((p.w / grid.h).round() as usize).max(1);
+    let mut out: Vec<Line> = Vec::new();
+    for iy in (0..grid.ny).step_by(stride) {
+        let row = &dist[iy * grid.nx..(iy + 1) * grid.nx];
+        let mut ix = 0;
+        while ix < grid.nx {
+            if row[ix] < lo || row[ix] > hi {
+                ix += 1;
+                continue;
+            }
+            let start = ix;
+            while ix < grid.nx && row[ix] >= lo && row[ix] <= hi {
+                ix += 1;
+            }
+            let a = grid.pos(start, iy);
+            let c = grid.pos(ix - 1, iy);
+            if (c.x - a.x).abs() < p.w {
+                continue;
+            }
+            out.push(Line {
+                pts: vec![a, c],
+                width: vec![p.w; 2],
+                closed: false,
+                kind: Kind::Brim,
+            });
+        }
+    }
+    let mut phi = vec![0.0f64; n];
+    let bw = vec![p.w; n];
+    let lv = vec![hi; n];
+    for (id, flag) in inside.iter().enumerate() {
+        phi[id] = if *flag { -1.0 } else { dist[id] - hi };
+    }
+    for raw in contour::trace(&grid, &phi, &bw, &lv) {
+        if let Some(line) = finish(raw, &index, p, Kind::Brim) {
+            out.push(line);
+        }
+    }
+    Ok(out)
 }

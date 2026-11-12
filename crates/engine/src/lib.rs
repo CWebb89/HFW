@@ -14,6 +14,7 @@ use hfw_geometry::Contour;
 use hfw_infill::infill_layer as generate_infill;
 use hfw_kernel::{Region, V2};
 use hfw_slicing::{LayerSchedule, SliceError, SliceLayer};
+use hfw_support::SupportParams;
 use hfw_toolpath::{evaluate, evaluate_full, extruded_volume, PlannedLayer};
 
 pub use hfw_geometry::{Contour as SliceContour, Point2};
@@ -22,6 +23,7 @@ pub use hfw_infill::{
 };
 pub use hfw_mesh::{Mesh, MeshDiagnostics, MeshError, MeshRepairReport, MeshTransform};
 pub use hfw_slicing::{slice_mesh, SliceError as SlicingError, SliceLayer as Slice};
+pub use hfw_support::{Style as SupportStyle, SupportParams as SupportSettings};
 pub use hfw_toolpath::{
     evaluate as evaluate_perimeter, evaluate_full as evaluate_all, line_volume, JobTotals, Metrics,
     PlannedLayer as PlannedSlice, MANIFEST_HEADER,
@@ -39,6 +41,8 @@ pub struct Settings {
     pub wall: WallParams,
     /// Wall strategy.
     pub mode: Mode,
+    /// Support settings; `None` skips support generation.
+    pub support: Option<SupportParams>,
     /// Infill settings; `None` skips infill entirely.
     pub infill: Option<InfillParams>,
     /// Generate walls on every Nth layer, plus the last. 1 means every layer.
@@ -53,6 +57,10 @@ pub struct Settings {
     /// collapses to a point, is skipped and reported instead of discarding an
     /// otherwise printable stack.
     pub strict_slices: bool,
+    /// Adhesion brim loops around the first layer. 0 disables the brim.
+    pub brim_loops: usize,
+    /// Clearance between the part and the innermost brim loop, in millimetres.
+    pub brim_gap: f64,
 }
 
 impl Settings {
@@ -62,10 +70,13 @@ impl Settings {
             wall: WallParams::new(w, walls),
             mode: Mode::Hfw,
             infill: Some(InfillParams::new(w)),
+            support: None,
             every: 1,
             metrics_res: None,
             keep_reference: true,
             strict_slices: false,
+            brim_loops: 0,
+            brim_gap: 0.1,
         }
     }
 }
@@ -151,6 +162,8 @@ pub struct JobStats {
     pub ms_walls: f64,
     /// Milliseconds spent generating infill.
     pub ms_infill: f64,
+    /// Milliseconds spent generating support masks.
+    pub ms_support: f64,
     /// Milliseconds spent measuring coverage.
     pub ms_metrics: f64,
 }
@@ -202,13 +215,50 @@ pub fn run(
     }
 
     let step = settings.every.max(1);
-    let mut cache = settings.infill.as_ref().map(|ip| {
-        let needed = ip.top_layers + ip.bottom_layers + 1;
-        MaskCache::new(&regions, ip.skin_res, needed)
-    });
+    let mut cache = if settings.infill.is_some() || settings.support.is_some() {
+        let needed = settings
+            .infill
+            .as_ref()
+            .map(|ip| ip.top_layers + ip.bottom_layers + 1)
+            .unwrap_or(1)
+            .max(
+                settings
+                    .support
+                    .as_ref()
+                    .map(|sp| sp.interface_layers + 2)
+                    .unwrap_or(1),
+            );
+        let res = settings
+            .infill
+            .as_ref()
+            .map(|ip| ip.skin_res)
+            .unwrap_or(settings.wall.w / 4.0);
+        Some(MaskCache::new(&regions, res, needed))
+    } else {
+        None
+    };
+    let support_ms;
+    let supports = match (settings.support.as_ref(), cache.as_mut()) {
+        (Some(sp), Some(cache)) => {
+            let t = std::time::Instant::now();
+            let height = schedule
+                .layers()
+                .first()
+                .map(|s| (s.print_z - s.bottom_z) as f64 / 1e6)
+                .unwrap_or(0.2);
+            let masks = hfw_support::Supports::build(&regions, cache, sp, height);
+            support_ms = t.elapsed().as_secs_f64() * 1e3;
+            Some(masks)
+        }
+        _ => {
+            support_ms = 0.0;
+            None
+        }
+    };
 
     let mut layers = Vec::with_capacity(schedule.len());
     let mut stats = JobStats {
+        ms_support: support_ms,
         layers: schedule.len(),
         triangles_tested: slices
             .iter()
@@ -239,6 +289,17 @@ pub fn run(
 
         if !regions[k].is_empty() && (k % step == 0 || k == last) {
             let t = std::time::Instant::now();
+            if let (Some(masks), Some(sp)) = (supports.as_ref(), settings.support.as_ref()) {
+                planned.paths.extend(masks.fill(k, sp));
+            }
+            if k == 0 && settings.brim_loops > 0 {
+                planned.paths.extend(hfw_walls::brim(
+                    &regions[k],
+                    &settings.wall,
+                    settings.brim_loops,
+                    settings.brim_gap,
+                )?);
+            }
             let out = hfw_walls::generate(&regions[k], &settings.wall, settings.mode)?;
             let layer_ms = out.stats.ms_total;
             stats.processed_layers += 1;

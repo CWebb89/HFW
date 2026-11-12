@@ -32,6 +32,14 @@ pub enum Feature {
     Skin,
     /// Sparse infill.
     Infill,
+    /// First-layer adhesion brim, outside the part.
+    Brim,
+    /// Skin printed over air and anchored at both ends.
+    Bridge,
+    /// Sacrificial support column.
+    Support,
+    /// Dense support layers in contact with the part.
+    SupportInterface,
 }
 
 impl Feature {
@@ -42,6 +50,11 @@ impl Feature {
             Kind::Middle => Some(Feature::Middle),
             Kind::Solid => Some(Feature::Skin),
             Kind::Infill => Some(Feature::Infill),
+            Kind::Brim => Some(Feature::Brim),
+            Kind::Bridge => Some(Feature::Bridge),
+            Kind::BridgeAnchor => Some(Feature::Bridge),
+            Kind::Support => Some(Feature::Support),
+            Kind::SupportInterface => Some(Feature::SupportInterface),
         }
     }
 
@@ -52,6 +65,10 @@ impl Feature {
             Feature::Middle => "middle",
             Feature::Skin => "skin",
             Feature::Infill => "infill",
+            Feature::Brim => "brim",
+            Feature::Bridge => "bridge",
+            Feature::Support => "support",
+            Feature::SupportInterface => "support_interface",
         }
     }
 
@@ -68,6 +85,10 @@ impl Feature {
             Feature::Middle => "#1e8c5a",
             Feature::Skin => "#eb9628",
             Feature::Infill => "#c8553d",
+            Feature::Brim => "#7d5ba6",
+            Feature::Bridge => "#b03a48",
+            Feature::Support => "#8a8f98",
+            Feature::SupportInterface => "#5f6470",
         }
     }
 }
@@ -83,6 +104,14 @@ pub struct LayerCounts {
     pub skin: usize,
     /// Number of sparse infill lines.
     pub infill: usize,
+    /// Number of adhesion brim loops.
+    pub brim: usize,
+    /// Number of bridge lines.
+    pub bridge: usize,
+    /// Number of support body lines.
+    pub support: usize,
+    /// Number of support interface lines.
+    pub support_interface: usize,
     /// Total printable path length.
     pub length: f64,
     /// Total deposited volume for this layer.
@@ -125,6 +154,10 @@ impl PlannedLayer {
                 Some(Feature::Middle) => c.middle += 1,
                 Some(Feature::Skin) => c.skin += 1,
                 Some(Feature::Infill) => c.infill += 1,
+                Some(Feature::Brim) => c.brim += 1,
+                Some(Feature::Bridge) => c.bridge += 1,
+                Some(Feature::Support) => c.support += 1,
+                Some(Feature::SupportInterface) => c.support_interface += 1,
                 None => continue,
             }
             c.length += path.length();
@@ -221,7 +254,7 @@ impl PlannedLayer {
     /// One CSV row describing this layer.
     pub fn manifest_row(&self) -> String {
         format!(
-            "{},{:.6},{:.6},{:.6},{},{},{},{},{},{:.4},{:.6},{}",
+            "{},{:.6},{:.6},{:.6},{},{},{},{},{},{},{},{:.4},{:.6},{},{},{}",
             self.index + 1,
             self.bottom_z,
             self.slice_z,
@@ -231,17 +264,22 @@ impl PlannedLayer {
             self.counts.middle,
             self.counts.skin,
             self.counts.infill,
+            self.counts.brim,
+            self.counts.bridge,
             self.counts.length,
             self.counts.volume,
             self.counts.starts_stops,
+            self.counts.support,
+            self.counts.support_interface,
         )
     }
 }
 
 /// Header matching [`PlannedLayer::manifest_row`].
 pub const MANIFEST_HEADER: &str = "layer_index,layer_bottom_mm,slice_z_mm,print_z_mm,\
-reference_contours,wall_paths,middle_paths,skin_paths,infill_paths,path_length_mm,\
-deposited_volume_mm3,starts_stops";
+reference_contours,wall_paths,middle_paths,skin_paths,infill_paths,brim_paths,\
+bridge_paths,path_length_mm,deposited_volume_mm3,starts_stops,support_paths,\
+support_interface_paths";
 
 /// Aggregated statistics for a whole job.
 #[derive(Clone, Debug, Default)]

@@ -24,6 +24,7 @@ dependencies = [
  "hfw-kernel",
  "hfw-mesh",
  "hfw-slicing",
+ "hfw-support",
  "hfw-toolpath",
  "hfw-walls",
 ]
@@ -69,6 +70,15 @@ version = "0.8.0"
 dependencies = [
  "hfw-geometry",
  "hfw-mesh",
+]
+
+[[package]]
+name = "hfw-support"
+version = "0.8.0"
+dependencies = [
+ "hfw-infill",
+ "hfw-kernel",
+ "hfw-walls",
 ]
 
 [[package]]

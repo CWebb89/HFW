@@ -150,6 +150,38 @@ impl PrinterConfig {
             "thin_speed" => self.thin_speed = number(key, value)?,
             "infill_speed" => self.infill_speed = number(key, value)?,
             "solid_speed" => self.solid_speed = number(key, value)?,
+            "support_speed" => self.support_speed = number(key, value)?,
+            "support_interface_speed" => self.support_interface_speed = number(key, value)?,
+            "support" => self.support = boolean(key, value)?,
+            "support_threshold_angle" => self.support_threshold_angle = number(key, value)?,
+            "support_xy_gap" => self.support_xy_gap = number(key, value)?,
+            "support_z_gap" => self.support_z_gap = number(key, value)?,
+            "support_interface_layers" => self.support_interface_layers = whole(key, value)?,
+            "support_density" => self.support_density = number(key, value)?,
+            "support_interface_density" => self.support_interface_density = number(key, value)?,
+            "support_on_build_plate_only" => {
+                self.support_on_build_plate_only = boolean(key, value)?
+            }
+            "support_min_area" => self.support_min_area = number(key, value)?,
+            "support_style" => {
+                self.support_style = match value {
+                    "normal" | "tree" => value.to_owned(),
+                    _ => {
+                        return Err(ConfigError::BadChoice {
+                            key: "support_style",
+                            value: value.to_owned(),
+                            allowed: "normal, tree",
+                        })
+                    }
+                }
+            }
+            "support_branch_angle" => self.support_branch_angle = number(key, value)?,
+            "support_branch_distance" => self.support_branch_distance = number(key, value)?,
+            "support_tip_diameter" => self.support_tip_diameter = number(key, value)?,
+            "support_branch_diameter_angle" => {
+                self.support_branch_diameter_angle = number(key, value)?
+            }
+            "support_max_branch_diameter" => self.support_max_branch_diameter = number(key, value)?,
             "max_volumetric_speed" => self.max_volumetric_speed = number(key, value)?,
             "max_speed" => self.max_speed = number(key, value)?,
             "min_layer_time" => self.min_layer_time = number(key, value)?,
@@ -171,6 +203,21 @@ impl PrinterConfig {
             "inner_walls_first" => self.inner_walls_first = boolean(key, value)?,
             "skirt_loops" => self.skirt_loops = whole(key, value)?,
             "skirt_distance" => self.skirt_distance = number(key, value)?,
+            "brim_loops" => self.brim_loops = whole(key, value)?,
+            "brim_gap" => self.brim_gap = number(key, value)?,
+            "bridge_speed" => self.bridge_speed = number(key, value)?,
+            "bridge_flow" => self.bridge_flow = number(key, value)?,
+            "bridge_density" => self.bridge_density = number(key, value)?,
+            "bridge_line_width" => self.bridge_line_width = number(key, value)?,
+            "bridge_angle" => self.bridge_angle = number(key, value)?,
+            "thick_bridges" => self.thick_bridges = boolean(key, value)?,
+            "bridge_cross_hatch" => self.bridge_cross_hatch = boolean(key, value)?,
+            "bridge_fan_speed" => self.bridge_fan_speed = number(key, value)?,
+            "bridge_acceleration" => self.bridge_acceleration = number(key, value)?,
+            "max_bridge_length" => self.max_bridge_length = number(key, value)?,
+            "bridge_span_flow" => self.bridge_span_flow = number(key, value)?,
+            "bridge_span_speed" => self.bridge_span_speed = number(key, value)?,
+            "bridge_span_ref" => self.bridge_span_ref = number(key, value)?,
             "emit_print_stats" => self.emit_print_stats = boolean(key, value)?,
             "exclude_object" => self.exclude_object = boolean(key, value)?,
             "pressure_advance" => self.pressure_advance = number(key, value)?,
@@ -202,10 +249,22 @@ impl PrinterConfig {
             ("thin_speed", self.thin_speed),
             ("infill_speed", self.infill_speed),
             ("solid_speed", self.solid_speed),
+            ("support_speed", self.support_speed),
+            ("support_interface_speed", self.support_interface_speed),
+            ("support_branch_distance", self.support_branch_distance),
+            ("support_tip_diameter", self.support_tip_diameter),
+            (
+                "support_max_branch_diameter",
+                self.support_max_branch_diameter,
+            ),
             ("travel_speed", self.travel_speed),
             ("max_volumetric_speed", self.max_volumetric_speed),
             ("max_speed", self.max_speed),
             ("flow", self.flow),
+            ("bridge_speed", self.bridge_speed),
+            ("bridge_flow", self.bridge_flow),
+            ("bridge_density", self.bridge_density),
+            ("bridge_span_ref", self.bridge_span_ref),
         ];
         for (key, value) in positive {
             if value <= 0.0 {
@@ -221,6 +280,20 @@ impl PrinterConfig {
                 key: "walls",
                 rule: "between 1 and 8",
                 value: format!("{}", self.walls),
+            });
+        }
+        if self.brim_loops > 20 {
+            return Err(ConfigError::OutOfRange {
+                key: "brim_loops",
+                rule: "between 0 and 20",
+                value: format!("{}", self.brim_loops),
+            });
+        }
+        if self.brim_loops > 0 && !(0.0..=1.0).contains(&self.brim_gap) {
+            return Err(ConfigError::OutOfRange {
+                key: "brim_gap",
+                rule: "between 0 and 1 mm",
+                value: format!("{}", self.brim_gap),
             });
         }
         if !(0.0..=1.0).contains(&self.infill_density) {
@@ -300,6 +373,92 @@ impl PrinterConfig {
                 key: "min_speed_factor",
                 rule: "in (0, 1]",
                 value: format!("{}", self.min_speed_factor),
+            });
+        }
+        if !(0.1..=1.5).contains(&self.bridge_flow) {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_flow",
+                rule: "between 0.1 and 1.5",
+                value: format!("{}", self.bridge_flow),
+            });
+        }
+        if !(0.1..=1.25).contains(&self.bridge_density) {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_density",
+                rule: "between 0.1 and 1.25",
+                value: format!("{}", self.bridge_density),
+            });
+        }
+        if self.bridge_line_width < 0.0 || self.bridge_line_width > 2.0 * self.nozzle_diameter {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_line_width",
+                rule: "0 for line_width, or up to 2x the nozzle diameter",
+                value: format!("{}", self.bridge_line_width),
+            });
+        }
+        if self.bridge_angle != -1.0
+            && (self.bridge_angle < 0.0 || !matches!(self.bridge_angle as i64 % 45, 0))
+        {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_angle",
+                rule: "-1 to choose automatically, or a multiple of 45",
+                value: format!("{}", self.bridge_angle),
+            });
+        }
+        if !(0.0..=100.0).contains(&self.bridge_fan_speed) {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_fan_speed",
+                rule: "between 0 and 100",
+                value: format!("{}", self.bridge_fan_speed),
+            });
+        }
+        if self.bridge_acceleration < 0.0 || self.bridge_acceleration > 20000.0 {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_acceleration",
+                rule: "0 to leave acceleration alone, or up to 20000 mm/s^2",
+                value: format!("{}", self.bridge_acceleration),
+            });
+        }
+        if self.max_bridge_length < 0.0 {
+            return Err(ConfigError::OutOfRange {
+                key: "max_bridge_length",
+                rule: "0 or greater",
+                value: format!("{}", self.max_bridge_length),
+            });
+        }
+        if self.bridge_span_flow < -1.0 || self.bridge_span_flow > 2.0 {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_span_flow",
+                rule: "between -1 and 2 per mm",
+                value: format!("{}", self.bridge_span_flow),
+            });
+        }
+        if self.bridge_span_speed < 0.0 || self.bridge_span_speed > 1.0 {
+            return Err(ConfigError::OutOfRange {
+                key: "bridge_span_speed",
+                rule: "between 0 and 1 per mm",
+                value: format!("{}", self.bridge_span_speed),
+            });
+        }
+        if self.support_branch_angle <= 0.0 || self.support_branch_angle >= 80.0 {
+            return Err(ConfigError::OutOfRange {
+                key: "support_branch_angle",
+                rule: "between 0 and 80 degrees",
+                value: format!("{}", self.support_branch_angle),
+            });
+        }
+        if self.support_branch_diameter_angle < 0.0 || self.support_branch_diameter_angle >= 45.0 {
+            return Err(ConfigError::OutOfRange {
+                key: "support_branch_diameter_angle",
+                rule: "between 0 and 45 degrees",
+                value: format!("{}", self.support_branch_diameter_angle),
+            });
+        }
+        if self.support_tip_diameter >= self.support_max_branch_diameter {
+            return Err(ConfigError::OutOfRange {
+                key: "support_tip_diameter",
+                rule: "smaller than support_max_branch_diameter",
+                value: format!("{}", self.support_tip_diameter),
             });
         }
         if self.pressure_advance < 0.0 || self.pressure_advance > 2.0 {

@@ -173,6 +173,7 @@ def slice_hfw(args, model, work, log):
     gcode = os.path.join(work, "hfw.gcode")
     profile = args.profile if args.keep_flow else neutralised_profile(args.profile, work)
     cmd = [args.hfw, model, "--profile", profile,
+           "--walls", str(args.walls),
            "--layer-height", str(args.layer_height),
            "--density", str(args.density),
            "--skin-top", str(args.top), "--skin-bottom", str(args.bottom),

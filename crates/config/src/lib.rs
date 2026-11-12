@@ -106,6 +106,40 @@ pub struct PrinterConfig {
     pub infill_speed: f64,
     /// Solid skin speed in millimetres per second.
     pub solid_speed: f64,
+    /// Support body speed in millimetres per second.
+    pub support_speed: f64,
+    /// Support interface speed in millimetres per second.
+    pub support_interface_speed: f64,
+    /// Generate supports under overhangs.
+    pub support: bool,
+    /// Steepest overhang printed without support, in degrees from vertical.
+    pub support_threshold_angle: f64,
+    /// Horizontal clearance between support and part, in millimetres.
+    pub support_xy_gap: f64,
+    /// Vertical clearance between support top and the part, in millimetres.
+    pub support_z_gap: f64,
+    /// Dense layers immediately under the contact surface.
+    pub support_interface_layers: usize,
+    /// Line density of the support body.
+    pub support_density: f64,
+    /// Line density of the interface layers.
+    pub support_interface_density: f64,
+    /// Drop support columns that would have to rest on the part.
+    pub support_on_build_plate_only: bool,
+    /// Smallest overhang patch worth supporting, in square millimetres.
+    pub support_min_area: f64,
+    /// Support body shape: `normal` or `tree`.
+    pub support_style: String,
+    /// Steepest branch lean from vertical, in degrees.
+    pub support_branch_angle: f64,
+    /// Distance under which two branches start converging, in millimetres.
+    pub support_branch_distance: f64,
+    /// Diameter of the contact tip under an overhang, in millimetres.
+    pub support_tip_diameter: f64,
+    /// How fast a branch widens as it descends, in degrees of cone.
+    pub support_branch_diameter_angle: f64,
+    /// Largest branch diameter a trunk may reach, in millimetres.
+    pub support_max_branch_diameter: f64,
     /// Volumetric flow ceiling in cubic millimetres per second.
     pub max_volumetric_speed: f64,
     /// Machine speed ceiling in millimetres per second.
@@ -124,6 +158,45 @@ pub struct PrinterConfig {
     pub skirt_loops: usize,
     /// Gap between the skirt and the part, in millimetres.
     pub skirt_distance: f64,
+    /// Number of adhesion brim loops on the first layer.
+    pub brim_loops: usize,
+    /// Clearance between the part and the innermost brim loop, in millimetres.
+    pub brim_gap: f64,
+    /// Speed for skin printed over air, in millimetres per second.
+    pub bridge_speed: f64,
+    /// Extrusion multiplier applied to bridge beads only.
+    pub bridge_flow: f64,
+    /// Bridge line density; 1.0 means adjacent beads touch, above 1.0 overlaps.
+    pub bridge_density: f64,
+    /// Bridge bead width in millimetres; 0 uses `line_width`.
+    pub bridge_line_width: f64,
+    /// Forced bridge direction in degrees; negative lets the engine choose.
+    pub bridge_angle: f64,
+    /// Print bridge beads one nozzle diameter thick instead of one layer.
+    pub thick_bridges: bool,
+    /// Print two crossing strands across each gap before the bridge fill.
+    pub bridge_cross_hatch: bool,
+    /// Fan duty cycle while bridge beads print, in percent.
+    pub bridge_fan_speed: f64,
+    /// Acceleration applied while bridges print, in mm/s^2; 0 leaves it alone.
+    ///
+    /// Only Klipper profiles get this: the value is wrapped in
+    /// `SAVE_VELOCITY_LIMIT`/`RESTORE_VELOCITY_LIMIT` so the print's own limit is
+    /// restored afterwards.
+    pub bridge_acceleration: f64,
+    /// Longest span bridged without help, in millimetres; 0 means no limit.
+    pub max_bridge_length: f64,
+    /// Extra bridge flow per millimetre of span past `bridge_span_ref`.
+    ///
+    /// Negative values thin long spans, which is the direction that helps a
+    /// sagging external bridge: a lighter strand hangs taut between its anchors,
+    /// while extra material makes a heavier rope that droops.
+    pub bridge_span_flow: f64,
+    /// Fraction of bridge speed lost per millimetre of span above
+    /// `bridge_span_ref`.
+    pub bridge_span_speed: f64,
+    /// Span, in millimetres, at which the span adjustments start.
+    pub bridge_span_ref: f64,
     /// True to emit `SET_PRINT_STATS_INFO` for Klipper layer tracking.
     pub emit_print_stats: bool,
     /// True to emit `EXCLUDE_OBJECT_DEFINE` so the part can be cancelled.
@@ -175,6 +248,23 @@ impl Default for PrinterConfig {
             thin_speed: 30.0,
             infill_speed: 80.0,
             solid_speed: 60.0,
+            support_speed: 60.0,
+            support_interface_speed: 40.0,
+            support: false,
+            support_threshold_angle: 60.0,
+            support_xy_gap: 0.35,
+            support_z_gap: 0.2,
+            support_interface_layers: 2,
+            support_density: 0.15,
+            support_interface_density: 0.8,
+            support_on_build_plate_only: false,
+            support_min_area: 2.0,
+            support_style: "normal".to_owned(),
+            support_branch_angle: 40.0,
+            support_branch_distance: 3.0,
+            support_tip_diameter: 0.8,
+            support_branch_diameter_angle: 2.0,
+            support_max_branch_diameter: 8.0,
             max_volumetric_speed: 12.0,
             max_speed: 300.0,
             min_layer_time: 8.0,
@@ -184,6 +274,21 @@ impl Default for PrinterConfig {
             inner_walls_first: true,
             skirt_loops: 2,
             skirt_distance: 3.0,
+            brim_loops: 0,
+            brim_gap: 0.1,
+            bridge_speed: 30.0,
+            bridge_flow: 1.0,
+            bridge_density: 1.0,
+            bridge_line_width: 0.0,
+            bridge_angle: -1.0,
+            thick_bridges: false,
+            bridge_cross_hatch: false,
+            bridge_fan_speed: 100.0,
+            bridge_acceleration: 0.0,
+            max_bridge_length: 0.0,
+            bridge_span_flow: 0.0,
+            bridge_span_speed: 0.0,
+            bridge_span_ref: 5.0,
             emit_print_stats: false,
             exclude_object: false,
             pressure_advance: 0.0,

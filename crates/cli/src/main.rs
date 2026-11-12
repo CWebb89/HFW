@@ -12,7 +12,7 @@ use hfw_config::PrinterConfig;
 use hfw_engine::{
     evaluate_all, evaluate_perimeter, run, slice_plane, InfillPattern, Job, JobTotals, MaskCache,
     Mesh, MeshDiagnostics, MeshRepairReport, MeshTransform, Metrics, Mode, PlannedSlice, Settings,
-    MANIFEST_HEADER,
+    SupportSettings, SupportStyle, MANIFEST_HEADER,
 };
 
 const USAGE: &str = "\
@@ -37,6 +37,8 @@ Model preparation:
 Walls:
   --width <mm>                Extrusion width (default 0.4).
   --walls <n>                 Perimeter loops (default 3).
+  --brim <n>                  First-layer adhesion brim loops (default 0).
+  --brim-gap <mm>             Clearance between part and brim (default 0.1).
   --mode hfw|classic          Variable-width field walls, or plain offsets.
   --no-reference              Omit the exact slice outline from the SVG.
 
@@ -46,6 +48,12 @@ Infill:
   --pattern rectilinear|grid  Sparse pattern (default rectilinear).
   --skin-top <n>              Solid layers under a top surface (default 5).
   --skin-bottom <n>           Solid layers above a bottom surface (default 4).
+  --max-bridge-length <mm>    Longest span printed as a bridge; longer spans
+                                print as ordinary solid infill.
+  --bridge-cross-hatch <0|1>  Print two crossing strands across each gap before
+                                the bridge fill.
+  --support <0|1>             Generate supports under overhangs.
+  --support-style <style>     normal (projected columns) or tree.
 
 Printer:
   --profile <path>            Printer, filament and process profile.
@@ -97,6 +105,16 @@ struct Options {
     no_infill: bool,
     density: Option<f64>,
     pattern: Option<String>,
+    wall_width: Option<f64>,
+    walls: Option<usize>,
+    brim: Option<usize>,
+    brim_gap: Option<f64>,
+    max_bridge_length: Option<f64>,
+    cross_hatch: Option<bool>,
+    support: Option<bool>,
+    support_style: Option<SupportStyle>,
+    skin_top: Option<usize>,
+    skin_bottom: Option<usize>,
     metrics_res: Option<f64>,
     profile: Option<PathBuf>,
     profile_config: Option<PrinterConfig>,
@@ -121,6 +139,16 @@ impl Options {
             no_infill: false,
             density: None,
             pattern: None,
+            wall_width: None,
+            walls: None,
+            brim: None,
+            brim_gap: None,
+            max_bridge_length: None,
+            cross_hatch: None,
+            support: None,
+            support_style: None,
+            skin_top: None,
+            skin_bottom: None,
             metrics_res: None,
             profile: None,
             profile_config: None,
@@ -130,9 +158,37 @@ impl Options {
         }
     }
 
+    fn apply_overrides(&mut self) {
+        if let Some(w) = self.wall_width {
+            self.settings.wall.w = w;
+        }
+        if let Some(n) = self.walls {
+            self.settings.wall.walls = n;
+        }
+        if let Some(n) = self.brim {
+            self.settings.brim_loops = n;
+        }
+        if let Some(g) = self.brim_gap {
+            self.settings.brim_gap = g;
+        }
+        if let (Some(l), Some(ip)) = (self.max_bridge_length, self.settings.infill.as_mut()) {
+            ip.bridge.max_length = l;
+        }
+        if let Some(ip) = self.settings.infill.as_mut() {
+            if let Some(n) = self.skin_top {
+                ip.top_layers = n;
+            }
+            if let Some(n) = self.skin_bottom {
+                ip.bottom_layers = n;
+            }
+        }
+    }
+
     fn apply_profile(&mut self, cfg: &PrinterConfig) {
         self.settings.wall.w = cfg.line_width;
         self.settings.wall.walls = cfg.walls;
+        self.settings.brim_loops = cfg.brim_loops;
+        self.settings.brim_gap = cfg.brim_gap;
         if let Some(ip) = self.settings.infill.as_mut() {
             ip.density = cfg.infill_density;
             ip.top_layers = cfg.top_layers;
@@ -142,6 +198,41 @@ impl Options {
             } else {
                 InfillPattern::Rectilinear
             };
+            ip.bridge.density = cfg.bridge_density;
+            ip.bridge.cross_hatch = cfg.bridge_cross_hatch;
+            ip.bridge.width = if cfg.bridge_line_width > 0.0 {
+                cfg.bridge_line_width
+            } else {
+                cfg.line_width
+            };
+            ip.bridge.angle = if cfg.bridge_angle >= 0.0 {
+                Some(cfg.bridge_angle)
+            } else {
+                None
+            };
+            ip.bridge.max_length = cfg.max_bridge_length;
+        }
+        if cfg.support {
+            let mut sp = SupportSettings::new(cfg.line_width);
+            sp.threshold_angle = cfg.support_threshold_angle;
+            sp.xy_gap = cfg.support_xy_gap;
+            sp.z_gap = cfg.support_z_gap;
+            sp.interface_layers = cfg.support_interface_layers;
+            sp.density = cfg.support_density;
+            sp.interface_density = cfg.support_interface_density;
+            sp.on_build_plate_only = cfg.support_on_build_plate_only;
+            sp.min_area = cfg.support_min_area;
+            sp.style = if cfg.support_style == "tree" {
+                SupportStyle::Tree
+            } else {
+                SupportStyle::Normal
+            };
+            sp.branch_angle = cfg.support_branch_angle;
+            sp.branch_distance = cfg.support_branch_distance;
+            sp.tip_diameter = cfg.support_tip_diameter;
+            sp.branch_diameter_angle = cfg.support_branch_diameter_angle;
+            sp.max_branch_diameter = cfg.support_max_branch_diameter;
+            self.settings.support = Some(sp);
         }
         if self.layer_height.is_none() {
             self.layer_height = Some(cfg.layer_height);
@@ -224,10 +315,55 @@ fn parse_arguments() -> Result<Option<Options>, String> {
             "--scale" => o.scale = positive(&next_value(&mut arguments, "--scale")?, "--scale")?,
             "--repair-basic" => o.repair = true,
             "--width" => {
-                o.settings.wall.w = positive(&next_value(&mut arguments, "--width")?, "--width")?
+                o.wall_width = Some(positive(
+                    &next_value(&mut arguments, "--width")?,
+                    "--width",
+                )?)
             }
-            "--walls" => {
-                o.settings.wall.walls = count(&next_value(&mut arguments, "--walls")?, "--walls")?
+            "--walls" => o.walls = Some(count(&next_value(&mut arguments, "--walls")?, "--walls")?),
+            "--brim" => o.brim = Some(count(&next_value(&mut arguments, "--brim")?, "--brim")?),
+            "--brim-gap" => {
+                o.brim_gap = Some(number(
+                    &next_value(&mut arguments, "--brim-gap")?,
+                    "--brim-gap",
+                )?)
+            }
+            "--max-bridge-length" => {
+                o.max_bridge_length = Some(number(
+                    &next_value(&mut arguments, "--max-bridge-length")?,
+                    "--max-bridge-length",
+                )?)
+            }
+            "--bridge-cross-hatch" => {
+                o.cross_hatch = Some(
+                    match next_value(&mut arguments, "--bridge-cross-hatch")?.as_str() {
+                        "1" => true,
+                        "0" => false,
+                        other => {
+                            return Err(format!("invalid --bridge-cross-hatch value: {other}"))
+                        }
+                    },
+                )
+            }
+            "--support" => {
+                o.support = Some(match next_value(&mut arguments, "--support")?.as_str() {
+                    "1" | "on" => true,
+                    "0" | "off" => false,
+                    other => return Err(format!("invalid --support value: {other}")),
+                })
+            }
+            "--support-style" => {
+                o.support_style = Some(
+                    match next_value(&mut arguments, "--support-style")?.as_str() {
+                        "normal" => SupportStyle::Normal,
+                        "tree" => SupportStyle::Tree,
+                        other => {
+                            return Err(format!(
+                                "--support-style must be normal or tree, got {other}"
+                            ))
+                        }
+                    },
+                )
             }
             "--mode" => {
                 let value = next_value(&mut arguments, "--mode")?;
@@ -258,18 +394,16 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 }
             }
             "--skin-top" => {
-                if let Some(ip) = o.settings.infill.as_mut() {
-                    ip.top_layers =
-                        count(&next_value(&mut arguments, "--skin-top")?, "--skin-top")?;
-                }
+                o.skin_top = Some(count(
+                    &next_value(&mut arguments, "--skin-top")?,
+                    "--skin-top",
+                )?)
             }
             "--skin-bottom" => {
-                if let Some(ip) = o.settings.infill.as_mut() {
-                    ip.bottom_layers = count(
-                        &next_value(&mut arguments, "--skin-bottom")?,
-                        "--skin-bottom",
-                    )?;
-                }
+                o.skin_bottom = Some(count(
+                    &next_value(&mut arguments, "--skin-bottom")?,
+                    "--skin-bottom",
+                )?)
             }
             "--every" => {
                 let value = count(&next_value(&mut arguments, "--every")?, "--every")?;
@@ -326,10 +460,29 @@ fn run_cli() -> Result<(), String> {
     if let Some(config) = o.profile_config.clone() {
         o.apply_profile(&config);
     }
+    o.apply_overrides();
     if let Some(flow) = o.flow {
         if let Some(cfg) = o.profile_config.as_mut() {
             cfg.flow = flow;
         }
+    }
+    if let Some(hatch) = o.cross_hatch {
+        if let Some(cfg) = o.profile_config.as_mut() {
+            cfg.bridge_cross_hatch = hatch;
+        }
+        if let Some(ip) = o.settings.infill.as_mut() {
+            ip.bridge.cross_hatch = hatch;
+        }
+    }
+    if let Some(on) = o.support {
+        if !on {
+            o.settings.support = None;
+        } else if o.settings.support.is_none() {
+            o.settings.support = Some(SupportSettings::new(o.settings.wall.w));
+        }
+    }
+    if let (Some(style), Some(sp)) = (o.support_style, o.settings.support.as_mut()) {
+        sp.style = style;
     }
 
     if o.no_infill {

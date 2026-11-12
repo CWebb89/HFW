@@ -14,6 +14,14 @@ use crate::error::GcodeError;
 pub enum Feature {
     /// First-layer adhesion skirt.
     Skirt,
+    /// First-layer adhesion brim, attached to the part.
+    Brim,
+    /// Skin printed over air, anchored at both ends.
+    Bridge,
+    /// Sacrificial support column.
+    Support,
+    /// Dense support layers in contact with the part.
+    SupportInterface,
     /// Outermost wall loop.
     Outer,
     /// Second and later wall loops.
@@ -32,6 +40,10 @@ impl Feature {
     pub fn label(self) -> &'static str {
         match self {
             Feature::Skirt => "Skirt",
+            Feature::Brim => "Brim",
+            Feature::Bridge => "Bridge",
+            Feature::Support => "Support",
+            Feature::SupportInterface => "Support interface",
             Feature::Outer => "Outer wall",
             Feature::Inner => "Inner wall",
             Feature::Thin => "Gap infill",
@@ -42,7 +54,9 @@ impl Feature {
 
     fn rank(self, cfg: &PrinterConfig) -> i32 {
         match self {
-            Feature::Skirt => -1,
+            Feature::Skirt => -3,
+            Feature::Brim => -2,
+            Feature::Support | Feature::SupportInterface => -1,
             Feature::Outer => {
                 if cfg.inner_walls_first {
                     20
@@ -60,6 +74,7 @@ impl Feature {
             }
             Feature::Solid => 40,
             Feature::Sparse => 41,
+            Feature::Bridge => 43,
         }
     }
 }
@@ -77,6 +92,8 @@ pub struct Path {
     pub feature: Feature,
     /// Print order rank; lower ranks print first.
     pub rank: i32,
+    /// Unsupported span this path bridges, in millimetres; 0 when it bridges none.
+    pub span: f64,
 }
 
 /// Totals for one emitted file.
@@ -206,6 +223,10 @@ fn feature_of(kind: Kind) -> Feature {
         Kind::Middle => Feature::Thin,
         Kind::Solid => Feature::Solid,
         Kind::Infill => Feature::Sparse,
+        Kind::Brim => Feature::Brim,
+        Kind::Bridge | Kind::BridgeAnchor => Feature::Bridge,
+        Kind::Support => Feature::Support,
+        Kind::SupportInterface => Feature::SupportInterface,
     }
 }
 
@@ -230,12 +251,21 @@ fn path_from(line: &Line, tx: f64, ty: f64, cfg: &PrinterConfig) -> Option<Path>
         width.reverse();
     }
     let feature = feature_of(line.kind);
+    let span = if feature == Feature::Bridge && pts.len() > 1 {
+        pts[0].dist(pts[pts.len() - 1])
+    } else {
+        0.0
+    };
     let mut path = Path {
         pts,
         width,
         closed: line.closed,
         feature,
-        rank: feature.rank(cfg),
+        rank: match line.kind {
+            Kind::BridgeAnchor => feature.rank(cfg) - 1,
+            _ => feature.rank(cfg),
+        },
+        span,
     };
     if path.closed && cfg.seam == Seam::Aligned {
         let s = seam_index(&path.pts);
@@ -312,17 +342,54 @@ fn order(mut paths: Vec<Path>, mut pos: V2, seam: Seam) -> (Vec<Path>, V2, f64) 
 fn base_speed(feature: Feature, cfg: &PrinterConfig, first_layer: bool) -> f64 {
     let speed = match feature {
         Feature::Skirt => cfg.first_layer_speed,
+        Feature::Brim => cfg.first_layer_speed,
         Feature::Outer => cfg.outer_wall_speed,
         Feature::Inner => cfg.inner_wall_speed,
         Feature::Thin => cfg.thin_speed,
         Feature::Solid => cfg.solid_speed,
         Feature::Sparse => cfg.infill_speed,
+        Feature::Bridge => cfg.bridge_speed,
+        Feature::Support => cfg.support_speed,
+        Feature::SupportInterface => cfg.support_interface_speed,
     };
-    if first_layer {
+    if first_layer && feature != Feature::Bridge {
         speed.min(cfg.first_layer_speed)
     } else {
         speed
     }
+}
+
+/// Bridge extrusion height: one layer, or one nozzle diameter for thick bridges.
+fn bridge_height(cfg: &PrinterConfig, layer_height: f64) -> f64 {
+    if cfg.thick_bridges {
+        cfg.nozzle_diameter
+    } else {
+        layer_height
+    }
+}
+
+/// Bridge flow multiplier, adjusted with the span past `bridge_span_ref`.
+///
+/// Sag is not linear in flow, and the sign is not obvious: an external bridge
+/// that droops hangs from its own mass, so thinning the strand past a few beads
+/// helps more than fattening it. Both slicers under comparison apply one flow to
+/// every span, so the coefficient cannot be measured from them either; the
+/// ladder coupon in `fixtures/bridge_ladder.stl` gives four spans in one print
+/// for tuning it.
+fn bridge_flow_scale(cfg: &PrinterConfig, span: f64) -> f64 {
+    let over = (span - cfg.bridge_span_ref).max(0.0);
+    cfg.bridge_flow * (1.0 + cfg.bridge_span_flow * over)
+}
+
+/// Bridge speed for a span, falling with span and never below a floor.
+///
+/// A long bridge pulls its own bead into a straight line only while the bead is
+/// still molten; slowing down gives each line more time to cool against the
+/// anchors before the next one lands on it.
+fn bridge_speed_span(cfg: &PrinterConfig, span: f64) -> f64 {
+    let over = (span - cfg.bridge_span_ref).max(0.0);
+    let scale = (1.0 - cfg.bridge_span_speed * over).max(0.4);
+    (cfg.bridge_speed * scale).max(5.0)
 }
 
 fn skirt_paths(first: &PlannedLayer, tx: f64, ty: f64, cfg: &PrinterConfig) -> Vec<Path> {
@@ -354,6 +421,7 @@ fn skirt_paths(first: &PlannedLayer, tx: f64, ty: f64, cfg: &PrinterConfig) -> V
             closed: true,
             feature: Feature::Skirt,
             rank: -1,
+            span: 0.0,
         });
     }
     out
@@ -372,11 +440,17 @@ fn placement(extent: ModelExtent, cfg: &PrinterConfig) -> (f64, f64) {
 }
 
 fn check_fit(extent: ModelExtent, cfg: &PrinterConfig) -> Result<(), GcodeError> {
-    let margin = if cfg.skirt_loops > 0 {
+    let skirt = if cfg.skirt_loops > 0 {
         cfg.skirt_distance + cfg.skirt_loops as f64 * cfg.line_width
     } else {
         0.0
     };
+    let brim = if cfg.brim_loops > 0 {
+        cfg.brim_gap + cfg.brim_loops as f64 * cfg.line_width
+    } else {
+        0.0
+    };
+    let margin = skirt.max(brim);
     let width = extent.xy.width() + 2.0 * margin;
     let depth = extent.xy.height() + 2.0 * margin;
     if width > cfg.bed_x - 2.0 || depth > cfg.bed_y - 2.0 {
@@ -408,12 +482,25 @@ struct Writer<'a> {
     last_f: f64,
     last_feature: Option<Feature>,
     previous_feature: Option<Feature>,
+    fan_pwm: i64,
+    fan_saved: Option<i64>,
+    accel_saved: bool,
     no_hop: bool,
     stats: GcodeStats,
     bbox_set: bool,
 }
 
 impl Writer<'_> {
+    fn restore_limits(&mut self) {
+        if let Some(pwm) = self.fan_saved.take() {
+            let _ = writeln!(self.out, "M106 S{pwm}");
+        }
+        if self.accel_saved {
+            self.accel_saved = false;
+            let _ = writeln!(self.out, "RESTORE_VELOCITY_LIMIT");
+        }
+    }
+
     fn touch(&mut self, p: V2) {
         if !self.bbox_set {
             self.stats.bbox_min = p;
@@ -491,8 +578,12 @@ impl Writer<'_> {
     }
 
     fn extrude(&mut self, path: &Path, height: f64, speed: f64) {
-        let is_infill =
-            |f: Option<Feature>| matches!(f, Some(Feature::Solid) | Some(Feature::Sparse));
+        let is_infill = |f: Option<Feature>| {
+            matches!(
+                f,
+                Some(Feature::Solid) | Some(Feature::Sparse) | Some(Feature::Bridge)
+            )
+        };
         let threshold = if is_infill(self.previous_feature) && is_infill(Some(path.feature)) {
             self.cfg.infill_retract_min_travel
         } else {
@@ -503,8 +594,37 @@ impl Writer<'_> {
         self.previous_feature = Some(path.feature);
         if self.last_feature != Some(path.feature) {
             let _ = writeln!(self.out, ";TYPE:{}", path.feature.label());
+            if path.feature == Feature::Bridge {
+                if self.fan_saved.is_none() {
+                    self.fan_saved = Some(self.fan_pwm);
+                    let pwm = (self.cfg.bridge_fan_speed * 2.55).round() as i64;
+                    let _ = writeln!(self.out, "M106 S{pwm}");
+                }
+                if self.cfg.bridge_acceleration > 0.0
+                    && self.cfg.flavor == Flavor::Klipper
+                    && !self.accel_saved
+                {
+                    self.accel_saved = true;
+                    let _ = writeln!(self.out, "SAVE_VELOCITY_LIMIT");
+                    let _ = writeln!(
+                        self.out,
+                        "SET_VELOCITY_LIMIT ACCEL={:.0}",
+                        self.cfg.bridge_acceleration
+                    );
+                }
+            } else {
+                self.restore_limits();
+            }
             self.last_feature = Some(path.feature);
         }
+        let (height, flow) = if path.feature == Feature::Bridge {
+            (
+                bridge_height(self.cfg, height),
+                self.cfg.flow * bridge_flow_scale(self.cfg, path.span),
+            )
+        } else {
+            (height, self.cfg.flow)
+        };
         let n = path.pts.len();
         let segments = if path.closed { n } else { n - 1 };
         let area = self.cfg.filament_area();
@@ -516,7 +636,7 @@ impl Writer<'_> {
                 continue;
             }
             let width = 0.5 * (path.width[i] + path.width[(i + 1) % n]);
-            let volume = len * width * height * self.cfg.flow;
+            let volume = len * width * height * flow;
             let delta = volume / area;
             if (width - self.last_width).abs() > 0.02 {
                 let _ = writeln!(self.out, ";WIDTH:{:.3}", width);
@@ -585,6 +705,9 @@ pub fn generate(
         last_f: -1.0,
         last_feature: None,
         previous_feature: None,
+        fan_pwm: 0,
+        fan_saved: None,
+        accel_saved: false,
         no_hop: false,
         stats: GcodeStats::default(),
         bbox_set: false,
@@ -665,8 +788,18 @@ pub fn generate(
             .iter()
             .map(|p| {
                 let widest = p.width.iter().cloned().fold(0.0, f64::max).max(1e-6);
-                base_speed(p.feature, cfg, first_layer)
-                    .min(cfg.max_volumetric_speed / (widest * height * cfg.flow))
+                if p.feature == Feature::Bridge {
+                    let section = widest
+                        * bridge_height(cfg, height)
+                        * cfg.flow
+                        * bridge_flow_scale(cfg, p.span);
+                    bridge_speed_span(cfg, p.span)
+                        .min(cfg.max_volumetric_speed / section)
+                        .min(cfg.max_speed)
+                } else {
+                    base_speed(p.feature, cfg, first_layer)
+                        .min(cfg.max_volumetric_speed / (widest * height * cfg.flow))
+                }
             })
             .collect();
         let mut extrude_time = 0.0;
@@ -701,7 +834,8 @@ pub fn generate(
             let _ = writeln!(w.out, "M104 S{}", cfg.nozzle_temp);
         }
         if printed == cfg.fan_start_layer && cfg.fan_speed > 0.0 {
-            let _ = writeln!(w.out, "M106 S{}", (cfg.fan_speed * 2.55).round() as i64);
+            w.fan_pwm = (cfg.fan_speed * 2.55).round() as i64;
+            let _ = writeln!(w.out, "M106 S{}", w.fan_pwm);
         }
         w.retract();
         w.z_move(z);
@@ -713,6 +847,7 @@ pub fn generate(
         for (p, speed) in ordered.iter().zip(&speeds) {
             w.extrude(p, height, speed * factor);
         }
+        w.restore_limits();
         printed += 1;
     }
     w.stats.layers = printed;

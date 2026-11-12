@@ -1,0 +1,15 @@
+[package]
+name = "hfw-support"
+description = "Overhang support detection, projection and fill."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-infill = { path = "../infill" }
+hfw-kernel = { path = "../kernel" }
+hfw-walls = { path = "../walls" }
+
+[lints]
+workspace = true

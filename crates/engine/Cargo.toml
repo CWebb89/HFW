@@ -13,6 +13,7 @@ hfw-mesh = { path = "../mesh" }
 hfw-slicing = { path = "../slicing" }
 hfw-walls = { path = "../walls" }
 hfw-infill = { path = "../infill" }
+hfw-support = { path = "../support" }
 hfw-toolpath = { path = "../toolpath" }
 
 [lints]

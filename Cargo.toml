@@ -7,6 +7,7 @@ members = [
     "crates/slicing",
     "crates/walls",
     "crates/infill",
+    "crates/support",
     "crates/toolpath",
     "crates/config",
     "crates/gcode",

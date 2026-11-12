@@ -75,9 +75,9 @@ skin.
 At 100% infill the difference vanishes, which is the proof that this is a
 skin-versus-wall accounting policy and not a geometry error.
 
-### Which one is right is not settled by volume
+### Which one is right — settled by print, 2026-11-11
 
-Two readings are consistent with all the numbers:
+Two readings were consistent with all the numbers:
 
 1. **hfw is under-filling.** Sloped top surfaces need solid material behind the
    perimeter; without it the visible surface of a dome is 15% infill with wall
@@ -87,11 +87,13 @@ Two readings are consistent with all the numbers:
    deposits material the surface does not need, which is exactly why both sit
    above the analytic volume at 100% while hfw sits below it.
 
-Volume measurements cannot separate these. A print can: slice the sphere and the
-torus, print both, and inspect the surface under a light. `docs/FIRST_PRINT.md`
-covers the print procedure. Until that is done, the three failing fixtures stay
-red on purpose: the oracle is there to notice change, and a red result with a
-documented cause is more useful than a green one with a hidden assumption.
+The torus was printed at 15% infill (job `0003EA`, 40 layers, 819.3 mm): no
+pinholes, no gaps between perimeter loops, no droop on the sloped outer surface.
+Measured 32.00 mm outer diameter and 8.000 mm tall, both nominal, and the G-code's
+wall centrelines span 31.59 mm plus half a bead each side — the file agrees with
+the part. Reading 2 is correct: the references over-fill sloped surfaces. The
+three failing fixtures stay red because the tolerance documents the difference,
+not because the output is wrong; the note beside each failure says so.
 
 ## Note on per-feature classes
 

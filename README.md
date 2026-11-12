@@ -81,22 +81,31 @@ printer profile and G-code output.
   centre beads, corner recovery, width-aware simplification.
 - Top/bottom skin classification from a bounded ring of layer masks.
 - Wall-clipped rectilinear and grid infill, at a density you ask for.
+- Supports: overhang seeding by angle on the same masks the bridge pass uses,
+  projected columns with XY/Z clearance, dense interface layers, build-plate-only
+  mode; and tree supports that sample contact tips, lean at a bounded angle,
+  fuse on contact and cone out into trunks. Stage 3 of `docs/SUPPORTS.md`
+  (span-budgeted props) is next.
 - Coverage, spill and width statistics against the model cross-section.
 - Validated `key = value` printer profiles, with Voron/Klipper and generic
   Marlin examples in `profiles/`.
 - G-code: seam placement, path ordering, retraction, z-hop, per-segment
-  extrusion from the bead's own width, pressure advance, cooling, skirt, bed
-  placement and fit checks.
+  extrusion from the bead's own width, pressure advance, cooling, skirt, a
+  solid filled brim, bridge detection with its own direction, speed and fan,
+  the full bridge tuning set from both reference slicers plus per-span flow and
+  speed compensation, bed placement and fit checks.
 - An independent verifier that re-reads the written file and checks bed limits,
   feedrates, temperatures, heater-before-extrusion, Z monotonicity, volumetric
   flow, extrusion-width plausibility and retraction balance.
 
 ## What it does not do
 
-No supports, no bridging or overhang rules, no multi-material, no toolchanger,
-no acceleration model, no 3MF/AMF/OBJ, no adaptive layer height. `docs/ROADMAP.md`
-ranks the gap, and `docs/ORACLE.md` records the measured difference to two
-established slicers.
+No span-budgeted props yet (stage 3),
+no multi-material, no toolchanger, no acceleration model, no 3MF/AMF/OBJ, no
+adaptive layer height.
+The brim is first-layer only and has no `brim_ears`. `docs/ROADMAP.md` ranks the
+gap, and `docs/ORACLE.md` records the measured difference to two established
+slicers.
 
 ## Licence
 
