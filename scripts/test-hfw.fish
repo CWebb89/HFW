@@ -1823,6 +1823,28 @@ $bin fixtures/cube.stl fixtures/sphere.stl --preset "$tmp/base.cfg" --layer-heig
 cmp -s "$tmp/os.gcode" "$tmp/os-plain.gcode"
  and fail 'per-object settings changed nothing in the output'
 
+section 'Per-layer expressions'
+
+printf '%s\n' \
+    'nozzle_diameter = 0.4' \
+    'temperature = 210' \
+    'before_layer_gcode = {if layer_z > 0.5}M201 X{interpolate_table(layer_z, (0,6000), (0.5,6000), (2,2000))}{else}M201 X9000{endif}' \
+    >"$tmp/perlayer.ini"
+$bin fixtures/cube.stl --preset "$tmp/perlayer.ini" --layer-height 0.2 \
+    --out-dir "$tmp/perlayer" --gcode "$tmp/perlayer.gcode" >"$tmp/perlayer.out" 2>&1
+ or fail 'a preset with a per-layer conditional failed to slice'
+grep -q '{' "$tmp/perlayer.gcode"
+ and fail 'a per-layer expression reached the file as literal text'
+set -l first (grep -m1 -o 'M201 X[0-9]*' "$tmp/perlayer.gcode")
+test "$first" = 'M201 X9000'
+ or fail "the layer under the threshold took the wrong branch ($first)"
+set -l last (grep -o 'M201 X[0-9]*' "$tmp/perlayer.gcode" | tail -1)
+test "$last" = 'M201 X2000'
+ or fail "the top layer was not the table's end value ($last)"
+if not grep -q '6[0-9][0-9][0-9]' "$tmp/perlayer.gcode"
+    fail 'the table was read at one height for the whole print'
+end
+
 section 'Two-reference oracle'
 
 if command -q prusa-slicer; and command -q orca-slicer

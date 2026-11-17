@@ -87,7 +87,9 @@ pub(crate) fn expand(text: &str, lookup: Lookup<'_>) -> (String, Vec<String>) {
                 out.push('{');
                 out.push_str(token);
                 out.push('}');
-                if !unknown.iter().any(|seen: &String| seen == token) {
+                // A conditional the writer decides is not a placeholder the intake
+                // report should call a typo.
+                if !deferred(token) && !unknown.iter().any(|seen: &String| seen == token) {
                     unknown.push(token.to_owned());
                 }
             }
@@ -96,6 +98,39 @@ pub(crate) fn expand(text: &str, lookup: Lookup<'_>) -> (String, Vec<String>) {
     }
     out.push_str(rest);
     (out, unknown)
+}
+
+/// Whether a token is decided by the writer rather than here: a conditional, or a
+/// function of the layer height, both of which the writer knows and this does not.
+pub(crate) fn deferred(token: &str) -> bool {
+    let token = token.trim();
+    token.starts_with("if ")
+        || token == "else"
+        || token == "endif"
+        || token.starts_with("interpolate_table(")
+}
+
+/// The straight line through \p points, read at \p x, held flat past either end.
+fn interpolate(points: &[(f64, f64)], x: f64) -> f64 {
+    let first = points[0];
+    let last = points[points.len() - 1];
+    if x <= first.0 {
+        return first.1;
+    }
+    if x >= last.0 {
+        return last.1;
+    }
+    for window in points.windows(2) {
+        let (left, right) = (window[0], window[1]);
+        if x >= left.0 && x <= right.0 {
+            if right.0 == left.0 {
+                return right.1;
+            }
+            let t = (x - left.0) / (right.0 - left.0);
+            return left.1 + t * (right.1 - left.1);
+        }
+    }
+    last.1
 }
 
 /// Whether the text of one `{if}` block belongs in the output.
@@ -108,7 +143,7 @@ enum Branch {
 
 /// Resolves `{if …}` / `{else}` / `{endif}` blocks, dropping untaken branches.
 fn expand_conditions(text: &str, lookup: Lookup<'_>) -> (String, Vec<String>) {
-    let mut unknown: Vec<String> = Vec::new();
+    let unknown: Vec<String> = Vec::new();
     let mut out = String::with_capacity(text.len());
     let mut emitting: Vec<Branch> = Vec::new();
     let mut rest = text;
@@ -122,10 +157,10 @@ fn expand_conditions(text: &str, lookup: Lookup<'_>) -> (String, Vec<String>) {
             out.push_str(&rest[..at]);
         }
         if let Some(condition) = token.trim().strip_prefix("if ") {
-            // A condition this cannot judge - anything reading a per-layer value
-            // such as `layer_z` - keeps both branches rather than guessing at
-            // one, and is named in the report so the profile's author can see
-            // that the choice was not made.
+            // A condition this cannot judge reads a per-layer value such as
+            // `layer_z`, which the writer knows and this does not. The block goes
+            // through whole, markers and all, so the writer decides it one layer at
+            // a time instead of both branches reaching the printer.
             let taken = match evaluate(condition, lookup) {
                 Some(value) => {
                     if Value::of(&value).truthy() {
@@ -134,16 +169,14 @@ fn expand_conditions(text: &str, lookup: Lookup<'_>) -> (String, Vec<String>) {
                         Branch::Off
                     }
                 }
-                None => {
-                    let condition = condition.trim().to_owned();
-                    if !unknown.contains(&condition) {
-                        unknown.push(condition);
-                    }
-                    Branch::Both
-                }
+                None => Branch::Both,
             };
             emitting.push(if live { taken } else { Branch::Off });
+            if live && taken == Branch::Both {
+                out.push_str(&rest[at..at + end + 1]);
+            }
         } else if token.trim() == "else" {
+            let both = matches!(emitting.last(), Some(Branch::Both));
             if let Some(last) = emitting.last_mut() {
                 *last = match last {
                     Branch::On => Branch::Off,
@@ -151,8 +184,15 @@ fn expand_conditions(text: &str, lookup: Lookup<'_>) -> (String, Vec<String>) {
                     Branch::Both => Branch::Both,
                 };
             }
+            if both && live {
+                out.push_str(&rest[at..at + end + 1]);
+            }
         } else if token.trim() == "endif" {
+            let both = matches!(emitting.last(), Some(Branch::Both));
             emitting.pop();
+            if both && live {
+                out.push_str(&rest[at..at + end + 1]);
+            }
         } else if live {
             out.push_str(&rest[at..at + end + 1]);
         }
@@ -258,7 +298,7 @@ fn tokenize(expr: &str) -> Option<Vec<Token>> {
             at += 2;
             continue;
         }
-        if "?:<>+-*/%!".contains(c) {
+        if "?:<>+-*/%!,".contains(c) {
             tokens.push(Token::Symbol(c.to_string()));
             at += 1;
             continue;
@@ -408,6 +448,75 @@ impl Cursor {
         self.primary(lookup)
     }
 
+    /// A function the dialects carry. Only the one every profile uses is
+    /// implemented: a call this does not know fails, which leaves the text as it
+    /// was written for the caller to report rather than inventing a value.
+    fn call(&mut self, name: &str, lookup: Lookup<'_>) -> Option<Value> {
+        match name {
+            "interpolate_table" => self.interpolate_table(lookup),
+            "min" => self.aggregate(lookup, true),
+            "max" => self.aggregate(lookup, false),
+            _ => None,
+        }
+    }
+
+    /// `min(a, b, …)` / `max(a, b, …)`: whichever of the arguments is smallest or
+    /// largest. Machine start G-code uses them to keep a bed-mesh probe inside the
+    /// plate when the model sits against an edge.
+    fn aggregate(&mut self, lookup: Lookup<'_>, smallest: bool) -> Option<Value> {
+        if !matches!(self.peek(), Some(Token::Open)) {
+            return None;
+        }
+        self.at += 1;
+        let mut value = self.ternary(lookup)?.number()?;
+        while self.eat(",") {
+            let next = self.ternary(lookup)?.number()?;
+            value = if smallest {
+                value.min(next)
+            } else {
+                value.max(next)
+            };
+        }
+        if !matches!(self.peek(), Some(Token::Close)) {
+            return None;
+        }
+        self.at += 1;
+        Some(Value::Number(value))
+    }
+
+    /// `interpolate_table(x, (a, b), (c, d), …)`: the value at `x` on the straight
+    /// line through the points given, held flat past either end. Machine G-code
+    /// uses it to taper acceleration and junction deviation against height.
+    fn interpolate_table(&mut self, lookup: Lookup<'_>) -> Option<Value> {
+        if !matches!(self.peek(), Some(Token::Open)) {
+            return None;
+        }
+        self.at += 1;
+        let x = self.ternary(lookup)?.number()?;
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        while self.eat(",") {
+            if !matches!(self.peek(), Some(Token::Open)) {
+                return None;
+            }
+            self.at += 1;
+            let at = self.ternary(lookup)?.number()?;
+            if !self.eat(",") {
+                return None;
+            }
+            let value = self.ternary(lookup)?.number()?;
+            if !matches!(self.peek(), Some(Token::Close)) {
+                return None;
+            }
+            self.at += 1;
+            points.push((at, value));
+        }
+        if !matches!(self.peek(), Some(Token::Close)) || points.is_empty() {
+            return None;
+        }
+        self.at += 1;
+        Some(Value::Number(interpolate(&points, x)))
+    }
+
     fn primary(&mut self, lookup: Lookup<'_>) -> Option<Value> {
         let token = self.peek()?.clone();
         match token {
@@ -429,6 +538,9 @@ impl Cursor {
                     }
                     _ => None,
                 };
+                if index.is_none() && matches!(self.peek(), Some(Token::Open)) {
+                    return self.call(&name, lookup);
+                }
                 Some(Value::of(&lookup(&name, index)?))
             }
             Token::Open => {
@@ -496,11 +608,11 @@ mod tests {
     }
 
     #[test]
-    fn a_condition_reading_a_per_layer_value_keeps_both_branches_and_is_named() {
-        let (text, unknown) = rendered("{if layer_z > 150}M201 X6000{else}M201 X9000{endif}");
-        assert!(text.contains("M201 X6000"), "{text}");
-        assert!(text.contains("M201 X9000"), "{text}");
-        assert_eq!(unknown, vec!["layer_z > 150".to_owned()]);
+    fn a_condition_reading_a_per_layer_value_is_left_for_the_writer() {
+        // `layer_z` is not known here and is known to the writer, so the decision is
+        // not made now and not guessed at: the block goes through whole.
+        let (text, _) = rendered("{if layer_z > 150}M201 X6000{else}M201 X9000{endif}");
+        assert_eq!(text, "{if layer_z > 150}M201 X6000{else}M201 X9000{endif}");
     }
 
     #[test]
@@ -508,5 +620,33 @@ mod tests {
         let (text, unknown) = rendered("M862.1 F{(missing[0] ? 1 : 0)}");
         assert_eq!(text, "M862.1 F{(missing[0] ? 1 : 0)}");
         assert_eq!(unknown.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    fn lookup(name: &str, _index: Option<usize>) -> Option<String> {
+        match name {
+            "layer_z" => Some("1.5".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_table_is_read_at_the_height_asked_for() {
+        let (text, unknown) = expand(
+            "M201 X{interpolate_table(layer_z, (0,6000), (1,6000), (2,2000))}",
+            &lookup,
+        );
+        assert_eq!(text, "M201 X4000");
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
+    fn a_table_holds_flat_past_either_end() {
+        assert_eq!(interpolate(&[(0.0, 6000.0), (1.0, 1000.0)], -5.0), 6000.0);
+        assert_eq!(interpolate(&[(0.0, 6000.0), (1.0, 1000.0)], 9.0), 1000.0);
     }
 }

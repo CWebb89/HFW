@@ -1328,6 +1328,31 @@ impl PrinterConfig {
         inside
     }
 
+    /// Whether a point is within \p margin of the bed, measuring outward from every
+    /// edge of the outline.
+    ///
+    /// A machine extrudes just past the outline as a matter of course -- a Prusa
+    /// profile primes along Y -2.5 before the first layer -- so "inside the bed" as
+    /// a limit on plastic is the outline grown by the width of a prime line, not the
+    /// outline itself.
+    pub fn bed_contains_within(&self, x: f64, y: f64, margin: f64) -> bool {
+        if self.bed_contains(x, y) {
+            return true;
+        }
+        let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+        for (px, py) in &self.bed_shape {
+            min_x = min_x.min(*px);
+            max_x = max_x.max(*px);
+            min_y = min_y.min(*py);
+            max_y = max_y.max(*py);
+        }
+        if self.bed_shape.len() < 3 {
+            (min_x, max_x, min_y, max_y) = (0.0, self.bed_x, 0.0, self.bed_y);
+        }
+        x >= min_x - margin && x <= max_x + margin && y >= min_y - margin && y <= max_y + margin
+    }
+
     /// The bed outline as `{bed_shape}` spells it: `0x0,350x0,350x350`.
     pub fn bed_shape_text(&self) -> String {
         if self.bed_shape.is_empty() {
@@ -1362,6 +1387,34 @@ impl PrinterConfig {
         for (key, value) in base.iter().chain(extra.iter()) {
             out = out.replace(key, value);
         }
-        out
+        // `layer_z`, `layer_num` and the plate's settings are all in hand here, so
+        // this is the pass where a reference profile's `{if layer_z > 150}` and its
+        // `interpolate_table(layer_z, …)` become real commands. An expression still
+        // unresolved here stays as written, and the verifier reports it.
+        let values: Vec<(String, String)> = base
+            .iter()
+            .chain(extra.iter())
+            .map(|(key, value)| {
+                (
+                    key.trim_matches(|c| c == '{' || c == '}').to_owned(),
+                    value.clone(),
+                )
+            })
+            .collect();
+        let lookup = |name: &str, index: Option<usize>| -> Option<String> {
+            values
+                .iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, value)| match index {
+                    Some(index) => value
+                        .split(',')
+                        .nth(index)
+                        .map(|part| part.trim().to_owned()),
+                    None => Some(value.clone()),
+                })
+                .or_else(|| crate::dialect::intrinsic(self, name))
+        };
+        let (expanded, _) = crate::expression::expand(&out, &lookup);
+        expanded
     }
 }

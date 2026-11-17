@@ -179,6 +179,9 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
     let min_x = if cfg.origin_center { -half_x } else { 0.0 };
     let min_y = if cfg.origin_center { -half_y } else { 0.0 };
     let tolerance = 1e-3;
+    // How far a machine's own prime line runs past the bed edge: a Prusa profile
+    // primes at Y -2.5, and a 5 mm line leaves room for a wider one.
+    let prime_margin = 10.0;
     let max_errors = 25;
     for (index, line) in gcode.lines().enumerate() {
         let number = index + 1;
@@ -319,11 +322,15 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                     };
                 }
                 // Plastic outside the bed is a ruined print; the head going there is
-                // every machine's park, prime and wipe. Reference start and end
-                // G-code parks the head a few millimetres past the bed edge as a
-                // matter of course, so only a move that extrudes is held to the bed.
+                // every machine's park, prime and wipe. A reference profile primes
+                // along Y -2.5 and parks at X bed+5 as a matter of course, so the
+                // outline is held to moves that extrude, grown by a prime line.
                 let prints = extrusion.is_some_and(|delta| delta > 0.0);
-                if prints && x.is_finite() && (x < min_x - tolerance || x > half_x + tolerance) {
+                if prints
+                    && x.is_finite()
+                    && (x < min_x - prime_margin - tolerance
+                        || x > half_x + prime_margin + tolerance)
+                {
                     push(
                         &mut r,
                         max_errors,
@@ -336,7 +343,7 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                     } else {
                         (0.0, 0.0)
                     };
-                    if !cfg.bed_contains(x + sx, y + sy) {
+                    if !cfg.bed_contains_within(x + sx, y + sy, prime_margin) {
                         push(
                             &mut r,
                             max_errors,
@@ -344,7 +351,11 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                         );
                     }
                 }
-                if prints && y.is_finite() && (y < min_y - tolerance || y > half_y + tolerance) {
+                if prints
+                    && y.is_finite()
+                    && (y < min_y - prime_margin - tolerance
+                        || y > half_y + prime_margin + tolerance)
+                {
                     push(
                         &mut r,
                         max_errors,

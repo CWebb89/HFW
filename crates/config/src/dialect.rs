@@ -439,7 +439,12 @@ fn fill_placeholders(config: &mut PrinterConfig, preset: &Preset, report: &mut I
             match value {
                 Some(value) => filled.push_str(&value),
                 None => {
-                    if !unresolved.iter().any(|seen| seen == name) {
+                    // A conditional is decided by the writer, which knows the layer
+                    // height this one does not; naming it here would report the
+                    // profile's own control flow as a typo.
+                    if !crate::expression::deferred(token)
+                        && !unresolved.iter().any(|seen| seen == name)
+                    {
                         unresolved.push(name.to_owned());
                     }
                     filled.push(open);
@@ -494,7 +499,7 @@ fn first_value(value: &str) -> String {
 }
 
 /// A placeholder's value when the preset does not carry it but the engine does.
-fn intrinsic(config: &PrinterConfig, name: &str) -> Option<String> {
+pub(crate) fn intrinsic(config: &PrinterConfig, name: &str) -> Option<String> {
     let number = |value: f64| Some(format!("{value}"));
     match name {
         "first_layer_temperature" => number(config.first_nozzle_temp),
@@ -511,6 +516,8 @@ fn intrinsic(config: &PrinterConfig, name: &str) -> Option<String> {
         "num_extruders" => Some("1".to_owned()),
         "bed_shape" => Some(config.bed_shape_text()),
         "max_layer_z" | "max_print_height" => number(config.max_z),
+        "filament_type" => Some(config.filament_type.clone()),
+        "filament_abrasive" => Some(if config.filament_abrasive { "1" } else { "0" }.to_owned()),
         _ => None,
     }
 }
