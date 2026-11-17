@@ -684,15 +684,23 @@ pub(crate) fn flat_json(text: &str) -> Option<Vec<(String, String)>> {
         if rest.starts_with('{') {
             let after = skip_balanced(rest, '{', '}')?;
             if let Some(nested) = flat_json(rest) {
-                // An empty value in a configuration dump means "inherit", not
-                // "clear": every section of the dump carries the full key list, so
-                // a later section's blank start G-code would otherwise erase the
-                // printer's own.
-                pairs.extend(
-                    nested
-                        .into_iter()
-                        .filter(|(_, value)| !value.trim().is_empty()),
-                );
+                // A setting's value is itself an object only when the writer had
+                // more to say than one number: `{"is_percent": true, "value": 85}`
+                // is 85%, and reading it as two settings would both lose the
+                // value and invent keys named `value` and `is_percent`.
+                if let Some(value) = percent_setting(&nested) {
+                    pairs.push((key, value));
+                } else {
+                    // An empty value in a configuration dump means "inherit", not
+                    // "clear": every section of the dump carries the full key list,
+                    // so a later section's blank start G-code would otherwise erase
+                    // the printer's own.
+                    pairs.extend(
+                        nested
+                            .into_iter()
+                            .filter(|(_, value)| !value.trim().is_empty()),
+                    );
+                }
             }
             rest = after;
         } else {
@@ -712,6 +720,27 @@ pub(crate) fn flat_json(text: &str) -> Option<Vec<(String, String)>> {
         }
         return None;
     }
+}
+
+/// A value object's own settings when the object is the writer's spelling of a
+/// percentage, `{"is_percent": true, "value": 85}`.
+fn percent_setting(nested: &[(String, String)]) -> Option<String> {
+    let value = |name: &str| {
+        nested
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.trim())
+    };
+    if nested.len() != 2 || value("is_percent").is_none() {
+        return None;
+    }
+    let number = value("value")?;
+    let percent = matches!(value("is_percent")?, "true" | "True" | "1");
+    Some(if percent {
+        format!("{number}%")
+    } else {
+        number.to_owned()
+    })
 }
 
 fn json_string(text: &str) -> Option<(String, &str)> {

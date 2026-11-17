@@ -1216,19 +1216,27 @@ printf 'Verified: a 0.5 mm slice resolution cut the sphere from %s moves and %s 
 rm -f $volumes
 
 section 'Thin walls are a gate, not a hardwired behaviour'
+# A thin object is printed by its centreline or not at all. Switching thin-wall
+# detection off therefore used to erase it from the plate, one of the ways a
+# layer could be planned and then silently not printed.
 cp "$tmp/base.cfg" "$tmp/thin.cfg"
 printf 'thin_walls = false\n' >>"$tmp/thin.cfg"
 $bin fixtures/thin_wall.stl --profile "$tmp/thin.cfg" --layer-height 0.2 --mode hfw \
     --out-dir "$tmp/thin" --gcode "$tmp/thin.gcode" >"$tmp/thin.log" 2>&1
  or fail 'thin_walls = false failed to slice'
-if grep -q ';TYPE:Gap infill' "$tmp/thin.gcode"
-    fail 'thin_walls = false still beads a single trace'
-end
 $bin fixtures/thin_wall.stl --profile "$tmp/base.cfg" --layer-height 0.2 --mode hfw \
     --out-dir "$tmp/thinon" --gcode "$tmp/thinon.gcode" >"$tmp/thinon.log" 2>&1
  or fail 'the default thin-wall profile failed to slice'
 grep -q ';TYPE:Gap infill' "$tmp/thinon.gcode"; or fail 'the thin fixture beaded nothing by default'
-printf 'Verified: thin walls are beaded by default and dropped when switched off.\n'
+set off_layers (grep -c '^;LAYER_CHANGE' "$tmp/thin.gcode")
+set on_layers (grep -c '^;LAYER_CHANGE' "$tmp/thinon.gcode")
+test $off_layers -eq $on_layers
+ or fail "thin_walls = false printed $off_layers layers where the default printed $on_layers"
+set off_plastic (grep -c '^G1 X.*E' "$tmp/thin.gcode")
+test $off_plastic -gt 0
+ or fail 'thin_walls = false erased the object instead of printing it'
+printf 'Verified: thin walls are beaded by default, and switching the gate off keeps all %s layers and %s extruding moves.\n' \
+    $off_layers $off_plastic
 
 cp "$tmp/base.cfg" "$tmp/floor.cfg"
 printf 'min_feature_size = 2.0\n' >>"$tmp/floor.cfg"
@@ -1755,6 +1763,30 @@ set changed (diff "$tmp/rate0.gcode" "$tmp/rate1.gcode" | grep -c '^<')
 test $changed -gt 50
  or fail "a 1 mm^3/s^2 rate limit changed only $changed lines, so the ramp never reached the emitter"
 printf 'Verified: a 1 mm^3/s^2 limit rewrites %s moves, holding the flow change from one bead to the next.\n' $changed
+
+section 'Settings that must never erase geometry'
+
+# next-layer hands this engine its own resolved configuration, which nests the
+# three settings groups and writes a percentage as its own object. Reading that
+# dump once lost every printer setting including the bed.
+printf '%s' '{"configuration":{"printer_settings":{"bed_shape":[[0,0],[350,0],[350,350],[0,350]],"nozzle_diameter":[0.4],"printer_model":"Voron 2.4 350"},"print_settings":{"min_bead_width":{"is_percent":true,"value":85},"wall_loops":2},"filament_settings":{"filament_type":["PLA"]}}}' >"$tmp/dump.json"
+$bin fixtures/cube.stl --preset "$tmp/dump.json" --layer-height 0.2 \
+    --out-dir "$tmp/dump" --gcode "$tmp/dump.gcode" >"$tmp/dump.out" 2>&1
+ or fail 'a configuration dump was rejected'
+grep -q 'on a 350 x 350 bed' "$tmp/dump.out"
+ or fail 'a bed outline written as a point list did not reach the plate'
+grep -q 'min_bead_width: unconverted' "$tmp/dump.out"
+ and fail 'a percentage written as an object was not read as a percentage'
+
+# A thin object is printed by its centreline or not at all. Turning off thin
+# wall detection used to drop every cell of such an object and emit nothing.
+printf '%s\n' 'thin_walls = false' 'gap_fill_enabled = false' >"$tmp/thin-off.ini"
+$bin fixtures/thin_wall.stl --preset "$tmp/thin-off.ini" --layer-height 0.2 --out-dir "$tmp/thin-off" >"$tmp/thin-off.out" 2>&1
+ or fail 'the thin-wall run failed'
+grep -qE 'Paths: [0-9]+ walls, [0-9]+ middle' "$tmp/thin-off.out"
+ or fail 'the thin-wall run printed no paths'
+awk -F, 'NR>1 && ($6+$7+$8+$9+$11) > 0 {n++} END {exit !(n>0)}' "$tmp/thin-off/manifest.csv"
+ or fail 'every layer of a thin object was left empty by thin_walls = false'
 
 section 'Two-reference oracle'
 

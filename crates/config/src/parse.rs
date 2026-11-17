@@ -104,7 +104,32 @@ fn first_number(key: &str, value: &str) -> Result<f64, ConfigError> {
 
 /// A bed outline written the way the reference dialects write one:
 /// `0x0,350x0,350x350,0x350`.
+///
+/// A configuration dump carries the same outline as a JSON array of points,
+/// `[[0,0],[350,0],[350,350],[0,350]]`, which flattens to a plain list of
+/// numbers. Both spellings are read: a list with no `x` in it is the numbers of
+/// the points in order.
 fn bed_outline(value: &str) -> Result<Vec<(f64, f64)>, ConfigError> {
+    if !value.contains(['x', 'X']) {
+        let corners: Vec<f64> = value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                part.parse::<f64>().map_err(|_| ConfigError::BadValue {
+                    key: "bed_shape",
+                    why: format!("`{part}` is not a number; a corner reads 350x0"),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        if corners.len() % 2 != 0 {
+            return Err(ConfigError::BadValue {
+                key: "bed_shape",
+                why: format!("{} number(s); points come in pairs", corners.len()),
+            });
+        }
+        return finish_bed(corners.chunks_exact(2).map(|p| (p[0], p[1])).collect());
+    }
     let mut points = Vec::new();
     for pair in value.split(',') {
         let pair = pair.trim();
@@ -127,6 +152,10 @@ fn bed_outline(value: &str) -> Result<Vec<(f64, f64)>, ConfigError> {
         };
         points.push((corner(split.0)?, corner(split.1)?));
     }
+    finish_bed(points)
+}
+
+fn finish_bed(points: Vec<(f64, f64)>) -> Result<Vec<(f64, f64)>, ConfigError> {
     if points.len() < 3 {
         return Err(ConfigError::BadValue {
             key: "bed_shape",
@@ -517,7 +546,7 @@ impl PrinterConfig {
             "filament_diameter" => self.filament_diameter = number(key, value)?,
             "filament_density" => self.filament_density = number(key, value)?,
             "line_width" => self.line_width = number(key, value)?,
-            "min_bead_width" => self.min_bead_width = number(key, value)?,
+            "min_bead_width" => self.min_bead_width = width_mm(key, value, self.nozzle_diameter)?,
             "layer_height" => self.layer_height = number(key, value)?,
             "first_layer_height" => self.first_layer_height = number(key, value)?,
             "variable_layer_height" => self.variable_layer_height = boolean(key, value)?,

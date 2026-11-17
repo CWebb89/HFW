@@ -274,8 +274,12 @@ fn geometry_output_is_deterministic() {
     }
 }
 
+// This test used to assert that `thin_walls = false` left the sheet with no
+// paths at all. That is the defect it now guards against: a thin object is
+// printed by its centreline or not at all, so a setting that switches thin-wall
+// detection off must not erase the object from the plate.
 #[test]
-fn thin_walls_off_drops_the_single_trace() {
+fn thin_walls_off_keeps_the_object_printable() {
     let sheet = mesh("thin_wall.stl");
     let mut s = settings(2);
     s.mode = Mode::Hfw;
@@ -290,7 +294,10 @@ fn thin_walls_off_drops_the_single_trace() {
             .count()
     };
     assert!(middles(&on) > 0, "the fixture printed no thin trace at all");
-    assert_eq!(middles(&off), 0, "thin_walls = false still beaded a trace");
+    assert!(
+        middles(&off) > 0,
+        "thin_walls = false erased the object instead of printing it"
+    );
 }
 
 #[test]

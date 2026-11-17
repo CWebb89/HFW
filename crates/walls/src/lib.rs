@@ -435,7 +435,7 @@ fn classify(
             if let Some((q, dist)) = rg.points.nearest(c, reach) {
                 let rq = rg.rs[q as usize];
                 if dist <= p.ext * rq + 2.0 * p.h && rq < thick_r && d + t <= rq * 1.05 + p.h {
-                    if !p.thin_walls || rg.bd[q as usize].is_none() {
+                    if rg.bd[q as usize].is_none() {
                         kind[id] = NodeKind::Dropped;
                     } else {
                         kind[id] = NodeKind::Thin;
@@ -591,7 +591,11 @@ pub fn generate(region: &Region, p: &Params, mode: Mode) -> Result<Output, Walls
     let mut ridge_dbg = Vec::new();
     let (mut rv, mut rb_n) = (0, 0);
     if let Some(rg) = &ridge {
-        if p.thin_walls && p.gap_fill {
+        // A thin region is printed by its centreline or not at all, and a
+        // setting is not a reason to print nothing: gap fill decides when the
+        // centreline is added to geometry that already has walls, and an object
+        // with no walls at all gets it regardless.
+        if p.gap_fill || lines.is_empty() {
             lines.extend(middle_lines(rg, p));
         }
         rv = rg.graph.pos.len();
