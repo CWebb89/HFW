@@ -27,6 +27,22 @@ fn percentage(key: &str, value: &str) -> Result<f64, ConfigError> {
     Ok(if plain > 1.0 { plain / 100.0 } else { plain })
 }
 
+/// Reads a pressure-advance switch written where the number belongs.
+///
+/// `enabled`/`true`/`on`/`1` keep the number the profile states elsewhere, and
+/// `disabled`/`false`/`off`/`0` turn the feature off. Anything else is the parse
+/// error it would have been without this rule.
+fn pressure_advance_switch(key: &str, value: &str, current: f64) -> Result<f64, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "enabled" | "enable" | "true" | "on" | "1" => Ok(current),
+        "disabled" | "disable" | "false" | "off" | "0" => Ok(0.0),
+        _ => Err(ConfigError::NotANumber {
+            key: key.to_owned(),
+            value: value.trim().to_owned(),
+        }),
+    }
+}
+
 /// Reads a `gcode_substitutions` list, which the dialect writes as groups of
 /// four: what to find, what to put there, flag letters, and a note.
 fn substitutions(value: &str) -> Result<Vec<Substitution>, ConfigError> {
@@ -306,6 +322,26 @@ pub(crate) fn width_mm(key: &str, value: &str, nozzle: f64) -> Result<f64, Confi
 }
 
 impl PrinterConfig {
+    /// Reads the pressure advance, which arrives either as the number itself or as
+    /// a switch with the number under the other spelling.
+    ///
+    /// The reference slicers and this app's own presets both split it in two: Orca's
+    /// filament profile carries `enable_pressure_advance` and `pressure_advance`,
+    /// and a next-layer preset carries `pressure_advance` (on/off) and
+    /// `pressure_advance_value`. Whichever spelling holds the word, the word means
+    /// "use the number beside me", and the off words mean zero. A numeric anywhere
+    /// in the pair wins, because two numbers is a profile restating the same value
+    /// while a number and a switch is one statement and one permission.
+    fn set_pressure_advance(&mut self, key: &str, value: &str) -> Result<(), ConfigError> {
+        match number(key, value) {
+            Ok(advance) => self.pressure_advance = advance,
+            Err(_) => {
+                self.pressure_advance = pressure_advance_switch(key, value, self.pressure_advance)?
+            }
+        }
+        Ok(())
+    }
+
     /// Re-resolves every extrusion width against the final nozzle diameter.
     pub(crate) fn resolve_widths(
         &mut self,
@@ -1098,8 +1134,9 @@ impl PrinterConfig {
             "bridge_span_ref" => self.bridge_span_ref = number(key, value)?,
             "emit_print_stats" => self.emit_print_stats = boolean(key, value)?,
             "exclude_object" => self.exclude_object = boolean(key, value)?,
-            "pressure_advance" => self.pressure_advance = number(key, value)?,
-            "pressure_advance_value" => self.pressure_advance = number(key, value)?,
+            "pressure_advance" | "pressure_advance_value" => {
+                self.set_pressure_advance(key, value)?
+            }
             other => {
                 return Err(ConfigError::UnknownKey {
                     line,
@@ -2542,6 +2579,25 @@ mod tests {
         assert!(PrinterConfig::parse("top_one_perimeter_type = all\n").is_err());
         assert!(PrinterConfig::parse("machine_limits_usage = sometimes\n").is_err());
         assert!(PrinterConfig::parse("perimeter_generator = magical\n").is_err());
+    }
+
+    #[test]
+    fn pressure_advance_arrives_as_a_number_or_as_a_switch_beside_it() {
+        let numeric = PrinterConfig::parse("pressure_advance = 0.04\n").expect("a number parses");
+        assert!((numeric.pressure_advance - 0.04).abs() < 1e-9);
+
+        let orca_shape = PrinterConfig::parse("pressure_advance = enabled\npressure_advance_value = 0.05\n")
+            .expect("the reference slicers' split shape parses");
+        assert!((orca_shape.pressure_advance - 0.05).abs() < 1e-9);
+
+        let value_first = PrinterConfig::parse("pressure_advance_value = 0.05\npressure_advance = enabled\n")
+            .expect("key order does not matter");
+        assert!((value_first.pressure_advance - 0.05).abs() < 1e-9);
+
+        let off = PrinterConfig::parse("pressure_advance = disabled\n").expect("a switch parses");
+        assert!(off.pressure_advance.abs() < 1e-9);
+
+        assert!(PrinterConfig::parse("pressure_advance = sometimes\n").is_err());
     }
 
     #[test]

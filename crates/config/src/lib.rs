@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 mod alias_table;
+mod audit;
 mod bundle;
 mod dialect;
 mod dialect_table;
@@ -35,6 +36,7 @@ mod error;
 mod expression;
 mod parse;
 
+pub use audit::{audit, Finding, Severity};
 pub use bundle::{Bundle, Kind, Loaded, Resolution};
 pub use dialect::{
     object_overrides, Intake, IntakeReport, ObjectOverride, Preset, ProjectSettings,
@@ -1299,6 +1301,7 @@ impl PrinterConfig {
     /// reference slicers keep the width as a remembered value for the next
     /// profile that wants one, and drawing from it would put a brim on a plate
     /// that disabled it.
+    /// Loops of brim this profile asks for, with `no_brim` answering first.
     pub fn adhesion_brim_loops(&self) -> usize {
         if self.brim_type == "no_brim" {
             return 0;
@@ -1308,6 +1311,14 @@ impl PrinterConfig {
         } else {
             self.brim_loops
         }
+    }
+
+    /// Settings this profile asks for and will not get, in report order.
+    ///
+    /// Empty when every value either applies as written or is left at zero on
+    /// purpose; see the audit module for what counts as silent.
+    pub fn audit(&self) -> Vec<audit::Finding> {
+        audit::audit(self)
     }
 
     /// Thickest layer this machine prints, resolving `0` to 80% of the nozzle.

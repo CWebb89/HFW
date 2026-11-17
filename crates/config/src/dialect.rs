@@ -807,6 +807,17 @@ fn json_value(text: &str) -> Option<(Option<String>, &str)> {
         let (value, rest) = json_string(text)?;
         return Some((Some(value), rest));
     }
+    if text.starts_with('{') {
+        // `{"is_percent": true, "value": 85}` is one setting's value written
+        // with its unit, and a list of them -- OrcaSlicer writes
+        // `filament_purge_multiplier` that way -- is a list of those. Reading an
+        // object as a bare token desynchronised the rest of the section: the array
+        // swallowed the closing brace of the section it lived in and every setting
+        // after it vanished without a report line.
+        let after = skip_balanced(text, '{', '}')?;
+        let value = flat_json(text).and_then(|nested| percent_setting(&nested));
+        return Some((value, after));
+    }
     if text.starts_with('[') {
         let rest = text.strip_prefix('[')?;
         let mut items = Vec::new();
@@ -1010,6 +1021,29 @@ fn unescape_xml(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_percentage_object_inside_a_list_does_not_swallow_the_rest_of_its_section() {
+        // The shape a configuration dump actually has: a section per settings pane,
+        // and inside one of them a list whose items are `{is_percent, value}`
+        // objects. Reading such an object as a bare token consumed the brace that
+        // closed the section, and every setting after it disappeared without a
+        // report line -- 70 of them in a real dump.
+        let dump = r#"{"configuration":{"filament_settings":{"filament_purge_multiplier":[{"is_percent":true,"value":100}],"filament_max_volumetric_speed":[18],"pressure_advance":["enabled"],"pressure_advance_value":[0.05]},"printer_settings":{"retract_lift":[0.4]}}}"#;
+        let preset = Preset::parse(dump).expect("the dump parses");
+        let value = |name: &str| {
+            preset
+                .entries()
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("filament_purge_multiplier"), Some("100%"));
+        assert_eq!(value("filament_max_volumetric_speed"), Some("18"));
+        assert_eq!(value("pressure_advance"), Some("enabled"));
+        assert_eq!(value("pressure_advance_value"), Some("0.05"));
+        assert_eq!(value("retract_lift"), Some("0.4"));
+    }
 
     const PLATE_MODEL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <config>

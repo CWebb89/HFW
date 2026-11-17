@@ -2219,6 +2219,9 @@ fn write_gcode(o: &Options, job: &Job, path: &Path) -> Result<Written, String> {
         cfg.bed_y
     );
     let report = hfw_gcode::verify(&written.text, cfg);
+    for finding in cfg.audit() {
+        outln!("  audit: {}", finding.line());
+    }
     outln!(
         "  {} travels cross a printed perimeter",
         report.travel_crossings
