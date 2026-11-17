@@ -35,11 +35,57 @@ struct Node {
     depth: usize,
 }
 
+/// Raster pattern the support body is filled with.
+#[derive(Clone, Copy, Debug)]
+pub enum SupportPattern {
+    /// One raster direction per layer, alternating 45 and 135 degrees.
+    Rectilinear,
+    /// Both raster directions on every layer.
+    Grid,
+}
+
 /// Support generation settings.
 #[derive(Clone, Copy, Debug)]
 pub struct SupportParams {
     /// Which body shape to generate.
     pub style: Style,
+    /// Raster pattern of the body.
+    pub pattern: SupportPattern,
+    /// Raster pattern of the interface; `None` follows the body.
+    pub interface_pattern: Option<SupportPattern>,
+    /// Closed loops around the interface outline, inside its raster.
+    pub interface_loops: usize,
+    /// Closed loop around the body outline, one bead wide.
+    pub sheath: bool,
+    /// How far the support footprint grows on the first layer, in millimetres.
+    pub first_layer_expansion: f64,
+    /// Layers from the bed that are supported whether they overhang or not.
+    pub enforce_layers: usize,
+    /// Dense layers where a column meets whatever it stands on.
+    pub bottom_interface_layers: usize,
+    /// Steepest lean of a branch at the tip, in degrees.
+    pub tree_angle_slow: f64,
+    /// How densely tips are sampled at the contact surface, in percent of the
+    /// nominal branch spacing; higher means more, thinner trunks.
+    pub tree_top_rate: f64,
+    /// True to let a two-wall trunk reach twice the single-wall diameter.
+    pub tree_double_wall: bool,
+    /// Line density of the first layer, where adhesion matters most; `0` uses
+    /// [`SupportParams::density`].
+    pub first_layer_density: f64,
+    /// Morphological closing radius for each layer's support area, in
+    /// millimetres; it merges islands that would otherwise need their own
+    /// pillar and fills slivers too thin to print.
+    pub closing_radius: f64,
+    /// Gap under a column that lands on the part rather than the bed, in
+    /// millimetres.
+    pub bottom_contact_distance: f64,
+    /// True to leave bridges unsupported: a span anchored at both ends carries
+    /// itself, and a pillar under it is wasted filament and a worse surface.
+    pub skip_bridges: bool,
+    /// Longest span, in millimetres, that still counts as a bridge when
+    /// [`SupportParams::skip_bridges`] is set; `0` means no limit.
+    pub bridge_span: f64,
     /// Steepest overhang that prints without support, in degrees from vertical.
     pub threshold_angle: f64,
     /// Clearance between support and part, horizontally, in millimetres.
@@ -58,6 +104,12 @@ pub struct SupportParams {
     pub min_area: f64,
     /// Bead width for support lines.
     pub width: f64,
+    /// Bead width for the dense interface layers; zero means `width`.
+    ///
+    /// The interface is the surface the part rests on, so a profile may want it
+    /// printed with its own bead width while the body behind it keeps the
+    /// nominal one.
+    pub interface_width: f64,
     /// Steepest branch lean from vertical, in degrees.
     pub branch_angle: f64,
     /// Distance under which two branches pull on each other, in millimetres.
@@ -75,6 +127,21 @@ impl SupportParams {
     pub fn new(w: f64) -> SupportParams {
         SupportParams {
             style: Style::Normal,
+            pattern: SupportPattern::Rectilinear,
+            interface_pattern: None,
+            interface_loops: 0,
+            sheath: false,
+            first_layer_expansion: 0.0,
+            enforce_layers: 0,
+            bottom_interface_layers: 0,
+            tree_angle_slow: 40.0,
+            tree_top_rate: 30.0,
+            tree_double_wall: false,
+            first_layer_density: 0.0,
+            closing_radius: 0.0,
+            bottom_contact_distance: 0.0,
+            skip_bridges: false,
+            bridge_span: 0.0,
             threshold_angle: 60.0,
             xy_gap: 0.35,
             z_gap: 0.2,
@@ -84,6 +151,7 @@ impl SupportParams {
             on_build_plate_only: false,
             min_area: 2.0,
             width: w,
+            interface_width: 0.0,
             branch_angle: 40.0,
             branch_distance: 3.0,
             tip_diameter: 0.8,
@@ -100,6 +168,8 @@ impl SupportParams {
             && unit(self.xy_gap)
             && unit(self.z_gap)
             && unit(self.min_area)
+            && unit(self.first_layer_density)
+            && self.first_layer_density <= 1.0
             && self.density.is_finite()
             && self.density > 0.0
             && self.density <= 1.0
@@ -108,11 +178,24 @@ impl SupportParams {
             && self.interface_density <= 1.0
             && self.width.is_finite()
             && self.width > 0.0
+            && self.interface_width.is_finite()
+            && self.interface_width >= 0.0
             && self.branch_angle.is_finite()
             && self.branch_angle > 0.0
             && self.branch_angle < 80.0
             && self.branch_distance.is_finite()
             && self.branch_distance > 0.0
+            && unit(self.first_layer_expansion)
+            && unit(self.closing_radius)
+            && unit(self.bottom_contact_distance)
+            && self.bridge_span.is_finite()
+            && self.bridge_span >= 0.0
+            && self.tree_angle_slow.is_finite()
+            && self.tree_angle_slow > 0.0
+            && self.tree_angle_slow < 80.0
+            && self.tree_top_rate.is_finite()
+            && self.tree_top_rate > 0.0
+            && self.tree_top_rate <= 200.0
             && self.tip_diameter.is_finite()
             && self.tip_diameter > 0.0
             && self.branch_diameter_angle.is_finite()
@@ -152,18 +235,19 @@ impl Supports {
         regions: &[Region],
         cache: &mut MaskCache,
         p: &SupportParams,
-        height: f64,
+        heights: &[f64],
     ) -> Supports {
         let grid = *cache.grid();
+        let height = mean_height(heights);
         if !p.validate() || regions.is_empty() || !(height.is_finite() && height > 0.0) {
             return Supports {
                 grid,
                 body: Body::Empty,
             };
         }
-        let seeds = seed_masks(regions, cache, p, height);
+        let seeds = seed_masks(regions, cache, p, heights);
         let body = match p.style {
-            Style::Normal => columns(regions, cache, p, &seeds),
+            Style::Normal => columns(regions, cache, p, &seeds, heights),
             Style::Tree => Body::Tree(build_tree(cache, p, height, &seeds)),
         };
         Supports { grid, body }
@@ -193,14 +277,14 @@ fn seed_masks(
     regions: &[Region],
     cache: &mut MaskCache,
     p: &SupportParams,
-    height: f64,
+    heights: &[f64],
 ) -> Vec<Vec<u64>> {
     let grid = *cache.grid();
     let words = cache.words();
     let n = regions.len();
-    let reach = height * p.threshold_angle.to_radians().tan();
     let mut seeds = Vec::with_capacity(n);
     for k in 0..n {
+        let reach = height_at(heights, k) * p.threshold_angle.to_radians().tan();
         let own = cache.own_bits(k);
         let below = cache.below_bits(k);
         let spread = dilate(&below, &grid.grid, reach, words);
@@ -208,14 +292,32 @@ fn seed_masks(
         if k == 0 {
             seed.iter_mut().for_each(|w| *w = 0);
         }
+        if p.skip_bridges && seed.iter().any(|w| *w != 0) {
+            let spanned = bridge_spans(&seed, &below, &grid.grid, p.bridge_span);
+            seed.iter_mut().zip(&spanned).for_each(|(s, b)| *s &= !*b);
+        }
+        if p.closing_radius > 0.0 && seed.iter().any(|w| *w != 0) {
+            seed = close(&seed, &grid.grid, p.closing_radius, words);
+        }
         drop_small(&mut seed, &grid.grid, p.min_area);
         seeds.push(seed);
     }
-    let z_layers = (p.z_gap / height).round() as usize + 1;
+    if p.enforce_layers > 0 {
+        for (k, seed) in seeds.iter_mut().enumerate().take(n.min(p.enforce_layers)) {
+            let own = cache.own_bits(k);
+            let mut onto: Vec<u64> = seed.clone();
+            onto.iter_mut().zip(own).for_each(|(s, o)| *s |= o);
+            *seed = onto;
+        }
+    }
+    if p.first_layer_expansion > 0.0 && n > 0 {
+        seeds[0] = dilate(&seeds[0], &grid.grid, p.first_layer_expansion, words);
+    }
     let mut lowered = vec![vec![0u64; words]; n];
     for k in 0..n {
-        if k + z_layers < n {
-            lowered[k] = seeds[k + z_layers].clone();
+        let shift = (p.z_gap / height_at(heights, k)).round() as usize + 1;
+        if k + shift < n {
+            lowered[k] = seeds[k + shift].clone();
         }
     }
     lowered
@@ -227,6 +329,7 @@ fn columns(
     cache: &mut MaskCache,
     p: &SupportParams,
     seeds: &[Vec<u64>],
+    heights: &[f64],
 ) -> Body {
     let grid = *cache.grid();
     let words = cache.words();
@@ -242,6 +345,10 @@ fn columns(
         let layer: Vec<u64> = run.iter().zip(&blocked).map(|(r, b)| r & !b).collect();
         run.clone_from(&layer);
         body[k] = layer;
+    }
+
+    if p.bottom_contact_distance > 0.0 {
+        open_contact_gap(&mut body, heights, p.bottom_contact_distance);
     }
 
     if p.on_build_plate_only {
@@ -267,6 +374,45 @@ fn columns(
     Body::Columns { body, interface }
 }
 
+/// Closed loops around a mask, one bead wide.
+fn outline(grid: &SkinGrid, mask: &[u64], width: f64, kind: Kind, loops: usize) -> Vec<Line> {
+    if loops == 0 {
+        return Vec::new();
+    }
+    let g = grid.grid;
+    if mask.len() < g.nx * g.ny {
+        return Vec::new();
+    }
+    let phi: Vec<f64> = mask
+        .iter()
+        .flat_map(|word| (0..64).map(move |bit| if word >> bit & 1 == 1 { -1.0 } else { 1.0 }))
+        .take(g.nx * g.ny)
+        .collect();
+    if !phi.iter().any(|v| *v < 0.0) {
+        return Vec::new();
+    }
+    let bw = vec![width; phi.len()];
+    let lv = vec![0.0f64; phi.len()];
+    let mut out = Vec::new();
+    for _ in 0..loops {
+        for raw in hfw_walls::contour::trace(&g, &phi, &bw, &lv) {
+            if raw.pts.len() < 3 {
+                continue;
+            }
+            out.push(Line {
+                pts: raw.pts,
+                width: vec![width; raw.w.len()],
+                closed: raw.closed,
+                kind,
+                overhang: 0.0,
+                object: 0,
+                flow: 1.0,
+            });
+        }
+    }
+    out
+}
+
 /// Straight-down fill of the column masks.
 fn fill_columns(
     grid: &SkinGrid,
@@ -275,37 +421,87 @@ fn fill_columns(
     k: usize,
     p: &SupportParams,
 ) -> Vec<Line> {
-    let (Some(body), Some(interface)) = (body.get(k), interface.get(k)) else {
+    let (Some(body_k), Some(interface_k)) = (body.get(k), interface.get(k)) else {
         return Vec::new();
     };
     let step = p.width / 4.0;
-    let angle = if k % 2 == 0 { 45.0 } else { 135.0 };
+    let angles_for = |pattern: SupportPattern| -> &'static [f64] {
+        match pattern {
+            SupportPattern::Rectilinear => {
+                if k % 2 == 0 {
+                    &[45.0]
+                } else {
+                    &[135.0]
+                }
+            }
+            SupportPattern::Grid => &[45.0, 135.0],
+        }
+    };
+    let angles = angles_for(p.pattern);
+    let interface_angles = angles_for(p.interface_pattern.unwrap_or(p.pattern));
+    let interface_width = if p.interface_width > 0.0 {
+        p.interface_width
+    } else {
+        p.width
+    };
+    let density = if k == 0 && p.first_layer_density > 0.0 {
+        p.first_layer_density
+    } else {
+        p.density
+    };
+    let mut dense = interface_k.clone();
+    if p.bottom_interface_layers > 0 && k < p.bottom_interface_layers {
+        let empty = vec![0u64; body_k.len()];
+        let prev: &[u64] = match k.checked_sub(1).and_then(|i| body.get(i)) {
+            Some(layer) => layer,
+            None => &empty,
+        };
+        for i in 0..dense.len().min(prev.len()) {
+            dense[i] |= body_k[i] & !prev[i];
+        }
+    }
     let mut out = Vec::new();
-    if interface.iter().any(|w| *w != 0) {
-        out.extend(fill_from_mask(
+    if p.interface_loops > 0 && dense.iter().any(|w| *w != 0) {
+        out.extend(outline(
             grid,
-            interface,
-            p.width,
-            p.width / p.interface_density,
-            angle,
+            &dense,
+            interface_width,
             Kind::SupportInterface,
-            step,
+            p.interface_loops,
         ));
     }
-    if body.iter().any(|w| *w != 0) {
-        let mut solid = body.clone();
-        for (c, i) in solid.iter_mut().zip(interface) {
-            *c &= !*i;
+    if p.sheath && body_k.iter().any(|w| *w != 0) {
+        out.extend(outline(grid, body_k, p.width, Kind::Support, 1));
+    }
+    if dense.iter().any(|w| *w != 0) {
+        for angle in interface_angles {
+            out.extend(fill_from_mask(
+                grid,
+                &dense,
+                interface_width,
+                interface_width / p.interface_density,
+                *angle,
+                Kind::SupportInterface,
+                step,
+            ));
         }
-        out.extend(fill_from_mask(
-            grid,
-            &solid,
-            p.width,
-            p.width / p.density,
-            angle,
-            Kind::Support,
-            step,
-        ));
+    }
+    let mut solid = body_k.clone();
+    for (c, i) in solid.iter_mut().zip(&dense) {
+        *c &= !*i;
+    }
+    if solid.iter().any(|w| *w != 0) {
+        for angle in angles {
+            out.extend(fill_from_mask(
+                grid,
+                &solid,
+                p.width,
+                p.width / density,
+                *angle,
+                Kind::Support,
+                step,
+            ));
+        }
     }
     out
 }
@@ -323,9 +519,12 @@ fn build_tree(cache: &mut MaskCache, p: &SupportParams, height: f64, seeds: &[Ve
     let n = seeds.len();
     let clearance = p.xy_gap + 0.5 * p.width;
     let tip_r = 0.5 * p.tip_diameter.max(p.width);
-    let max_r = 0.5 * p.max_branch_diameter.max(p.tip_diameter);
+    let max_r = 0.5
+        * p.max_branch_diameter.max(p.tip_diameter)
+        * if p.tree_double_wall { 2.0 } else { 1.0 };
     let grow = height * p.branch_diameter_angle.to_radians().tan();
     let step = height * p.branch_angle.to_radians().tan();
+    let slow = height * p.tree_angle_slow.to_radians().tan();
     let mut layers = vec![Vec::new(); n];
     let mut active: Vec<Node> = Vec::new();
     for k in (0..n).rev() {
@@ -338,12 +537,15 @@ fn build_tree(cache: &mut MaskCache, p: &SupportParams, height: f64, seeds: &[Ve
                 depth: node.depth + 1,
                 ..*node
             };
-            if let Some(placed) = place(grown, &blocked, &g, step) {
+            let thin = (node.r - tip_r).max(0.0) < 0.5 * grow;
+            let reach = if thin { step.min(slow) } else { step };
+            if let Some(placed) = place(grown, &blocked, &g, reach) {
                 next.push(placed);
             }
         }
         let mut heads = Vec::new();
-        let spacing = p.branch_distance.max(2.0 * p.tip_diameter);
+        let rate = (p.tree_top_rate / 30.0).clamp(0.2, 4.0);
+        let spacing = (p.branch_distance.max(2.0 * p.tip_diameter) / rate).max(p.width);
         for c in contact_nodes(&seeds[k], &grid, tip_r, spacing) {
             if let Some(placed) = place(c, &blocked, &g, step) {
                 heads.push(placed);
@@ -547,6 +749,9 @@ fn ring(node: &Node, width: f64, kind: Kind) -> Line {
         width: vec![width; segments],
         closed: true,
         kind,
+        overhang: 0.0,
+        object: 0,
+        flow: 1.0,
     }
 }
 
@@ -626,6 +831,196 @@ fn dilate(mask: &[u64], g: &Grid, reach: f64, words: usize) -> Vec<u64> {
     out
 }
 
+/// Height of layer `k`, falling back to the last known one past the end.
+fn height_at(heights: &[f64], k: usize) -> f64 {
+    heights
+        .get(k)
+        .copied()
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .or_else(|| {
+            heights
+                .iter()
+                .rev()
+                .find(|h| h.is_finite() && **h > 0.0)
+                .copied()
+        })
+        .unwrap_or(0.0)
+}
+
+/// Average layer height, for the shapes that are sized in millimetres of Z.
+fn mean_height(heights: &[f64]) -> f64 {
+    let usable: Vec<f64> = heights
+        .iter()
+        .copied()
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .collect();
+    if usable.is_empty() {
+        return 0.0;
+    }
+    usable.iter().sum::<f64>() / usable.len() as f64
+}
+
+/// Fills every gap narrower than twice `reach`, leaving the outer shape alone.
+///
+/// This is a morphological closing that cannot eat into a mask touching the edge
+/// of its grid: instead of growing the mask and shrinking it back, it tests only
+/// the cells the growth would have added and keeps the ones that sit in a gap
+/// with material on both sides. Islands closer than `2 * reach` therefore merge,
+/// narrow holes close, and no supported area is lost.
+fn close(mask: &[u64], g: &Grid, reach: f64, words: usize) -> Vec<u64> {
+    let mut out = mask.to_vec();
+    if !(reach.is_finite() && reach > 0.0) {
+        return out;
+    }
+    let grown = dilate(mask, g, reach, words);
+    let cap = (reach / g.h).ceil() as i64;
+    let axes = [(1i64, 0i64), (0, 1), (1, 1), (1, -1)];
+    for iy in 0..g.ny {
+        for ix in 0..g.nx {
+            let (x, y) = (ix as i64, iy as i64);
+            if !get(&grown, g, x, y) || get(mask, g, x, y) {
+                continue;
+            }
+            let bridgeable = axes.iter().any(|(dx, dy)| {
+                let step = if *dx != 0 && *dy != 0 {
+                    g.h * 2f64.sqrt()
+                } else {
+                    g.h
+                };
+                let a = reach_material(mask, g, x, y, *dx, *dy, cap);
+                let b = reach_material(mask, g, x, y, -*dx, -*dy, cap);
+                match (a, b) {
+                    (Some(a), Some(b)) => (a + b) as f64 * step <= 2.0 * reach + step,
+                    _ => false,
+                }
+            });
+            if bridgeable {
+                set(&mut out, g, x, y);
+            }
+        }
+    }
+    out
+}
+
+/// Marks the cells of an overhang that a bridge could span on its own.
+///
+/// A bridge needs two anchors: material at the layer below on both ends of a
+/// straight run. Four axes are tried, because a bridgeable gap is bridgeable in
+/// the direction that crosses it, and a cell is marked when any axis finds
+/// material on both sides. `limit` is the longest span still worth bridging; `0`
+/// accepts any span that has anchors.
+fn bridge_spans(air: &[u64], below: &[u64], g: &Grid, limit: f64) -> Vec<u64> {
+    let words = air.len();
+    let mut out = vec![0u64; words];
+    let cap = if limit > 0.0 {
+        ((limit / g.h).ceil() as i64).max(1)
+    } else {
+        i64::MAX
+    };
+    let axes = [(1i64, 0i64), (0, 1), (1, 1), (1, -1)];
+    for iy in 0..g.ny {
+        for ix in 0..g.nx {
+            let (x, y) = (ix as i64, iy as i64);
+            if !get(air, g, x, y) {
+                continue;
+            }
+            let bridged = axes.iter().any(|(dx, dy)| {
+                let forward = reach_material(below, g, x, y, *dx, *dy, cap);
+                let backward = reach_material(below, g, x, y, -*dx, -*dy, cap);
+                match (forward, backward) {
+                    (Some(a), Some(b)) => {
+                        let span = (a + b) as f64
+                            * g.h
+                            * if *dx != 0 && *dy != 0 {
+                                2f64.sqrt()
+                            } else {
+                                1.0
+                            };
+                        limit <= 0.0 || span <= limit
+                    }
+                    _ => false,
+                }
+            });
+            if bridged {
+                set(&mut out, g, x, y);
+            }
+        }
+    }
+    out
+}
+
+/// Steps from a cell until it meets supported material, up to `cap` steps.
+fn reach_material(
+    below: &[u64],
+    g: &Grid,
+    x: i64,
+    y: i64,
+    dx: i64,
+    dy: i64,
+    cap: i64,
+) -> Option<i64> {
+    let mut steps = 0;
+    let mut cx = x;
+    let mut cy = y;
+    while steps < cap {
+        cx += dx;
+        cy += dy;
+        steps += 1;
+        if cx < 0 || cy < 0 || cx >= g.nx as i64 || cy >= g.ny as i64 {
+            return None;
+        }
+        if get(below, g, cx, cy) {
+            return Some(steps);
+        }
+    }
+    None
+}
+
+/// Lifts the bottom of every column that lands on the part, not the bed.
+///
+/// A column's bottom is the layer where it appears after having descended: the
+/// layers below are part of the part or the bed, so `body[k] & !body[k-1]` marks
+/// where support meets something. On the bed that contact wants to be tight; on a
+/// surface it wants a gap, or the support fuses to the part and takes a chunk of
+/// it when it is pulled away.
+fn open_contact_gap(body: &mut [Vec<u64>], heights: &[f64], gap: f64) {
+    let layers = body.len();
+    if layers < 2 {
+        return;
+    }
+    let words = body[0].len();
+    let empty = vec![0u64; words];
+    for k in 1..layers {
+        let below = if k == 0 { &empty } else { &body[k - 1] };
+        let starts: Vec<u64> = body[k].iter().zip(below).map(|(b, a)| b & !a).collect();
+        if starts.iter().all(|w| *w == 0) {
+            continue;
+        }
+        let mut cleared = 0.0;
+        for d in 0..layers {
+            if cleared >= gap {
+                break;
+            }
+            let step = height_at(heights, k + d).max(1e-6);
+            let Some(layer) = body.get_mut(k + d) else {
+                break;
+            };
+            let mut still_going = false;
+            for (word, start) in layer.iter_mut().zip(&starts) {
+                let removed = *word & start;
+                if removed != 0 {
+                    still_going = true;
+                    *word &= !removed;
+                }
+            }
+            if !still_going {
+                break;
+            }
+            cleared += step;
+        }
+    }
+}
+
 /// Removes connected components smaller than `min_area` square millimetres.
 fn drop_small(mask: &mut [u64], g: &Grid, min_area: f64) {
     if !(min_area.is_finite() && min_area > 0.0) {
@@ -688,7 +1083,58 @@ fn set(mask: &mut [u64], g: &Grid, ix: i64, iy: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_grid_pattern_fills_both_directions_and_a_first_layer_override_changes_it() {
+        let p = SupportParams::new(0.4);
+        assert!(p.validate());
+        let grid = SupportParams {
+            pattern: SupportPattern::Grid,
+            ..p
+        };
+        assert!(grid.validate());
+        let dense = SupportParams {
+            first_layer_density: 0.35,
+            ..p
+        };
+        assert!(dense.validate());
+        let bad = SupportParams {
+            first_layer_density: 1.4,
+            ..p
+        };
+        assert!(!bad.validate(), "a density above 1 is not a density");
+    }
+
+    #[test]
+    fn the_interface_and_tree_knobs_validate() {
+        let p = SupportParams::new(0.4);
+        let shelled = SupportParams {
+            interface_pattern: Some(SupportPattern::Grid),
+            interface_loops: 2,
+            sheath: true,
+            first_layer_expansion: 2.0,
+            enforce_layers: 3,
+            bottom_interface_layers: 2,
+            tree_double_wall: true,
+            ..p
+        };
+        assert!(shelled.validate());
+        let slow = SupportParams {
+            tree_angle_slow: 95.0,
+            ..p
+        };
+        assert!(!slow.validate(), "a 95 degree lean is not printable");
+        let rare = SupportParams {
+            tree_top_rate: 0.0,
+            ..p
+        };
+        assert!(!rare.validate(), "no tips is not a top rate");
+    }
     use hfw_kernel::{Region, V2};
+
+    fn flat(regions: &[Region], h: f64) -> Vec<f64> {
+        vec![h; regions.len()]
+    }
 
     fn square(x0: f64, y0: f64, x1: f64, y1: f64) -> Region {
         Region::new(vec![vec![
@@ -724,11 +1170,130 @@ mod tests {
     }
 
     #[test]
+    fn the_closing_radius_fills_a_narrow_gap_and_leaves_a_wide_one() {
+        let regions = vec![square(0.0, 0.0, 40.0, 40.0)];
+        let grid = SkinGrid::new(&regions, 0.5);
+        let g = grid.grid;
+        let words = (g.nx * g.ny).div_ceil(64);
+        let mut mask = vec![0u64; words];
+        let mut wide = vec![0u64; words];
+        for y in 0..g.ny as i64 {
+            for x in 0..g.nx as i64 {
+                let at = x as f64 * g.h;
+                if (3.0..=9.0).contains(&at) {
+                    set(&mut mask, &g, x, y);
+                    set(&mut wide, &g, x, y);
+                }
+                if (11.0..=16.0).contains(&at) {
+                    set(&mut mask, &g, x, y);
+                }
+                if (21.0..=26.0).contains(&at) {
+                    set(&mut wide, &g, x, y);
+                }
+            }
+        }
+        let closed = close(&mask, &g, 1.5, words);
+        assert!(
+            get(&closed, &g, 20, 20),
+            "a 2 mm gap between two islands was not closed"
+        );
+        let untouched = close(&wide, &g, 1.5, words);
+        assert!(
+            !get(&untouched, &g, 22, 20),
+            "a 10 mm gap was closed as if it were narrow"
+        );
+        let count = |m: &[u64]| m.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        assert!(
+            count(&closed) >= count(&mask),
+            "closing lost supported area"
+        );
+    }
+
+    #[test]
+    fn a_bottom_contact_distance_lifts_a_column_off_the_part() {
+        let empty = Region::new(Vec::new());
+        let mut regions: Vec<Region> = Vec::new();
+        for _ in 0..6 {
+            regions.push(square(0.0, 0.0, 40.0, 20.0));
+        }
+        for _ in 0..4 {
+            regions.push(empty.clone());
+        }
+        for _ in 0..10 {
+            regions.push(square(0.0, 0.0, 50.0, 20.0));
+        }
+        let p = SupportParams::new(0.4);
+        let tight = {
+            let mut cache = MaskCache::new(&regions, 0.2, 12);
+            Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2))
+        };
+        let gapped = {
+            let mut cache = MaskCache::new(&regions, 0.2, 12);
+            let lifted = SupportParams {
+                bottom_contact_distance: 0.6,
+                ..p
+            };
+            Supports::build(&regions, &mut cache, &lifted, &flat(&regions, 0.2))
+        };
+        let (a, _) = columns(&tight);
+        let (b, _) = columns(&gapped);
+        let count = |layers: &Vec<Vec<u64>>| -> usize {
+            layers
+                .iter()
+                .map(|l| l.iter().map(|w| w.count_ones() as usize).sum::<usize>())
+                .sum()
+        };
+        assert!(
+            count(b) < count(a),
+            "the gap removed nothing: {} against {}",
+            count(b),
+            count(a)
+        );
+    }
+
+    #[test]
+    fn a_span_with_anchors_on_both_sides_counts_as_a_bridge() {
+        let grid = {
+            let regions = vec![square(0.0, 0.0, 40.0, 40.0)];
+            SkinGrid::new(&regions, 0.5)
+        };
+        let g = grid.grid;
+        let words = (g.nx * g.ny).div_ceil(64);
+        let mut below = vec![0u64; words];
+        let mut air = vec![0u64; words];
+        for x in 0..g.nx as i64 {
+            set(&mut air, &g, x, 20);
+            if !(8..=24).contains(&x) {
+                set(&mut below, &g, x, 20);
+            }
+        }
+        let bridged = bridge_spans(&air, &below, &g, 0.0);
+        assert!(
+            get(&bridged, &g, 16, 20),
+            "the middle of the span was not a bridge"
+        );
+        let unsupported = bridge_spans(&air, &below, &g, 2.0);
+        assert!(
+            !get(&unsupported, &g, 16, 20),
+            "a 8 mm span was accepted under a 2 mm limit"
+        );
+        let mut one_sided = vec![0u64; words];
+        for x in 0..8 {
+            set(&mut one_sided, &g, x, 20);
+        }
+        let cantilever = bridge_spans(&air, &one_sided, &g, 0.0);
+        assert!(
+            !get(&cantilever, &g, 16, 20),
+            "a cantilever is not a bridge: it has one anchor"
+        );
+    }
+
+    #[test]
     fn a_cantilever_seeds_support_under_its_overhang_only() {
         let regions = post_and_table(20, 10, 4.0, 30.0);
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         let overhang = 20;
         assert!(
@@ -750,7 +1315,7 @@ mod tests {
         let regions = post_and_table(20, 10, 8.0, 30.0);
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         for k in 0..m.layers() {
             assert!(
@@ -765,7 +1330,7 @@ mod tests {
         let regions = post_and_table(20, 10, 4.0, 30.0);
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         let overhang = 20;
         assert!(
@@ -789,7 +1354,7 @@ mod tests {
         regions.push(square(0.0, 0.0, 30.0, 20.0));
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         for k in 10..30 {
             assert!(
@@ -804,7 +1369,7 @@ mod tests {
         let regions = post_and_table(12, 4, 8.0, 30.0);
         let mut cache = MaskCache::new(&regions, 0.1, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         assert!(
             cell(&columns(&m).0[10], &grid, 20.0, 10.0),
@@ -822,7 +1387,7 @@ mod tests {
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let t = tree(&m);
         let tips = t.layers[57].len();
         let trunk = t.layers[0].len();
@@ -844,7 +1409,7 @@ mod tests {
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         let t = tree(&m);
         for (k, nodes) in t.layers.iter().enumerate() {
@@ -867,7 +1432,7 @@ mod tests {
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
         p.branch_distance = 5.0;
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let t = tree(&m);
         let step = 0.2 * p.branch_angle.to_radians().tan();
         for k in 1..t.layers.len() {
@@ -893,7 +1458,7 @@ mod tests {
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let tip = m.fill(17, &p);
         assert!(!tip.is_empty(), "the contact layer printed nothing");
         assert!(
@@ -917,7 +1482,7 @@ mod tests {
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let t = tree(&m);
         for nodes in &t.layers {
             for node in nodes {
@@ -938,7 +1503,7 @@ mod tests {
         regions.extend((0..10).map(|_| square(0.0, 0.0, 30.0, 20.0)));
         let mut cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         assert!(
             cell(&columns(&m).0[15], &grid, 20.0, 10.0),
@@ -949,7 +1514,7 @@ mod tests {
             "the column stops at the block below it"
         );
         p.on_build_plate_only = true;
-        let m = Supports::build(&regions, &mut cache, &p, 0.2);
+        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
         assert!(
             !cell(&columns(&m).0[15], &grid, 20.0, 10.0),
             "a bed-only column cannot float over the part"

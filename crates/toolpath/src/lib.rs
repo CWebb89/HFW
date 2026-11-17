@@ -30,6 +30,8 @@ pub enum Feature {
     Middle,
     /// Solid top or bottom skin.
     Skin,
+    /// Solid skin on the visible surface.
+    TopSkin,
     /// Sparse infill.
     Infill,
     /// First-layer adhesion brim, outside the part.
@@ -40,6 +42,8 @@ pub enum Feature {
     Support,
     /// Dense support layers in contact with the part.
     SupportInterface,
+    /// Slow, near-zero-flow pass that flattens a printed top surface.
+    Ironing,
 }
 
 impl Feature {
@@ -49,12 +53,14 @@ impl Feature {
             Kind::Side(i) => Some(Feature::Wall(i)),
             Kind::Middle => Some(Feature::Middle),
             Kind::Solid => Some(Feature::Skin),
+            Kind::TopSolid => Some(Feature::TopSkin),
             Kind::Infill => Some(Feature::Infill),
             Kind::Brim => Some(Feature::Brim),
             Kind::Bridge => Some(Feature::Bridge),
             Kind::BridgeAnchor => Some(Feature::Bridge),
             Kind::Support => Some(Feature::Support),
             Kind::SupportInterface => Some(Feature::SupportInterface),
+            Kind::Ironing => Some(Feature::Ironing),
         }
     }
 
@@ -64,11 +70,13 @@ impl Feature {
             Feature::Wall(_) => "wall",
             Feature::Middle => "middle",
             Feature::Skin => "skin",
+            Feature::TopSkin => "top-skin",
             Feature::Infill => "infill",
             Feature::Brim => "brim",
             Feature::Bridge => "bridge",
             Feature::Support => "support",
             Feature::SupportInterface => "support_interface",
+            Feature::Ironing => "ironing",
         }
     }
 
@@ -84,9 +92,11 @@ impl Feature {
             }
             Feature::Middle => "#1e8c5a",
             Feature::Skin => "#eb9628",
+            Feature::TopSkin => "#f2c14e",
             Feature::Infill => "#c8553d",
             Feature::Brim => "#7d5ba6",
             Feature::Bridge => "#b03a48",
+            Feature::Ironing => "#5f9ea0",
             Feature::Support => "#8a8f98",
             Feature::SupportInterface => "#5f6470",
         }
@@ -102,6 +112,8 @@ pub struct LayerCounts {
     pub middle: usize,
     /// Number of skin lines.
     pub skin: usize,
+    /// Number of skin lines on the visible top surface.
+    pub top_skin: usize,
     /// Number of sparse infill lines.
     pub infill: usize,
     /// Number of adhesion brim loops.
@@ -112,6 +124,8 @@ pub struct LayerCounts {
     pub support: usize,
     /// Number of support interface lines.
     pub support_interface: usize,
+    /// Number of ironing passes over a top surface.
+    pub ironing: usize,
     /// Total printable path length.
     pub length: f64,
     /// Total deposited volume for this layer.
@@ -137,6 +151,13 @@ pub struct PlannedLayer {
     pub paths: Vec<Line>,
     /// Counters for this layer.
     pub counts: LayerCounts,
+    /// True when this layer's single wall rises continuously into the next.
+    pub vase: bool,
+    /// True when this is the first layer of an object.
+    ///
+    /// A plate printed in `by object` order restarts at Z 0 for every object, so
+    /// the writer cannot tell from the layer count which layers sit on the bed.
+    pub first: bool,
 }
 
 impl PlannedLayer {
@@ -153,11 +174,13 @@ impl PlannedLayer {
                 Some(Feature::Wall(_)) => c.walls += 1,
                 Some(Feature::Middle) => c.middle += 1,
                 Some(Feature::Skin) => c.skin += 1,
+                Some(Feature::TopSkin) => c.top_skin += 1,
                 Some(Feature::Infill) => c.infill += 1,
                 Some(Feature::Brim) => c.brim += 1,
                 Some(Feature::Bridge) => c.bridge += 1,
                 Some(Feature::Support) => c.support += 1,
                 Some(Feature::SupportInterface) => c.support_interface += 1,
+                Some(Feature::Ironing) => c.ironing += 1,
                 None => continue,
             }
             c.length += path.length();
@@ -298,6 +321,8 @@ pub struct JobTotals {
     pub middle: usize,
     /// Total skin path count.
     pub skin: usize,
+    /// Total top-surface skin path count.
+    pub top_skin: usize,
     /// Total sparse infill path count.
     pub infill: usize,
 }
@@ -314,6 +339,7 @@ impl JobTotals {
         self.starts_stops += layer.counts.starts_stops;
         self.middle += layer.counts.middle;
         self.skin += layer.counts.skin;
+        self.top_skin += layer.counts.top_skin;
         self.infill += layer.counts.infill;
     }
 }
@@ -345,15 +371,23 @@ mod tests {
                     width: vec![0.4; 4],
                     closed: true,
                     kind: Kind::Side(0),
+                    flow: 1.0,
+                    overhang: 0.0,
+                    object: 0,
                 },
                 Line {
                     pts: vec![V2::new(1.0, 5.0), V2::new(19.0, 5.0)],
                     width: vec![0.4; 2],
                     closed: false,
                     kind: Kind::Infill,
+                    flow: 1.0,
+                    overhang: 0.0,
+                    object: 0,
                 },
             ],
             counts: LayerCounts::default(),
+            vase: false,
+            first: true,
         };
         l.recount();
         l

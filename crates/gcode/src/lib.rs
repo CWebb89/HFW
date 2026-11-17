@@ -12,8 +12,10 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod route;
 mod writer;
 
+pub mod thumb;
 pub mod verify;
 
 pub use error::GcodeError;

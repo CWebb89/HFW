@@ -122,7 +122,16 @@ fn a_thin_wall_is_printed_by_hfw_and_missed_by_classic() {
     let mut s = settings(3);
     s.infill = None;
 
-    let hfw = run(&thin, 0.2, 0.2, &Settings { every: 1000, ..s }).expect("hfw job");
+    let hfw = run(
+        &thin,
+        0.2,
+        0.2,
+        &Settings {
+            every: 1000,
+            ..s.clone()
+        },
+    )
+    .expect("hfw job");
     let classic = run(
         &thin,
         0.2,
@@ -174,8 +183,16 @@ fn sparse_infill_density_tracks_the_request() {
         ip.bottom_layers = 0;
         s.infill = Some(ip);
         let job = run(&m, 0.2, 0.2, &Settings { every: 1, ..s }).expect("job");
-        let inner = job.layers[50].counts.infill as f64;
-        assert!(inner > last, "density {density} did not add infill lines");
+        let inner: f64 = job.layers[50]
+            .paths
+            .iter()
+            .filter(|line| line.kind == hfw_walls::Kind::Infill)
+            .map(|line| line.length())
+            .sum();
+        assert!(
+            inner > last,
+            "density {density} laid {inner} mm of infill against {last} mm at the density below"
+        );
         last = inner;
     }
 }
@@ -255,4 +272,85 @@ fn geometry_output_is_deterministic() {
         assert_eq!(la.manifest_row(), lb.manifest_row());
         assert_eq!(la.to_svg(), lb.to_svg());
     }
+}
+
+#[test]
+fn thin_walls_off_drops_the_single_trace() {
+    let sheet = mesh("thin_wall.stl");
+    let mut s = settings(2);
+    s.mode = Mode::Hfw;
+    let on = run(&sheet, 0.2, 0.2, &s).expect("job runs");
+    s.wall.thin_walls = false;
+    let off = run(&sheet, 0.2, 0.2, &s).expect("job runs");
+    let middles = |job: &hfw_engine::Job| -> usize {
+        job.layers
+            .iter()
+            .flat_map(|l| l.paths.iter())
+            .filter(|p| p.kind == PathKind::Middle)
+            .count()
+    };
+    assert!(middles(&on) > 0, "the fixture printed no thin trace at all");
+    assert_eq!(middles(&off), 0, "thin_walls = false still beaded a trace");
+}
+
+#[test]
+fn min_feature_size_decides_what_survives() {
+    let sheet = mesh("thin_wall.stl");
+    let mut s = settings(2);
+    s.mode = Mode::Hfw;
+    s.wall.min_feature = 0.05;
+    let kept = run(&sheet, 0.2, 0.2, &s).expect("job runs");
+    s.wall.min_feature = 2.0;
+    let gone = run(&sheet, 0.2, 0.2, &s).expect("job runs");
+    assert!(
+        kept.volume.0 > 0.0,
+        "the fixture printed nothing below the floor"
+    );
+    assert!(
+        gone.volume.0 < 0.05 * kept.volume.0,
+        "a 2 mm floor still printed {} of {} mm3",
+        gone.volume.0,
+        kept.volume.0
+    );
+}
+
+#[test]
+fn a_vase_is_one_wall_per_layer_above_a_solid_base() {
+    let sphere = mesh("sphere.stl");
+    let mut s = settings(2);
+    s.spiral_vase = true;
+    s.infill = Some(InfillParams::new(0.4));
+    let job = run(&sphere, 0.2, 0.2, &s).expect("vase job runs");
+    let base = s.infill.as_ref().map(|ip| ip.bottom_layers).unwrap_or(0);
+    for layer in job.layers.iter().skip(base + 1) {
+        assert!(layer.vase, "layer {} is not a spiral", layer.index);
+        let walls = layer.paths.iter().filter(|p| p.kind.is_wall()).count();
+        assert!(
+            walls <= 1,
+            "layer {} printed {walls} walls in vase mode",
+            layer.index
+        );
+    }
+    let base_layer = &job.layers[1];
+    assert!(!base_layer.vase, "the base spiralled too");
+    assert!(
+        base_layer.paths.iter().any(|p| p.kind.is_wall()),
+        "the base has no wall"
+    );
+}
+
+#[test]
+fn a_vase_and_support_are_refused_together() {
+    let sphere = mesh("sphere.stl");
+    let mut s = settings(1);
+    s.spiral_vase = true;
+    s.support = Some(hfw_engine::SupportSettings::new(0.4));
+    let error = match run(&sphere, 0.2, 0.2, &s) {
+        Ok(_) => panic!("the pair was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, hfw_engine::EngineError::VaseWithSupport),
+        "got {error}"
+    );
 }

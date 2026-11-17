@@ -30,6 +30,14 @@ pub struct VerifyReport {
     pub bbox_max: [f64; 3],
     /// Z of the first extruding move.
     pub first_extrusion_z: f64,
+    /// Travel moves whose straight line crosses a perimeter already printed on
+    /// the same layer.
+    ///
+    /// This is the only number that says whether travel avoidance did anything:
+    /// a move into an enclosed interior crosses the wall that encloses it no
+    /// matter which entry point is chosen, so the count never reaches zero.
+    /// A Z hop is counted, because the nozzle still drags across the wall.
+    pub travel_crossings: usize,
 }
 
 impl VerifyReport {
@@ -81,10 +89,68 @@ fn get(command: &Command<'_>, key: char) -> Option<f64> {
     command.params.iter().find(|p| p.0 == key).map(|p| p.1)
 }
 
+/// True when the `;TYPE:` marker names a perimeter the nozzle can cut across.
+fn perimeter_type(tag: &str) -> bool {
+    matches!(tag, "Outer wall" | "Inner wall" | "Gap infill")
+}
+
+/// True when `a`-`b` crosses `c`-`d`; touching an endpoint does not count.
+fn segments_cross(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
+    if b.0.max(a.0) < c.0.min(d.0)
+        || c.0.max(d.0) < a.0.min(b.0)
+        || b.1.max(a.1) < c.1.min(d.1)
+        || c.1.max(d.1) < a.1.min(b.1)
+    {
+        return false;
+    }
+    let orient = |p: (f64, f64), q: (f64, f64), r: (f64, f64)| -> f64 {
+        (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+    };
+    let straddles = |p: f64, q: f64| -> bool { (p > 1e-9 && q < -1e-9) || (p < -1e-9 && q > 1e-9) };
+    straddles(orient(a, b, c), orient(a, b, d)) && straddles(orient(c, d, a), orient(c, d, b))
+}
+
+/// True when the arc sweeps clockwise, as `G2` does.
+fn arc_is_clockwise(code: &str) -> bool {
+    code == "G2"
+}
+
+/// Length of the arc from `(x0, y0)` to `(x1, y1)` about a centre, or `None`
+/// when the two points do not lie on one circle.
+///
+/// A start and end point that coincide describe a full circle, which is the one
+/// case where the chord says nothing about the sweep; it is counted as a whole
+/// turn in the commanded direction.
+fn arc_length(x0: f64, y0: f64, x1: f64, y1: f64, i: f64, j: f64, clockwise: bool) -> Option<f64> {
+    let (cx, cy) = (x0 + i, y0 + j);
+    let start_r = ((x0 - cx).powi(2) + (y0 - cy).powi(2)).sqrt();
+    let end_r = ((x1 - cx).powi(2) + (y1 - cy).powi(2)).sqrt();
+    if !start_r.is_finite() || start_r < 1e-6 {
+        return None;
+    }
+    if (end_r - start_r).abs() > 0.05 {
+        return None;
+    }
+    let a0 = (y0 - cy).atan2(x0 - cx);
+    let a1 = (y1 - cy).atan2(x1 - cx);
+    let mut sweep = a1 - a0;
+    if clockwise {
+        while sweep >= 0.0 {
+            sweep -= std::f64::consts::TAU;
+        }
+    } else {
+        while sweep <= 0.0 {
+            sweep += std::f64::consts::TAU;
+        }
+    }
+    Some(sweep.abs() * start_r)
+}
+
 /// Checks a G-code file against a printer profile.
 pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
     let mut r = VerifyReport::default();
     let area = cfg.filament_area();
+    let mut volumetric = false;
     let (mut x, mut y, mut z) = (f64::NAN, f64::NAN, f64::NAN);
     let mut e = 0.0;
     let mut relative_e = false;
@@ -97,6 +163,8 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
     let mut retract_state = 0.0;
     let mut saw_heater_off = false;
     let mut saw_fan_on = false;
+    let mut in_perimeter = false;
+    let mut walls: Vec<((f64, f64), (f64, f64))> = Vec::new();
     let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
     let half_x = if cfg.origin_center {
         0.5 * cfg.bed_x
@@ -118,6 +186,9 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
             let tag = rest.trim();
             if tag == "LAYER_CHANGE" {
                 r.layers += 1;
+                walls.clear();
+            } else if let Some(kind) = tag.strip_prefix("TYPE:") {
+                in_perimeter = perimeter_type(kind.trim());
             } else if let Some(h) = tag.strip_prefix("HEIGHT:") {
                 height = h.trim().parse().unwrap_or(f64::NAN);
             }
@@ -131,6 +202,11 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
         match c.code {
             "G90" => absolute_xyz = true,
             "G91" => absolute_xyz = false,
+            "M200" => {
+                if get(&c, 'D').is_some_and(|d| d > 0.0) {
+                    volumetric = true;
+                }
+            }
             "M82" => relative_e = false,
             "M83" => relative_e = true,
             "G92" => {
@@ -182,7 +258,7 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                     saw_fan_on = true;
                 }
             }
-            "G0" | "G1" => {
+            "G0" | "G1" | "G2" | "G3" => {
                 r.moves += 1;
                 if let Some(f) = get(&c, 'F') {
                     feed = f;
@@ -249,6 +325,20 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                         format!("line {number}: X {x:.3} is outside the bed"),
                     );
                 }
+                if x.is_finite() && y.is_finite() && cfg.bed_shape.len() >= 3 {
+                    let (sx, sy) = if cfg.origin_center {
+                        (half_x, half_y)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    if !cfg.bed_contains(x + sx, y + sy) {
+                        push(
+                            &mut r,
+                            max_errors,
+                            format!("line {number}: X {x:.3} Y {y:.3} is outside the bed outline"),
+                        );
+                    }
+                }
                 if y.is_finite() && (y < min_y - tolerance || y > half_y + tolerance) {
                     push(
                         &mut r,
@@ -264,10 +354,49 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                     );
                 }
                 let moved_xy = previous.0.is_finite() && previous.1.is_finite();
-                let distance = if moved_xy {
-                    ((x - previous.0).powi(2) + (y - previous.1).powi(2)).sqrt()
+                let arc = if c.code == "G2" || c.code == "G3" {
+                    match (get(&c, 'I'), get(&c, 'J')) {
+                        (Some(i), Some(j)) if moved_xy => {
+                            match arc_length(
+                                previous.0,
+                                previous.1,
+                                x,
+                                y,
+                                i,
+                                j,
+                                arc_is_clockwise(c.code),
+                            ) {
+                                Some(length) => Some(length),
+                                None => {
+                                    push(
+                                        &mut r,
+                                        max_errors,
+                                        format!(
+                                            "line {number}: arc endpoints are not on one circle about I{i} J{j}"
+                                        ),
+                                    );
+                                    Some(0.0)
+                                }
+                            }
+                        }
+                        _ => {
+                            push(
+                                &mut r,
+                                max_errors,
+                                format!("line {number}: an arc needs both I and J"),
+                            );
+                            Some(0.0)
+                        }
+                    }
                 } else {
-                    0.0
+                    None
+                };
+                let distance = match arc {
+                    Some(length) => length,
+                    None if moved_xy => {
+                        ((x - previous.0).powi(2) + (y - previous.1).powi(2)).sqrt()
+                    }
+                    None => 0.0,
                 };
                 let speed = (feed / 60.0).max(1e-6);
                 match extrusion {
@@ -283,22 +412,28 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                         }
                         if z.is_finite() {
                             if z < max_extrusion_z - 1e-6 {
-                                push(
-                                    &mut r,
-                                    max_errors,
-                                    format!(
-                                        "line {number}: extruding at Z {z:.3} below an earlier layer at {max_extrusion_z:.3}"
-                                    ),
-                                );
+                                let descends_legally = cfg.print_sequence
+                                    == hfw_config::PrintSequence::ByObject
+                                    && cfg.gantry_height > 0.0
+                                    && max_extrusion_z <= cfg.gantry_height + 1e-6;
+                                if !descends_legally {
+                                    push(
+                                        &mut r,
+                                        max_errors,
+                                        format!(
+                                            "line {number}: extruding at Z {z:.3} below an earlier layer at {max_extrusion_z:.3}"
+                                        ),
+                                    );
+                                }
                             }
                             max_extrusion_z = max_extrusion_z.max(z);
                             if r.first_extrusion_z == 0.0 {
                                 r.first_extrusion_z = z;
                             }
                         }
-                        let volume = delta * area;
+                        let volume = if volumetric { delta } else { delta * area };
                         r.volume_mm3 += volume;
-                        r.filament_mm += delta;
+                        r.filament_mm += if volumetric { delta / area } else { delta };
                         r.est_seconds += distance / speed;
                         let flow = volume / (distance / speed);
                         if flow > cfg.max_volumetric_speed * 1.05 {
@@ -322,6 +457,9 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                                     ),
                                 );
                             }
+                        }
+                        if in_perimeter && moved_xy {
+                            walls.push((previous, (x, y)));
                         }
                         for (i, value) in [x, y, z].iter().enumerate() {
                             let from = match i {
@@ -347,6 +485,13 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                     _ => {
                         if distance > 1e-6 {
                             r.est_seconds += distance / speed;
+                            if moved_xy
+                                && walls
+                                    .iter()
+                                    .any(|&(c, d)| segments_cross(previous, (x, y), c, d))
+                            {
+                                r.travel_crossings += 1;
+                            }
                         }
                     }
                 }

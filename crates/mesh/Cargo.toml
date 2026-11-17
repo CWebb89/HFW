@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 hfw-geometry = { path = "../geometry" }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

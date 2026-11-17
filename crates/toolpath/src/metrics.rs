@@ -226,7 +226,7 @@ pub fn line_volume(line: &Line, height: f64) -> f64 {
     for k in 0..segn {
         let a = line.pts[k];
         let b = line.pts[(k + 1) % m];
-        v += a.dist(b) * 0.5 * (line.width[k] + line.width[(k + 1) % m]) * height;
+        v += a.dist(b) * 0.5 * (line.width[k] + line.width[(k + 1) % m]) * height * line.flow;
     }
     v
 }
@@ -270,6 +270,9 @@ mod tests {
             width: vec![width, width],
             closed: false,
             kind: Kind::Infill,
+            flow: 1.0,
+            overhang: 0.0,
+            object: 0,
         }
     }
 
@@ -330,6 +333,9 @@ mod tests {
             width: vec![0.4, 0.8],
             closed: false,
             kind: Kind::Side(0),
+            flow: 1.0,
+            overhang: 0.0,
+            object: 0,
         };
         assert!((line_volume(&line, 0.2) - 10.0 * 0.6 * 0.2).abs() < 1e-9);
         let (w, i) = extruded_volume(std::slice::from_ref(&line), 0.2);

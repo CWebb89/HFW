@@ -5,14 +5,38 @@
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+mod json;
+
+/// True when the human report goes to stderr because `--json` owns stdout.
+static HUMAN_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+macro_rules! outln {
+    () => {
+        if HUMAN_TO_STDERR.load(Ordering::Relaxed) {
+            eprintln!()
+        } else {
+            println!()
+        }
+    };
+    ($($arg:tt)*) => {
+        if HUMAN_TO_STDERR.load(Ordering::Relaxed) {
+            eprintln!($($arg)*)
+        } else {
+            println!($($arg)*)
+        }
+    };
+}
 
 use hfw_config::PrinterConfig;
+use hfw_config::{Intake, IntakeReport, Preset, PrintSequence, ProjectSettings};
 use hfw_engine::{
     evaluate_all, evaluate_perimeter, run, slice_plane, InfillPattern, Job, JobTotals, MaskCache,
     Mesh, MeshDiagnostics, MeshRepairReport, MeshTransform, Metrics, Mode, PlannedSlice, Settings,
-    SupportSettings, SupportStyle, MANIFEST_HEADER,
+    SkinPattern, SupportFill, SupportSettings, SupportStyle, MANIFEST_HEADER,
 };
 
 const USAGE: &str = "\
@@ -20,7 +44,11 @@ Usage:
   One layer:   hfw <model.stl> --z <mm> --svg <output.svg> [options]
   All layers:  hfw <model.stl> --layer-height <mm> --out-dir <folder> [options]
   Print file:  hfw <model.stl> --profile <p.cfg> --gcode <out.gcode>
+  A plate:     hfw <a.stl> <b.stl> <plate.3mf> --profile <p.cfg> --gcode <out.gcode>
   Check file:  hfw --check-gcode <out.gcode> --profile <p.cfg>
+
+Environment:
+  HFW_THREADS=<n>             Threads for the wall phase; unset asks the machine.
 
 Slice:
   --z <mm>                    Slice and plan one plane at this height.
@@ -33,21 +61,48 @@ Model preparation:
   --units mm|inch             Interpret STL coordinates (default mm).
   --scale <factor>            Extra uniform scale (default 1.0).
   --repair-basic              Run the conservative mesh repair pass first.
+  --spacing <mm>              Gap between automatically placed objects
+                                (default 5).
+  --no-arrange                Keep every model's own coordinates instead of
+                                laying separate files out side by side.
+  --gantry-height <mm>        Override the profile's gantry_height for this run:
+                                the clearance the head has over a finished part,
+                                which print_sequence = by object needs.
+
+Several model paths make one plate: each 3MF build item is its own object, and
+an STL file is placed to the right of everything already on the plate. Objects
+are printed one object at a time within each layer, so travels stay near the
+part they belong to. An object that came from a 3MF project can carry its own
+settings (infill density and pattern, wall count, extrusion width, support);
+anything else per object is reported as needing a feature this engine does not
+have, never quietly dropped.
 
 Walls:
   --width <mm>                Extrusion width (default 0.4).
   --walls <n>                 Perimeter loops (default 3).
   --brim <n>                  First-layer adhesion brim loops (default 0).
   --brim-gap <mm>             Clearance between part and brim (default 0.1).
+  --elephant-foot <mm>        Shrink the first layer by this much to remove the
+                              squashed lip a part gets at the bed (default 0).
+  --xy-size <mm>              Grow (+) or shrink (-) every layer; negative opens
+                              holes, positive closes them (default 0).
   --mode hfw|classic          Variable-width field walls, or plain offsets.
   --no-reference              Omit the exact slice outline from the SVG.
 
 Infill:
   --no-infill                 Skip infill entirely.
   --density <f>               Sparse density in 0..1 (default 0.15).
-  --pattern rectilinear|grid  Sparse pattern (default rectilinear).
+  --pattern <name>            Sparse pattern: rectilinear, grid, line,
+                        triangle, cubic, gyroid, 3d_honeycomb,
+                        concentric, zigzag, crosshatch, honeycomb,
+                        monotonic
+                              (default rectilinear).
   --skin-top <n>              Solid layers under a top surface (default 5).
   --skin-bottom <n>           Solid layers above a bottom surface (default 4).
+  --closing-radius <mm>       Fill cracks narrower than twice this while slicing
+                              (default 0.049, 0 disables).
+  --resolution <mm>           Drop slice detail below this deviation; 0 keeps
+                              every vertex (default 0).
   --max-bridge-length <mm>    Longest span printed as a bridge; longer spans
                                 print as ordinary solid infill.
   --bridge-cross-hatch <0|1>  Print two crossing strands across each gap before
@@ -56,7 +111,14 @@ Infill:
   --support-style <style>     normal (projected columns) or tree.
 
 Printer:
-  --profile <path>            Printer, filament and process profile.
+  --profile <path>            Printer, filament and process profile in this
+                              engine's own key names; an unknown key is an error.
+  --preset <path>             A PrusaSlicer or OrcaSlicer preset. Engine setting
+                              names are accepted, Orca's renames are translated,
+                              `inherits` is resolved, and nothing is refused: the
+                              report says what was applied and what was not.
+  --preset-strict             Fail instead of reporting when a preset carries a
+                              key this engine cannot apply.
   --flow <f>                  Extrusion multiplier 0.5..1.5, overriding the
                               profile. 1.0 prints the geometric volume.
   --gcode <path>              Emit G-code for the whole job (needs --profile,
@@ -65,6 +127,9 @@ Printer:
 
 Evaluation:
   --every <n>                 Plan walls on every Nth layer, plus the last.
+  --json                      Print the job as one JSON document on stdout and
+                              send the human report to stderr.
+  --json-paths                Also include every path vertex in that document.
   --metrics <mm>              Measure coverage at this sampling resolution.
 
 Other:
@@ -73,6 +138,11 @@ Other:
 A profile supplies defaults for width, walls, density, pattern, skin layers and
 layer heights; any option given on the command line wins. See profiles/ for
 voron_klipper.cfg and generic_marlin.cfg.
+
+A preset is what another slicer exports. `--preset` prints an intake report:
+how many keys were applied, how many are recognised but not implemented, and
+which names this engine does not know. `docs/SETTINGS-LEDGER.md` is the list the
+two counts come from.
 
 Single-layer mode plans one isolated plane, so every cell of it counts as a top
 and bottom surface: expect skin rather than sparse infill. Use a full stack for
@@ -92,7 +162,7 @@ fn main() -> ExitCode {
 }
 
 struct Options {
-    input: String,
+    inputs: Vec<String>,
     z_mm: Option<f64>,
     svg: Option<PathBuf>,
     layer_height: Option<f64>,
@@ -109,6 +179,10 @@ struct Options {
     walls: Option<usize>,
     brim: Option<usize>,
     brim_gap: Option<f64>,
+    elephant_foot: Option<f64>,
+    xy_size: Option<f64>,
+    closing_radius: Option<f64>,
+    resolution: Option<f64>,
     max_bridge_length: Option<f64>,
     cross_hatch: Option<bool>,
     support: Option<bool>,
@@ -116,17 +190,26 @@ struct Options {
     skin_top: Option<usize>,
     skin_bottom: Option<usize>,
     metrics_res: Option<f64>,
+    spacing: Option<f64>,
+    arrange: bool,
+    gantry_height: Option<f64>,
     profile: Option<PathBuf>,
     profile_config: Option<PrinterConfig>,
+    preset_strict: bool,
+    preset_report: Option<IntakeReport>,
     flow: Option<f64>,
     gcode: Option<PathBuf>,
     check_gcode: Option<PathBuf>,
+    pause_at: Vec<f64>,
+    colour_change_at: Vec<f64>,
+    json: bool,
+    json_paths: bool,
 }
 
 impl Options {
     fn base() -> Options {
         Options {
-            input: String::new(),
+            inputs: Vec::new(),
             z_mm: None,
             svg: None,
             layer_height: None,
@@ -143,6 +226,10 @@ impl Options {
             walls: None,
             brim: None,
             brim_gap: None,
+            elephant_foot: None,
+            xy_size: None,
+            closing_radius: None,
+            resolution: None,
             max_bridge_length: None,
             cross_hatch: None,
             support: None,
@@ -150,11 +237,20 @@ impl Options {
             skin_top: None,
             skin_bottom: None,
             metrics_res: None,
+            spacing: None,
+            arrange: true,
+            gantry_height: None,
             profile: None,
             profile_config: None,
+            preset_strict: false,
+            preset_report: None,
             flow: None,
             gcode: None,
             check_gcode: None,
+            pause_at: Vec::new(),
+            colour_change_at: Vec::new(),
+            json: false,
+            json_paths: false,
         }
     }
 
@@ -171,6 +267,18 @@ impl Options {
         if let Some(g) = self.brim_gap {
             self.settings.brim_gap = g;
         }
+        if let Some(v) = self.elephant_foot {
+            self.settings.elephant_foot = v;
+        }
+        if let Some(v) = self.xy_size {
+            self.settings.xy_size = v;
+        }
+        if let Some(v) = self.closing_radius {
+            self.settings.closing_radius = v;
+        }
+        if let Some(v) = self.resolution {
+            self.settings.resolution = v;
+        }
         if let (Some(l), Some(ip)) = (self.max_bridge_length, self.settings.infill.as_mut()) {
             ip.bridge.max_length = l;
         }
@@ -184,20 +292,146 @@ impl Options {
         }
     }
 
+    fn apply_project_settings(&mut self) -> Result<(), String> {
+        if self.profile_config.is_some() || self.inputs.is_empty() {
+            return Ok(());
+        }
+        let Some(first) = self.inputs.first().cloned() else {
+            return Ok(());
+        };
+        if !first.to_ascii_lowercase().ends_with(".3mf") {
+            return Ok(());
+        }
+        let parts = hfw_engine::three_mf_metadata(&first).map_err(|error| error.to_string())?;
+        let Some(project) = ProjectSettings::from_metadata(&parts) else {
+            return Ok(());
+        };
+        let (config, report) = PrinterConfig::from_preset(project.preset());
+        outln!(
+            "Project {} -> '{}' (from {})",
+            first,
+            config.name,
+            project.part()
+        );
+        print_report(&report);
+        if project.object_overrides() > 0 {
+            outln!(
+                "  {} object(s) carry per-object overrides; those are not applied",
+                project.object_overrides()
+            );
+        }
+        self.profile_config = Some(config);
+        self.preset_report = Some(report);
+        Ok(())
+    }
+
     fn apply_profile(&mut self, cfg: &PrinterConfig) {
-        self.settings.wall.w = cfg.line_width;
+        self.settings.spiral_vase = cfg.spiral_vase;
+        if cfg.variable_layer_height {
+            self.settings.layer_profile = cfg.layer_height_profile.clone();
+        }
+        self.settings.min_layer_height = cfg.min_layer_height;
+        self.settings.max_layer_height = cfg.max_layer();
+        self.settings.wall.w = if cfg.wall_width > 0.0 {
+            cfg.wall_width
+        } else {
+            cfg.line_width
+        };
+        self.settings.wall.w_outer = cfg.outer_wall_width;
+        self.settings.ironing = cfg.ironing;
+        self.settings.ironing_target = match cfg.ironing_type.as_str() {
+            "all_solid" => hfw_engine::IroningTarget::AllSolid,
+            "topmost_only" => hfw_engine::IroningTarget::TopmostOnly,
+            _ => hfw_engine::IroningTarget::TopSurfaces,
+        };
+        self.settings.ironing_spacing = cfg.ironing_spacing;
+        self.settings.measure_overhang = cfg.dynamic_overhang_speeds || cfg.dynamic_fan_speeds;
         self.settings.wall.walls = cfg.walls;
-        self.settings.brim_loops = cfg.brim_loops;
+        self.settings.wall.thin_walls = cfg.thin_walls;
+        self.settings.wall.gap_fill = cfg.gap_fill_enabled;
+        self.settings.wall.distribution = cfg.wall_distribution_count;
+        self.settings.nozzle = cfg.nozzle_diameter;
+        self.settings.first_layer_width = cfg.first_layer_width;
+        self.settings.extra_perimeters = cfg.extra_perimeters;
+        self.settings.extra_perimeters_overhangs = cfg.extra_perimeters_on_overhangs;
+        self.settings.one_perimeter_first_layer = cfg.only_one_perimeter_first_layer;
+        self.settings.one_perimeter_top = if cfg.top_one_perimeter_type == "none" {
+            String::new()
+        } else {
+            cfg.top_one_perimeter_type.clone()
+        };
+        self.settings.measure_overhang =
+            cfg.overhangs && (cfg.dynamic_overhang_speeds || cfg.dynamic_fan_speeds);
+        if cfg.wall_transition_length > 0.0 {
+            self.settings.wall.trans_len = cfg.wall_transition_length;
+        }
+        if cfg.wall_transition_filter_deviation > 0.0 {
+            self.settings.wall.hyst = 0.01 * cfg.wall_transition_filter_deviation;
+        }
+        if cfg.wall_transition_angle > 0.0 {
+            self.settings.wall.corner_deg = cfg.wall_transition_angle;
+        }
+        if cfg.perimeter_generator == "classic" {
+            self.settings.mode = Mode::Classic;
+        }
+        self.settings.wall.min_feature = if cfg.min_feature_size >= 0.0 {
+            cfg.min_feature_size
+        } else {
+            0.25 * cfg.nozzle_diameter
+        };
+        self.settings.brim_loops = if cfg.brim_width > 0.0 {
+            ((cfg.brim_width / cfg.line_width).round() as usize).max(1)
+        } else {
+            cfg.brim_loops
+        };
         self.settings.brim_gap = cfg.brim_gap;
+        self.settings.elephant_foot = cfg.elefant_foot_compensation;
+        self.settings.xy_size = cfg.xy_size_compensation;
+        self.settings.closing_radius = cfg.slice_closing_radius;
+        self.settings.resolution = cfg.resolution;
+        if let Ok(text) = std::env::var("HFW_THREADS") {
+            if let Ok(count) = text.trim().parse::<usize>() {
+                self.settings.threads = count;
+            }
+        }
         if let Some(ip) = self.settings.infill.as_mut() {
             ip.density = cfg.infill_density;
-            ip.top_layers = cfg.top_layers;
-            ip.bottom_layers = cfg.bottom_layers;
-            ip.pattern = if cfg.infill_pattern == "grid" {
-                InfillPattern::Grid
+            ip.width = if cfg.infill_width > 0.0 {
+                cfg.infill_width
             } else {
-                InfillPattern::Rectilinear
+                cfg.line_width
             };
+            ip.solid_width = cfg.solid_infill_width;
+            ip.top_width = cfg.top_infill_width;
+            ip.top_pattern = skin_pattern(&cfg.top_fill_pattern);
+            ip.bottom_pattern = skin_pattern(&cfg.bottom_fill_pattern);
+            ip.solid_every = cfg.solid_infill_every_layers;
+            ip.solid_below_area = cfg.solid_infill_below_area;
+            ip.combine_layers = cfg.infill_every_layers.max(1);
+            ip.combine_auto = cfg.automatic_infill_combination;
+            ip.combine_max_height = cfg.infill_combination_max_layer_height;
+            ip.top_layers = solid_layers(
+                cfg.top_layers,
+                cfg.top_solid_min_thickness,
+                cfg.layer_height,
+            );
+            ip.bottom_layers = solid_layers(
+                cfg.bottom_layers,
+                cfg.bottom_solid_min_thickness,
+                cfg.layer_height,
+            );
+            ip.vertical_shell = match cfg.ensure_vertical_shell_thickness.as_str() {
+                "disabled" => hfw_engine::VerticalShell::Disabled,
+                "partial" => hfw_engine::VerticalShell::Partial,
+                _ => hfw_engine::VerticalShell::Enabled,
+            };
+            ip.overlap = if cfg.infill_overlap >= 0.0 {
+                cfg.infill_overlap * ip.width
+            } else {
+                0.1 * ip.width
+            };
+            ip.pattern = infill_pattern(&cfg.infill_pattern).unwrap_or(InfillPattern::Rectilinear);
+            ip.fill_angle = cfg.fill_angle;
             ip.bridge.density = cfg.bridge_density;
             ip.bridge.cross_hatch = cfg.bridge_cross_hatch;
             ip.bridge.width = if cfg.bridge_line_width > 0.0 {
@@ -211,15 +445,46 @@ impl Options {
                 None
             };
             ip.bridge.max_length = cfg.max_bridge_length;
+            ip.anchor = if cfg.infill_anchor >= 0.0 {
+                cfg.infill_anchor
+            } else {
+                6.0 * ip.width
+            };
+            ip.anchor_max = cfg.infill_anchor_max;
         }
         if cfg.support {
-            let mut sp = SupportSettings::new(cfg.line_width);
+            let mut sp = SupportSettings::new(if cfg.support_width > 0.0 {
+                cfg.support_width
+            } else {
+                cfg.line_width
+            });
+            sp.interface_width = cfg.support_interface_width;
+            let interface_width = if sp.interface_width > 0.0 {
+                sp.interface_width
+            } else {
+                sp.width
+            };
+            let density_from_spacing = |width: f64, spacing: f64| {
+                if spacing == 0.0 {
+                    1.0
+                } else {
+                    (width / spacing).min(1.0)
+                }
+            };
             sp.threshold_angle = cfg.support_threshold_angle;
             sp.xy_gap = cfg.support_xy_gap;
             sp.z_gap = cfg.support_z_gap;
             sp.interface_layers = cfg.support_interface_layers;
-            sp.density = cfg.support_density;
-            sp.interface_density = cfg.support_interface_density;
+            sp.density = if cfg.support_spacing >= 0.0 {
+                density_from_spacing(sp.width, cfg.support_spacing)
+            } else {
+                cfg.support_density
+            };
+            sp.interface_density = if cfg.support_interface_spacing >= 0.0 {
+                density_from_spacing(interface_width, cfg.support_interface_spacing)
+            } else {
+                cfg.support_interface_density
+            };
             sp.on_build_plate_only = cfg.support_on_build_plate_only;
             sp.min_area = cfg.support_min_area;
             sp.style = if cfg.support_style == "tree" {
@@ -232,6 +497,33 @@ impl Options {
             sp.tip_diameter = cfg.support_tip_diameter;
             sp.branch_diameter_angle = cfg.support_branch_diameter_angle;
             sp.max_branch_diameter = cfg.support_max_branch_diameter;
+            sp.pattern = if cfg.support_pattern == "grid" {
+                SupportFill::Grid
+            } else {
+                SupportFill::Rectilinear
+            };
+            sp.first_layer_density = cfg.support_first_layer_density;
+            sp.interface_pattern = match cfg.support_interface_pattern.as_str() {
+                "grid" => Some(SupportFill::Grid),
+                "rectilinear" => Some(SupportFill::Rectilinear),
+                _ => None,
+            };
+            sp.interface_loops = if cfg.support_interface_shells {
+                cfg.support_interface_loops.max(2)
+            } else {
+                cfg.support_interface_loops
+            };
+            sp.sheath = cfg.support_sheath;
+            sp.first_layer_expansion = cfg.support_first_layer_expansion;
+            sp.enforce_layers = cfg.support_enforce_layers;
+            sp.bottom_interface_layers = cfg.support_bottom_interface_layers;
+            sp.tree_angle_slow = cfg.support_tree_angle_slow;
+            sp.tree_top_rate = cfg.support_tree_top_rate;
+            sp.tree_double_wall = cfg.support_tree_double_wall;
+            sp.closing_radius = cfg.support_closing_radius;
+            sp.bottom_contact_distance = cfg.support_bottom_contact_distance;
+            sp.skip_bridges = cfg.support_skip_bridges;
+            sp.bridge_span = cfg.max_bridge_length;
             self.settings.support = Some(sp);
         }
         if self.layer_height.is_none() {
@@ -250,6 +542,28 @@ fn next_value(
     arguments
         .next()
         .ok_or_else(|| format!("{option} requires a value"))
+}
+
+fn print_intake(path: &std::path::Path, config: &PrinterConfig, report: &IntakeReport) {
+    outln!("Preset {} -> '{}'", path.display(), config.name);
+    print_report(report);
+}
+
+fn print_report(report: &IntakeReport) {
+    outln!("  {}", report.summary());
+    for (key, intake) in report.gaps() {
+        let label = match intake {
+            Intake::Applied => "applied",
+            Intake::Partial => "partial: value applied, this engine's meaning differs",
+            Intake::Recognised => "recognised: part of the dialect, not implemented yet",
+            Intake::Unconverted => "unconverted: value spelling this engine rejects",
+            Intake::Unknown => "unknown: not a dialect name",
+        };
+        outln!("    {key}: {label}");
+    }
+    for warning in report.warnings() {
+        outln!("  warning: {warning}");
+    }
 }
 
 fn number(value: &str, option: &str) -> Result<f64, String> {
@@ -283,7 +597,7 @@ fn parse_arguments() -> Result<Option<Options>, String> {
         None => return Err(USAGE.to_owned()),
         Some(first) if first.starts_with('-') => {}
         Some(_) => {
-            o.input = arguments.next().unwrap_or_default();
+            o.inputs.push(arguments.next().unwrap_or_default());
         }
     }
 
@@ -326,6 +640,30 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.brim_gap = Some(number(
                     &next_value(&mut arguments, "--brim-gap")?,
                     "--brim-gap",
+                )?)
+            }
+            "--elephant-foot" => {
+                o.elephant_foot = Some(number(
+                    &next_value(&mut arguments, "--elephant-foot")?,
+                    "--elephant-foot",
+                )?)
+            }
+            "--xy-size" => {
+                o.xy_size = Some(number(
+                    &next_value(&mut arguments, "--xy-size")?,
+                    "--xy-size",
+                )?)
+            }
+            "--closing-radius" => {
+                o.closing_radius = Some(number(
+                    &next_value(&mut arguments, "--closing-radius")?,
+                    "--closing-radius",
+                )?)
+            }
+            "--resolution" => {
+                o.resolution = Some(number(
+                    &next_value(&mut arguments, "--resolution")?,
+                    "--resolution",
                 )?)
             }
             "--max-bridge-length" => {
@@ -384,13 +722,12 @@ fn parse_arguments() -> Result<Option<Options>, String> {
             }
             "--pattern" => {
                 let value = next_value(&mut arguments, "--pattern")?;
-                match value.as_str() {
-                    "rectilinear" | "grid" => o.pattern = Some(value),
-                    other => {
-                        return Err(format!(
-                            "--pattern must be rectilinear or grid, got {other}"
-                        ))
-                    }
+                if infill_pattern(&value).is_some() {
+                    o.pattern = Some(value);
+                } else {
+                    return Err(format!(
+                        "--pattern must be rectilinear, grid, line, triangle, cubic, gyroid, 3d_honeycomb, concentric, zigzag, crosshatch, honeycomb or monotonic, got {value}"
+                    ));
                 }
             }
             "--skin-top" => {
@@ -418,9 +755,33 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.profile = Some(path);
                 o.profile_config = Some(config);
             }
+            "--preset" => {
+                let path = PathBuf::from(next_value(&mut arguments, "--preset")?);
+                let preset = Preset::load(&path).map_err(|error| error.to_string())?;
+                let (config, report) = PrinterConfig::from_preset(&preset);
+                print_intake(&path, &config, &report);
+                o.profile = Some(path);
+                o.profile_config = Some(config);
+                o.preset_report = Some(report);
+            }
+            "--preset-strict" => o.preset_strict = true,
             "--gcode" => o.gcode = Some(PathBuf::from(next_value(&mut arguments, "--gcode")?)),
+            "--pause-at" => {
+                let value = next_value(&mut arguments, "--pause-at")?;
+                o.pause_at = heights(&value).map_err(|e| format!("--pause-at: {e}"))?;
+            }
+            "--colour-change-at" => {
+                let value = next_value(&mut arguments, "--colour-change-at")?;
+                o.colour_change_at =
+                    heights(&value).map_err(|e| format!("--colour-change-at: {e}"))?;
+            }
             "--check-gcode" => {
                 o.check_gcode = Some(PathBuf::from(next_value(&mut arguments, "--check-gcode")?))
+            }
+            "--json" => o.json = true,
+            "--json-paths" => {
+                o.json = true;
+                o.json_paths = true;
             }
             "--strict" => o.settings.strict_slices = true,
             "--flow" => {
@@ -436,20 +797,50 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                     "--metrics",
                 )?)
             }
+            "--spacing" => {
+                o.spacing = Some(positive(
+                    &next_value(&mut arguments, "--spacing")?,
+                    "--spacing",
+                )?)
+            }
+            "--no-arrange" => o.arrange = false,
+            "--gantry-height" => {
+                o.gantry_height = Some(positive(
+                    &next_value(&mut arguments, "--gantry-height")?,
+                    "--gantry-height",
+                )?)
+            }
             "--help" | "-h" => {
-                println!("{USAGE}");
+                outln!("{USAGE}");
                 return Ok(None);
             }
+            unknown if !unknown.starts_with('-') => o.inputs.push(unknown.to_owned()),
             unknown => return Err(format!("unknown option: {unknown}\n\n{USAGE}")),
         }
     }
-    if o.check_gcode.is_none() && o.input.is_empty() {
+    if o.check_gcode.is_none() && o.inputs.is_empty() {
         return Err(format!("missing model path\n\n{USAGE}"));
+    }
+    if o.preset_strict {
+        match o.preset_report.as_ref() {
+            None => return Err("--preset-strict needs --preset".to_owned()),
+            Some(report) if !report.is_complete() => {
+                return Err(format!(
+                    "--preset-strict: {} of {} keys were not applied",
+                    report.len() - report.count(Intake::Applied),
+                    report.len()
+                ))
+            }
+            Some(_) => {}
+        }
     }
     Ok(Some(o))
 }
 
 fn run_cli() -> Result<(), String> {
+    if std::env::args().any(|argument| argument == "--json" || argument == "--json-paths") {
+        HUMAN_TO_STDERR.store(true, Ordering::Relaxed);
+    }
     let Some(mut o) = parse_arguments()? else {
         return Ok(());
     };
@@ -457,10 +848,16 @@ fn run_cli() -> Result<(), String> {
     if let Some(path) = o.check_gcode.clone() {
         return run_check(&o, &path);
     }
+    o.apply_project_settings()?;
     if let Some(config) = o.profile_config.clone() {
         o.apply_profile(&config);
     }
     o.apply_overrides();
+    if let Some(height) = o.gantry_height {
+        if let Some(cfg) = o.profile_config.as_mut() {
+            cfg.gantry_height = height;
+        }
+    }
     if let Some(flow) = o.flow {
         if let Some(cfg) = o.profile_config.as_mut() {
             cfg.flow = flow;
@@ -487,41 +884,88 @@ fn run_cli() -> Result<(), String> {
 
     if o.no_infill {
         o.settings.infill = None;
-    } else if let Some(ip) = o.settings.infill.as_mut() {
-        if let Some(density) = o.density {
-            ip.density = density;
-        }
-        if let Some(pattern) = o.pattern.as_deref() {
-            ip.pattern = if pattern == "grid" {
-                InfillPattern::Grid
+    } else {
+        let configured_infill = o
+            .profile_config
+            .as_ref()
+            .map(|cfg| cfg.infill_width)
+            .unwrap_or(0.0);
+        let nominal = o.settings.wall.w;
+        if let Some(ip) = o.settings.infill.as_mut() {
+            if let Some(density) = o.density {
+                ip.density = density;
+            }
+            if let Some(pattern) = o.pattern.as_deref() {
+                ip.pattern = infill_pattern(pattern).unwrap_or(InfillPattern::Rectilinear);
+            }
+            ip.width = if configured_infill > 0.0 {
+                configured_infill
             } else {
-                InfillPattern::Rectilinear
+                nominal
             };
-        }
-        ip.width = o.settings.wall.w;
-        ip.overlap = 0.1 * o.settings.wall.w;
-        ip.skin_res = o.settings.wall.w / 4.0;
-        ip.step = o.settings.wall.w / 4.0;
-        if ip.density == 0.0 && ip.top_layers == 0 && ip.bottom_layers == 0 {
-            o.settings.infill = None;
+            ip.overlap = 0.1 * ip.width;
+            ip.skin_res = ip.width / 4.0;
+            ip.step = ip.width / 4.0;
+            if ip.density == 0.0 && ip.top_layers == 0 && ip.bottom_layers == 0 {
+                o.settings.infill = None;
+            }
         }
     }
     o.settings.metrics_res = o.metrics_res;
 
-    let mut mesh = Mesh::load_stl(&o.input).map_err(|error| error.to_string())?;
+    let mut plate = load_plate(&o)?;
+    let mut mesh = Mesh::merged(
+        &plate
+            .iter()
+            .map(|part| part.mesh.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
     if mesh.triangle_count() == 0 {
-        return Err("the STL contains no triangles".to_owned());
+        return Err("the model contains no triangles".to_owned());
     }
 
     let unit_scale = if o.units == "inch" { 25.4 } else { 1.0 };
+    let shrink = o.profile_config.as_ref().map_or([1.0; 3], |cfg| {
+        let factor = |percent: f64| {
+            if percent > 0.0 && percent < 100.0 {
+                100.0 / (100.0 - percent)
+            } else {
+                1.0
+            }
+        };
+        [
+            factor(cfg.shrinkage_xy),
+            factor(cfg.shrinkage_xy),
+            factor(cfg.shrinkage_z),
+        ]
+    });
     let total_scale = unit_scale * o.scale;
-    if (total_scale - 1.0).abs() > f64::EPSILON {
+    let factors = [
+        total_scale * shrink[0],
+        total_scale * shrink[1],
+        total_scale * shrink[2],
+    ];
+    if factors
+        .iter()
+        .any(|value| (*value - 1.0).abs() > f64::EPSILON)
+    {
         mesh = mesh
             .transformed(MeshTransform {
-                scale: [total_scale; 3],
+                scale: factors,
                 ..MeshTransform::default()
             })
             .map_err(|error| error.to_string())?;
+        for part in &mut plate {
+            part.mesh = part
+                .mesh
+                .transformed(MeshTransform {
+                    scale: factors,
+                    ..MeshTransform::default()
+                })
+                .map_err(|error| error.to_string())?;
+            part.refresh_bounds();
+        }
     }
 
     let before = mesh.diagnostics();
@@ -540,9 +984,609 @@ fn run_cli() -> Result<(), String> {
     }
 
     if single {
-        return run_single(&o, &mesh, before, after, repair);
+        return run_single(&o, &mesh, before, after, repair, total_scale);
     }
-    run_stack(&o, &mesh, before, after, repair, total_scale)
+    run_stack(&o, &mesh, &plate, before, after, repair, total_scale)
+}
+
+/// One body on the plate, with the placement it prints at.
+struct PlatePart {
+    /// Model object id from the file, or 0 for an STL that has no ids.
+    id: u32,
+    /// File stem, or the object name the 3MF gave it.
+    name: String,
+    /// Geometry already in plate coordinates.
+    mesh: Mesh,
+    /// XY bounds in plate coordinates: `(min x, min y, max x, max y)`.
+    bounds: (f64, f64, f64, f64),
+    /// True when the input file placed it, so arranging leaves it alone.
+    positioned: bool,
+    /// Settings this object prints with: the plate's, plus its own overrides.
+    settings: Settings,
+    /// Override keys that were applied, for the report.
+    applied_overrides: Vec<String>,
+    /// Override keys this engine cannot apply per object, for the report.
+    ignored_overrides: Vec<String>,
+}
+
+impl PlatePart {
+    fn new(
+        id: u32,
+        name: String,
+        mesh: Mesh,
+        positioned: bool,
+        settings: Settings,
+    ) -> Result<Self, String> {
+        let bounds = mesh
+            .xy_bounds_mm()
+            .ok_or_else(|| format!("{name} has no vertices"))?;
+        Ok(Self {
+            id,
+            name,
+            mesh,
+            bounds,
+            positioned,
+            settings,
+            applied_overrides: Vec::new(),
+            ignored_overrides: Vec::new(),
+        })
+    }
+
+    fn refresh_bounds(&mut self) {
+        if let Some(bounds) = self.mesh.xy_bounds_mm() {
+            self.bounds = bounds;
+        }
+    }
+
+    fn has_overrides(&self) -> bool {
+        !self.applied_overrides.is_empty()
+    }
+}
+
+/// Gap left between automatically placed objects, in millimetres.
+const PLATE_SPACING_MM: f64 = 5.0;
+
+/// Tolerance around an object's box when deciding which object a path belongs
+/// to, in millimetres. Perimeter, brim and support paths stick out past the
+/// model, so a strict box test would mislabel them.
+const OBJECT_LABEL_TOLERANCE_MM: f64 = 5.0;
+
+fn load_plate(o: &Options) -> Result<Vec<PlatePart>, String> {
+    let mut parts = Vec::new();
+    for input in &o.inputs {
+        let path = PathBuf::from(input);
+        let is_3mf = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("3mf"));
+        if is_3mf {
+            let overrides = hfw_engine::three_mf_metadata(&path)
+                .map(|parts| hfw_config::object_overrides(&parts))
+                .unwrap_or_default();
+            for object in hfw_engine::load_3mf_objects(&path).map_err(|error| error.to_string())? {
+                let override_ = overrides.iter().find(|override_| override_.id == object.id);
+                let name = match override_.and_then(|override_| override_.name.clone()) {
+                    Some(named) => named,
+                    None => object.name,
+                };
+                let mut part =
+                    PlatePart::new(object.id, name, object.mesh, true, o.settings.clone())?;
+                if let Some(override_) = override_ {
+                    apply_object_overrides(&mut part, &override_.pairs);
+                }
+                parts.push(part);
+            }
+        } else {
+            let mesh = Mesh::load_model(&path).map_err(|error| error.to_string())?;
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("model")
+                .to_owned();
+            parts.push(PlatePart::new(0, name, mesh, false, o.settings.clone())?);
+        }
+    }
+    if parts.is_empty() {
+        return Err("no model path".to_owned());
+    }
+    arrange_plate(&mut parts, o)?;
+    for (index, part) in parts.iter().enumerate() {
+        for other in &parts[index + 1..] {
+            if boxes_overlap(part.bounds, other.bounds) {
+                outln!(
+                    "warning: {} and {} share the same space on the plate; they print on top of each other \
+                     (use --spacing without --no-arrange to lay them out)",
+                    part.name, other.name
+                );
+            }
+        }
+    }
+    for part in &parts {
+        if part.has_overrides() {
+            outln!(
+                "Object {} (#{}) overrides: {}.",
+                part.name,
+                part.id,
+                part.applied_overrides.join(", ")
+            );
+        }
+        if !part.ignored_overrides.is_empty() {
+            outln!(
+                "  {} override(s) on {} need a feature this engine does not have per object: {}.",
+                part.ignored_overrides.len(),
+                part.name,
+                part.ignored_overrides.join(", ")
+            );
+        }
+    }
+    Ok(parts)
+}
+
+/// Applies a project's per-object settings to one object's planner settings.
+///
+/// Only settings the planner can actually honour per object are read; anything
+/// else is counted and named, never silently dropped. Layer height is refused
+/// on purpose: the whole plate shares one layer schedule, so a per-object value
+/// would either be ignored or desynchronise the stack.
+fn apply_object_overrides(part: &mut PlatePart, pairs: &[(String, String)]) {
+    for (key, value) in pairs {
+        let applied = match key.as_str() {
+            "sparse_infill_density" | "fill_density" | "infill_density" => match fraction(value) {
+                Some(density) => match part.settings.infill.as_mut() {
+                    Some(infill) => {
+                        infill.density = density;
+                        true
+                    }
+                    None => false,
+                },
+                None => false,
+            },
+            "sparse_infill_pattern" | "fill_pattern" | "infill_pattern" => {
+                let pattern = infill_pattern(value);
+                match (pattern, part.settings.infill.as_mut()) {
+                    (Some(pattern), Some(infill)) => {
+                        infill.pattern = pattern;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            "wall_loops" | "perimeters" | "walls" => match value.trim().parse::<usize>() {
+                Ok(loops) if loops > 0 => {
+                    part.settings.wall.walls = loops;
+                    true
+                }
+                _ => false,
+            },
+            "line_width" | "extrusion_width" | "perimeter_extrusion_width" => {
+                match millimetres(value) {
+                    Some(width) if width > 0.0 => {
+                        part.settings.wall.w = width;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            "enable_support" | "support_material" => match boolean_value(value) {
+                Some(true) => {
+                    part.settings.support = Some(SupportSettings::new(part.settings.wall.w));
+                    true
+                }
+                Some(false) => {
+                    part.settings.support = None;
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        };
+        if applied {
+            part.applied_overrides.push(key.clone());
+        } else {
+            part.ignored_overrides.push(key.clone());
+        }
+    }
+}
+
+fn fraction(value: &str) -> Option<f64> {
+    let text = value.trim();
+    if let Some(percent) = text.strip_suffix('%') {
+        let value: f64 = percent.trim().parse().ok()?;
+        return Some((value / 100.0).clamp(0.0, 1.0));
+    }
+    let value: f64 = text.parse().ok()?;
+    Some(value.clamp(0.0, 1.0))
+}
+
+fn millimetres(value: &str) -> Option<f64> {
+    let text = value.trim().trim_end_matches("mm").trim();
+    text.parse().ok()
+}
+
+fn boolean_value(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Maps a profile's or the command line's pattern name to the engine's pattern.
+///
+/// The dialect names are Orca's and PrusaSlicer's, and a profile may carry a
+/// pattern this engine has no geometry for. Those are reported as unapplied by
+/// the intake rather than silently printed as something else, so this returns
+/// `None` and the caller decides.
+/// Maps a profile's skin-pattern name onto the skin fill this engine draws.
+///
+/// The parser has already refused anything outside this list, so the fallback
+/// is only reached by a caller that built a config by hand.
+fn skin_pattern(name: &str) -> SkinPattern {
+    match name {
+        "rectilinear" => SkinPattern::Rectilinear,
+        "monotoniclines" => SkinPattern::MonotonicLines,
+        "alignedrectilinear" => SkinPattern::AlignedRectilinear,
+        "concentric" => SkinPattern::Concentric,
+        "hilbertcurve" => SkinPattern::HilbertCurve,
+        "archimedeanchords" => SkinPattern::ArchimedeanChords,
+        "octagramspiral" => SkinPattern::OctagramSpiral,
+        _ => SkinPattern::Monotonic,
+    }
+}
+
+fn infill_pattern(name: &str) -> Option<InfillPattern> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "grid" => Some(InfillPattern::Grid),
+        "rectilinear" | "rectilinear_infill" => Some(InfillPattern::Rectilinear),
+        "line" | "lines" => Some(InfillPattern::Line),
+        "triangle" | "triangles" => Some(InfillPattern::Triangle),
+        "cubic" => Some(InfillPattern::Cubic),
+        "gyroid" => Some(InfillPattern::Gyroid),
+        "3d_honeycomb" | "3dhoneycomb" | "honeycomb_3d" => Some(InfillPattern::Honeycomb3D),
+        "concentric" => Some(InfillPattern::Concentric),
+        "zigzag" | "zig_zag" => Some(InfillPattern::ZigZag),
+        "crosshatch" | "cross_hatch" => Some(InfillPattern::CrossHatch),
+        "honeycomb" | "hexagon" => Some(InfillPattern::Honeycomb),
+        "monotonic" => Some(InfillPattern::Monotonic),
+        "monotonicline" | "monotoniclines" | "monotonic_line" => {
+            Some(InfillPattern::MonotonicLines)
+        }
+        _ => None,
+    }
+}
+
+/// Places objects that no file positioned, to the right of the ones it did.
+///
+/// A 3MF already carries a plate layout, so those objects keep their coordinates.
+/// An STL carries only model coordinates, and several of them usually sit on top
+/// of each other at the origin, so they are laid out left to right with
+/// `--spacing` between them, wrapping to a new row when the bed runs out. The
+/// writer centres the finished plate on the bed and refuses it if it no longer
+/// fits.
+fn arrange_plate(parts: &mut [PlatePart], o: &Options) -> Result<(), String> {
+    if !o.arrange || parts.len() < 2 {
+        return Ok(());
+    }
+    let bed_width = o.profile_config.clone().unwrap_or_default().bed_x;
+    let spacing = o.spacing.unwrap_or(PLATE_SPACING_MM);
+
+    let positioned: Vec<&PlatePart> = parts.iter().filter(|part| part.positioned).collect();
+    let row_start = match positioned
+        .iter()
+        .map(|part| part.bounds.2)
+        .fold(None, max_opt)
+    {
+        Some(right) => right + spacing,
+        None => 0.0,
+    };
+    let mut row_y = positioned
+        .iter()
+        .map(|part| part.bounds.1)
+        .fold(None, min_opt)
+        .unwrap_or(0.0);
+
+    let mut cursor_x = row_start;
+    let mut row_height = 0.0;
+    for part in parts.iter_mut().filter(|part| !part.positioned) {
+        let (min_x, min_y, max_x, max_y) = part.bounds;
+        let width = max_x - min_x;
+        let height = max_y - min_y;
+        if cursor_x > row_start && cursor_x + width - row_start > bed_width {
+            row_y += row_height + spacing;
+            cursor_x = row_start;
+            row_height = 0.0;
+        }
+        let dx = cursor_x - min_x;
+        let dy = row_y - min_y;
+        if dx.abs() > f64::EPSILON || dy.abs() > f64::EPSILON {
+            part.mesh = part
+                .mesh
+                .transformed(MeshTransform {
+                    translation_mm: [dx, dy, 0.0],
+                    ..MeshTransform::default()
+                })
+                .map_err(|error| error.to_string())?;
+            part.refresh_bounds();
+        }
+        cursor_x += width + spacing;
+        row_height = row_height.max(height);
+    }
+    Ok(())
+}
+
+fn max_opt(best: Option<f64>, value: f64) -> Option<f64> {
+    Some(match best {
+        Some(current) => current.max(value),
+        None => value,
+    })
+}
+
+fn min_opt(best: Option<f64>, value: f64) -> Option<f64> {
+    Some(match best {
+        Some(current) => current.min(value),
+        None => value,
+    })
+}
+
+/// Labels every planned path with the object it belongs to.
+///
+/// The engine slices the plate as one body, so object identity has to be put back
+/// afterwards: a path's centroid falls inside exactly one object's box on a
+/// normal plate, and the nearest box decides when it does not. The label only
+/// changes print order, never geometry, so a wrong guess is a worse travel plan
+/// rather than a wrong part.
+fn label_objects(job: &mut Job, plate: &[PlatePart]) {
+    if plate.len() < 2 {
+        return;
+    }
+    for layer in &mut job.layers {
+        for line in &mut layer.paths {
+            if line.pts.is_empty() {
+                continue;
+            }
+            let mut sum_x = 0.0;
+            let mut sum_y = 0.0;
+            for point in &line.pts {
+                sum_x += point.x;
+                sum_y += point.y;
+            }
+            let count = line.pts.len() as f64;
+            line.object = object_at(sum_x / count, sum_y / count, plate);
+        }
+    }
+}
+
+/// Plans a plate in `by object` order: one whole object, then the next.
+///
+/// Each object is sliced and planned on its own, so its layer stack starts at the
+/// bed with its own first layer, brim and cooling. Two things are checked before
+/// any planning happens, because both are collisions if wrong: every object has
+/// to be shorter than the toolhead's clearance over a finished part, and every
+/// pair has to be far enough apart for the head to travel between them.
+/// How a plate of objects becomes one file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlateOrder {
+    /// Every object's layer N, then every object's layer N+1.
+    ByLayer,
+    /// One object's whole stack, then the next object's.
+    ByObject,
+}
+
+/// Plans a plate object by object and assembles the file in `order`.
+///
+/// This is the path taken whenever an object carries its own settings, and
+/// whenever `print_sequence = by object`. Each object is sliced and planned on
+/// its own, so its own wall count, infill density or support decision applies to
+/// it alone; the stacks are then interleaved by layer, or concatenated.
+///
+/// By-object order is checked first, because both checks are collisions if wrong:
+/// every object has to be shorter than the toolhead's clearance over a finished
+/// part, and every pair has to be far enough apart for the head to pass between
+/// them.
+fn plate_job(
+    o: &Options,
+    plate: &[PlatePart],
+    first_layer_height: f64,
+    layer_height: f64,
+    diagnostics: MeshDiagnostics,
+    order: PlateOrder,
+) -> Result<Job, String> {
+    if order == PlateOrder::ByObject {
+        let cfg = o
+            .profile_config
+            .as_ref()
+            .ok_or_else(|| "print_sequence = by object needs --profile".to_owned())?;
+        if cfg.gantry_height <= 0.0 {
+            return Err(
+                "print_sequence = by object needs gantry_height in the profile: the toolhead has \
+                 to pass over a finished object, and guessing that height would drive it through one"
+                    .to_owned(),
+            );
+        }
+        let spacing = o.spacing.unwrap_or(PLATE_SPACING_MM);
+        for (index, part) in plate.iter().enumerate() {
+            let height = part
+                .mesh
+                .z_bounds()
+                .map(|(low, high)| (high - low) as f64 / 1_000_000.0)
+                .unwrap_or(0.0);
+            if height > cfg.gantry_height {
+                return Err(format!(
+                    "{} is {height:.1} mm tall and print_sequence = by object cannot pass the \
+                     head over it (gantry_height is {:.1} mm)",
+                    part.name, cfg.gantry_height
+                ));
+            }
+            for other in &plate[index + 1..] {
+                if !far_enough_apart(part.bounds, other.bounds, spacing) {
+                    return Err(format!(
+                        "{} and {} are closer than {spacing:.1} mm; the toolhead needs that gap \
+                         to pass between them",
+                        part.name, other.name
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut stacks = Vec::with_capacity(plate.len());
+    for part in plate {
+        stacks.push(
+            run(&part.mesh, first_layer_height, layer_height, &part.settings)
+                .map_err(|error| error.to_string())?,
+        );
+    }
+
+    let mut job = Job {
+        mesh_diagnostics: diagnostics,
+        layers: Vec::new(),
+        metrics: Vec::new(),
+        volume: (0.0, 0.0),
+        stats: hfw_engine::JobStats::default(),
+        worst_layer_ms: 0.0,
+        worst_layer: 0,
+        skipped: Vec::new(),
+    };
+    let tallest = stacks
+        .iter()
+        .map(|stack| stack.layers.len())
+        .max()
+        .unwrap_or(0);
+    for step in 0..stacks.len() * tallest {
+        let (object, layer_index) = match order {
+            PlateOrder::ByObject => (step / tallest.max(1), step % tallest.max(1)),
+            PlateOrder::ByLayer => (step % stacks.len(), step / stacks.len().max(1)),
+        };
+        let Some(stack) = stacks.get_mut(object) else {
+            continue;
+        };
+        let base = job.layers.len();
+        let Some(mut layer) = stack.layers.get(layer_index).cloned() else {
+            continue;
+        };
+        if layer.paths.is_empty() && !layer.first {
+            continue;
+        }
+        layer.first = layer_index == 0;
+        layer.index = base;
+        let label = u16::try_from(object).unwrap_or(u16::MAX);
+        for line in &mut layer.paths {
+            line.object = label;
+        }
+        job.layers.push(layer);
+    }
+    for (object, stack) in stacks.iter_mut().enumerate() {
+        let _ = object;
+        let base = job.layers.len();
+        for (offset, reason) in std::mem::take(&mut stack.skipped) {
+            job.skipped.push((base + offset, reason));
+        }
+        job.metrics.append(&mut stack.metrics);
+        job.volume.0 += stack.volume.0;
+        job.volume.1 += stack.volume.1;
+        add_stats(&mut job.stats, &stack.stats);
+        if stack.worst_layer_ms > job.worst_layer_ms {
+            job.worst_layer_ms = stack.worst_layer_ms;
+            job.worst_layer = base + stack.worst_layer;
+        }
+    }
+    Ok(job)
+}
+
+/// Deposited volume per object, in cubic millimetres, in plate order.
+///
+/// Read out of the planned paths rather than the meshes, so it reports what the
+/// file will actually deposit: a per-object infill override shows up here as one
+/// part holding more plastic than the other.
+fn object_volumes(job: &Job, plate: &[PlatePart]) -> Vec<f64> {
+    let mut volumes = vec![0.0; plate.len()];
+    for layer in &job.layers {
+        let height = layer.height();
+        for line in &layer.paths {
+            if let Some(slot) = volumes.get_mut(usize::from(line.object)) {
+                *slot += hfw_engine::line_volume(line, height);
+            }
+        }
+    }
+    volumes
+}
+
+fn far_enough_apart(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64), spacing: f64) -> bool {
+    let gap_x = (b.0 - a.2).max(a.0 - b.2);
+    let gap_y = (b.1 - a.3).max(a.1 - b.3);
+    gap_x >= spacing || gap_y >= spacing
+}
+
+fn solid_layers(configured: usize, min_thickness: f64, layer_height: f64) -> usize {
+    if min_thickness <= 0.0 || layer_height <= 0.0 {
+        return configured;
+    }
+    let from_thickness = (min_thickness / layer_height).ceil() as usize;
+    configured.max(from_thickness)
+}
+
+fn heights(value: &str) -> Result<Vec<f64>, String> {
+    let mut out = Vec::new();
+    for entry in value.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let height: f64 = entry
+            .parse()
+            .map_err(|_| format!("`{entry}` is not a Z height in millimetres"))?;
+        if !height.is_finite() || height <= 0.0 {
+            return Err(format!("`{entry}` is not a height above the bed"));
+        }
+        out.push(height);
+    }
+    if out.is_empty() {
+        return Err("no heights given".to_owned());
+    }
+    Ok(out)
+}
+
+fn boxes_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    !far_enough_apart(a, b, 0.0)
+}
+
+fn add_stats(total: &mut hfw_engine::JobStats, extra: &hfw_engine::JobStats) {
+    total.layers += extra.layers;
+    total.processed_layers += extra.processed_layers;
+    total.triangles_tested += extra.triangles_tested;
+    total.field_nodes += extra.field_nodes;
+    total.thin_nodes += extra.thin_nodes;
+    total.dropped_nodes += extra.dropped_nodes;
+    total.ridge_vertices += extra.ridge_vertices;
+    total.ms_slice += extra.ms_slice;
+    total.ms_walls += extra.ms_walls;
+    total.ms_infill += extra.ms_infill;
+    total.ms_support += extra.ms_support;
+    total.ms_metrics += extra.ms_metrics;
+    total.ms_offset += extra.ms_offset;
+}
+
+fn object_at(x: f64, y: f64, plate: &[PlatePart]) -> u16 {
+    let mut best = 0u16;
+    let mut best_distance = f64::INFINITY;
+    for (index, part) in plate.iter().enumerate() {
+        let (min_x, min_y, max_x, max_y) = part.bounds;
+        if x >= min_x - OBJECT_LABEL_TOLERANCE_MM
+            && x <= max_x + OBJECT_LABEL_TOLERANCE_MM
+            && y >= min_y - OBJECT_LABEL_TOLERANCE_MM
+            && y <= max_y + OBJECT_LABEL_TOLERANCE_MM
+        {
+            return u16::try_from(index).unwrap_or(u16::MAX);
+        }
+        let centre_x = 0.5 * (min_x + max_x);
+        let centre_y = 0.5 * (min_y + max_y);
+        let distance = (x - centre_x) * (x - centre_x) + (y - centre_y) * (y - centre_y);
+        if distance < best_distance {
+            best_distance = distance;
+            best = u16::try_from(index).unwrap_or(u16::MAX);
+        }
+    }
+    best
 }
 
 fn run_check(o: &Options, path: &PathBuf) -> Result<(), String> {
@@ -553,12 +1597,20 @@ fn run_check(o: &Options, path: &PathBuf) -> Result<(), String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
     let report = hfw_gcode::verify(&text, cfg);
-    println!("Checked {} against profile '{}'.", path.display(), cfg.name);
-    println!(
+    outln!("Checked {} against profile '{}'.", path.display(), cfg.name);
+    outln!(
         "  {} layers, {} moves, {:.1} mm filament ({:.0} mm^3), estimated {:.0} s",
-        report.layers, report.moves, report.filament_mm, report.volume_mm3, report.est_seconds
+        report.layers,
+        report.moves,
+        report.filament_mm,
+        report.volume_mm3,
+        report.est_seconds
     );
-    println!(
+    outln!(
+        "  {} travels cross a printed perimeter",
+        report.travel_crossings
+    );
+    outln!(
         "  bbox X {:.2}..{:.2}  Y {:.2}..{:.2}  Z {:.2}..{:.2}",
         report.bbox_min[0],
         report.bbox_max[0],
@@ -568,16 +1620,19 @@ fn run_check(o: &Options, path: &PathBuf) -> Result<(), String> {
         report.bbox_max[2]
     );
     for warning in &report.warnings {
-        println!("  warning: {warning}");
+        outln!("  warning: {warning}");
     }
     for error in &report.errors {
-        println!("  error: {error}");
+        outln!("  error: {error}");
+    }
+    if o.json {
+        println!("{}", json::check_document(path, &report).to_json());
     }
     if report.ok() {
-        println!("verify RESULT PASS");
+        outln!("verify RESULT PASS");
         Ok(())
     } else {
-        println!("verify RESULT FAIL");
+        outln!("verify RESULT FAIL");
         Err(format!("{} G-code error(s)", report.errors.len()))
     }
 }
@@ -588,6 +1643,7 @@ fn run_single(
     before: MeshDiagnostics,
     after: MeshDiagnostics,
     repair: Option<MeshRepairReport>,
+    total_scale: f64,
 ) -> Result<(), String> {
     let z_mm = o
         .z_mm
@@ -612,6 +1668,8 @@ fn run_single(
         },
         paths: walls.lines,
         counts: Default::default(),
+        vase: false,
+        first: true,
     };
     if let Some(ip) = o.settings.infill {
         let regions = vec![region.clone()];
@@ -620,8 +1678,10 @@ fn run_single(
             &region,
             &mut cache,
             0,
+            0.0,
             &o.settings.wall,
             &ip,
+            None,
         ));
     }
     planned.recount();
@@ -631,18 +1691,18 @@ fn run_single(
     print_mesh("Mesh", after);
     match repair {
         Some(report) => print_repair(report),
-        None => println!("Basic repair was not requested; the imported mesh was not modified."),
+        None => outln!("Basic repair was not requested; the imported mesh was not modified."),
     }
     if before != after {
-        println!("Mesh changed during preparation.");
+        outln!("Mesh changed during preparation.");
     }
-    println!(
+    outln!(
         "Sliced {} triangles at Z={z_mm:.6} mm: {} contours, {} duplicate segments removed.",
         mesh.triangle_count(),
         slice.contours.len(),
         slice.diagnostics.duplicate_segments_removed
     );
-    println!(
+    outln!(
         "Planned {} paths in {:.1} ms: {} walls, {} middle, {} skin, {} infill.",
         planned.paths.len(),
         walls.stats.ms_total,
@@ -651,7 +1711,7 @@ fn run_single(
         planned.counts.skin,
         planned.counts.infill
     );
-    println!(
+    outln!(
         "Field nodes {}, thin {}, dropped {}; ridge vertices {} on {} branches.",
         walls.stats.nodes,
         walls.stats.thin_nodes,
@@ -663,7 +1723,7 @@ fn run_single(
         let m = evaluate_perimeter(&region, &planned.paths, &o.settings.wall, res);
         let full = evaluate_all(&region, &planned.paths, &o.settings.wall, res);
         print_metrics(&m);
-        println!(
+        outln!(
             "All paths at {res} mm: covered {:.4}, under {:.4}, over {:.4}, spill {:.4}.",
             full.bead_area / full.area_region.max(1e-9),
             full.under,
@@ -671,14 +1731,40 @@ fn run_single(
             full.spill
         );
     }
-    println!("Wrote {}", svg_path.display());
-    println!("No printable G-code was generated.");
+    outln!("Wrote {}", svg_path.display());
+    outln!("No printable G-code was generated.");
+    if o.json {
+        let rings: Vec<Vec<(f64, f64)>> = region
+            .rings
+            .iter()
+            .map(|ring| ring.iter().map(|p| (p.x, p.y)).collect())
+            .collect();
+        let context = json::Context {
+            inputs: o.inputs.clone(),
+            units: o.units.clone(),
+            scale: total_scale,
+            vertices: after.vertices,
+            triangles: after.triangles,
+            mesh_volume: 0.0,
+            verify: None,
+            gcode: None,
+        };
+        let document = json::slice_document(
+            &context,
+            &o.settings,
+            &planned,
+            &rings,
+            slice.diagnostics.duplicate_segments_removed,
+        );
+        println!("{}", document.to_json());
+    }
     Ok(())
 }
 
 fn run_stack(
     o: &Options,
     mesh: &Mesh,
+    plate: &[PlatePart],
     before: MeshDiagnostics,
     after: MeshDiagnostics,
     repair: Option<MeshRepairReport>,
@@ -693,8 +1779,44 @@ fn run_stack(
         .as_ref()
         .ok_or_else(|| "missing required --out-dir folder".to_owned())?;
 
-    let job = run(mesh, first_layer_height, layer_height, &o.settings)
-        .map_err(|error| error.to_string())?;
+    let by_object = o
+        .profile_config
+        .as_ref()
+        .is_some_and(|cfg| cfg.print_sequence == PrintSequence::ByObject);
+    let per_object = plate.iter().any(|part| part.has_overrides());
+    let order = if by_object {
+        PlateOrder::ByObject
+    } else {
+        PlateOrder::ByLayer
+    };
+    let job = if plate.len() > 1 && (by_object || per_object) {
+        plate_job(o, plate, first_layer_height, layer_height, before, order)?
+    } else {
+        let mut job = run(mesh, first_layer_height, layer_height, &o.settings)
+            .map_err(|error| error.to_string())?;
+        label_objects(&mut job, plate);
+        job
+    };
+    if plate.len() > 1 {
+        let names: Vec<&str> = plate.iter().map(|part| part.name.as_str()).collect();
+        let order = if by_object {
+            "one object at a time"
+        } else {
+            "one layer at a time"
+        };
+        outln!(
+            "Plate: {} objects ({}) printed {order}.",
+            plate.len(),
+            names.join(", ")
+        );
+        let volumes = object_volumes(&job, plate);
+        let per_part: Vec<String> = plate
+            .iter()
+            .zip(volumes)
+            .map(|(part, volume)| format!("{} {:.0} mm^3", part.name, volume))
+            .collect();
+        outln!("Per object: {}.", per_part.join(", "));
+    }
     let mesh_volume = mesh.volume_mm3();
 
     fs::create_dir_all(out_dir)
@@ -732,31 +1854,33 @@ fn run_stack(
     fs::write(&report_path, report)
         .map_err(|error| format!("could not write {}: {error}", report_path.display()))?;
 
-    println!(
+    outln!(
         "Planned {} layers at {first_layer_height:.3} mm first layer then {layer_height:.3} mm.",
         job.layers.len()
     );
-    println!(
+    outln!(
         "Paths: {} walls, {} middle, {} skin, {} infill; {:.1} m of extrusion in {:.1} s.",
         job.layers.iter().map(|l| l.counts.walls).sum::<usize>(),
         totals.middle,
         totals.skin,
         totals.infill,
         totals.length / 1000.0,
-        (job.stats.ms_slice + job.stats.ms_walls + job.stats.ms_infill) / 1000.0
+        (job.stats.ms_slice + job.stats.ms_walls_elapsed + job.stats.ms_infill) / 1000.0
     );
     let extruded = job.volume.0 + job.volume.1;
-    println!(
+    outln!(
         "Deposited volume {extruded:.2} mm^3 (perimeter {:.2}, interior {:.2}); {} starts/stops.",
-        job.volume.0, job.volume.1, totals.starts_stops
+        job.volume.0,
+        job.volume.1,
+        totals.starts_stops
     );
     if mesh_volume > 0.0 {
-        println!(
+        outln!(
             "extruded_over_mesh={:.4} (mesh {mesh_volume:.1} mm^3; only meaningful with --every 1 and --density 1.0)",
             extruded / mesh_volume
         );
     }
-    println!(
+    outln!(
         "Slowest layer {} took {:.1} ms; {} of {} layers planned.",
         job.worst_layer + 1,
         job.worst_layer_ms,
@@ -764,15 +1888,15 @@ fn run_stack(
         job.stats.layers
     );
     if !job.skipped.is_empty() {
-        println!(
+        outln!(
             "WARNING: {} layer(s) had no closed cross-section and were left empty:",
             job.skipped.len()
         );
         for (index, reason) in job.skipped.iter().take(5) {
-            println!("  layer {}: {reason}", index + 1);
+            outln!("  layer {}: {reason}", index + 1);
         }
         if job.skipped.len() > 5 {
-            println!("  ... and {} more", job.skipped.len() - 5);
+            outln!("  ... and {} more", job.skipped.len() - 5);
         }
     }
     if !job.metrics.is_empty() {
@@ -780,37 +1904,78 @@ fn run_stack(
         let mean_under = job.metrics.iter().map(|m| m.under).sum::<f64>() / n;
         let mean_over = job.metrics.iter().map(|m| m.over).sum::<f64>() / n;
         let mean_viol = job.metrics.iter().map(|m| m.width_violation).sum::<f64>() / n;
-        println!(
+        outln!(
             "Mean perimeter coverage: under {mean_under:.4}, over {mean_over:.4}, width violation {mean_viol:.4}."
         );
     }
-    println!("Layer SVGs, manifest and report: {}", out_dir.display());
-    match &o.gcode {
-        Some(path) => write_gcode(o, &job, path),
+    outln!("Layer SVGs, manifest and report: {}", out_dir.display());
+    let written = match &o.gcode {
+        Some(path) => Some(write_gcode(o, &job, path)?),
         None => {
-            println!("No printable G-code was generated (no --profile and --gcode).");
-            Ok(())
+            outln!("No printable G-code was generated (no --profile and --gcode).");
+            None
         }
+    };
+    if o.json {
+        let context = json::Context {
+            inputs: o.inputs.clone(),
+            units: o.units.clone(),
+            scale: total_scale,
+            vertices: after.vertices,
+            triangles: after.triangles,
+            mesh_volume,
+            verify: written.as_ref().map(|w| &w.report),
+            gcode: written.as_ref().map(|w| (&w.stats, Some(w.path.as_path()))),
+        };
+        let document = json::document(
+            &context,
+            &o.settings,
+            o.profile_config.as_ref(),
+            &job,
+            &totals,
+            o.json_paths,
+        );
+        println!("{}", document.to_json());
+    }
+    match &written {
+        Some(w) if !w.report.ok() => Err(format!(
+            "{} G-code error(s); the file was written but must not be printed",
+            w.report.errors.len()
+        )),
+        _ => Ok(()),
     }
 }
 
-fn write_gcode(o: &Options, job: &Job, path: &PathBuf) -> Result<(), String> {
-    let cfg = o
+/// What `write_gcode` produced, so the caller can report it and decide the exit code.
+struct Written {
+    stats: hfw_gcode::GcodeStats,
+    report: hfw_gcode::VerifyReport,
+    path: PathBuf,
+}
+
+fn write_gcode(o: &Options, job: &Job, path: &Path) -> Result<Written, String> {
+    let base = o
         .profile_config
         .as_ref()
         .ok_or_else(|| "--gcode needs --profile".to_owned())?;
+    let mut marked = base.clone();
+    marked.pause_heights = o.pause_at.clone();
+    marked.colour_change_heights = o.colour_change_at.clone();
+    let cfg = &marked;
     if o.settings.every != 1 {
         return Err("--gcode needs every layer planned; drop --every".to_owned());
     }
-    let object = std::path::Path::new(&o.input)
+    let object = std::path::Path::new(o.inputs.first().map(String::as_str).unwrap_or("plate"))
         .file_stem()
         .and_then(|s| s.to_str());
     let written =
         hfw_gcode::generate(&job.layers, cfg, object).map_err(|error| error.to_string())?;
-    fs::write(path, &written.text)
+    let path = output_path(cfg, o, path)?;
+    fs::write(&path, &written.text)
         .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    run_post_process(cfg, &path)?;
     let s = &written.stats;
-    println!(
+    outln!(
         "G-code: {} layers, {:.1} mm filament ({:.2} g, {:.0} mm^3), estimated {:.1} min, {:.0} mm travel, {} retractions.",
         s.layers,
         s.filament_mm,
@@ -820,27 +1985,112 @@ fn write_gcode(o: &Options, job: &Job, path: &PathBuf) -> Result<(), String> {
         s.travel_mm,
         s.retractions
     );
-    println!(
+    outln!(
         "Placed footprint X {:.2}..{:.2}, Y {:.2}..{:.2}, top Z {:.2} on a {} x {} bed.",
-        s.bbox_min.x, s.bbox_max.x, s.bbox_min.y, s.bbox_max.y, s.top_z, cfg.bed_x, cfg.bed_y
+        s.bbox_min.x,
+        s.bbox_max.x,
+        s.bbox_min.y,
+        s.bbox_max.y,
+        s.top_z,
+        cfg.bed_x,
+        cfg.bed_y
     );
     let report = hfw_gcode::verify(&written.text, cfg);
+    outln!(
+        "  {} travels cross a printed perimeter",
+        report.travel_crossings
+    );
     for warning in &report.warnings {
-        println!("  warning: {warning}");
+        outln!("  warning: {warning}");
     }
     for error in &report.errors {
-        println!("  error: {error}");
+        outln!("  error: {error}");
     }
     if report.ok() {
-        println!("verify RESULT PASS (independent check of the written file)");
+        outln!("verify RESULT PASS (independent check of the written file)");
     } else {
-        println!("verify RESULT FAIL");
+        outln!("verify RESULT FAIL");
+    }
+    outln!("Wrote {}", path.display());
+    if cfg.filament_cost > 0.0 {
+        let cost = s.filament_g / 1000.0 * cfg.filament_cost;
+        outln!(
+            "Cost {:.2} at {:.2}/kg, {:.1} g of the spool used{}",
+            cost,
+            cfg.filament_cost,
+            s.filament_g,
+            if cfg.filament_spool_weight > 0.0 {
+                format!(
+                    ", {:.0} g spool leaves {:.1} g",
+                    cfg.filament_spool_weight,
+                    cfg.filament_spool_weight - s.filament_g
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(Written {
+        stats: written.stats,
+        report,
+        path: path.to_path_buf(),
+    })
+}
+
+/// Applies `output_filename_format` to the path the caller asked for.
+///
+/// The dialect writes the name as a template over the same placeholders the
+/// G-code uses, plus `{input_filename}` and `{timestamp}`. An empty format keeps
+/// the caller's path, which is what every other profile gets.
+fn output_path(cfg: &PrinterConfig, o: &Options, asked: &Path) -> Result<PathBuf, String> {
+    let format = cfg.output_filename_format.trim();
+    if format.is_empty() {
+        return Ok(asked.to_path_buf());
+    }
+    let stem = std::path::Path::new(o.inputs.first().map(String::as_str).unwrap_or("plate"))
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("plate")
+        .to_owned();
+    let year = 0;
+    let _ = year;
+    let name = format
+        .replace("{input_filename}", &stem)
+        .replace("{layer_height}", &format!("{}mm", cfg.layer_height))
+        .replace("{nozzle_diameter}", &format!("{}mm", cfg.nozzle_diameter))
+        .replace("{printer_model}", cfg.printer_model.trim())
+        .replace("{filament_type}", cfg.filament_type.trim());
+    let name = name.trim();
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
         return Err(format!(
-            "{} G-code error(s); the file was written but must not be printed",
-            report.errors.len()
+            "output_filename_format `{format}` must produce a plain file name"
         ));
     }
-    println!("Wrote {}", path.display());
+    Ok(asked.with_file_name(name))
+}
+
+/// Runs `post_process` on the finished file, one command per `;`-separated entry.
+fn run_post_process(cfg: &PrinterConfig, path: &Path) -> Result<(), String> {
+    for command in cfg.post_process.split(';') {
+        let command = command.trim();
+        if command.is_empty() {
+            continue;
+        }
+        let mut words: Vec<String> = command.split_whitespace().map(|w| w.to_owned()).collect();
+        if words.is_empty() {
+            continue;
+        }
+        let program = words.remove(0);
+        let status = std::process::Command::new(&program)
+            .args(words)
+            .arg(path)
+            .status()
+            .map_err(|error| format!("post_process `{command}` did not start: {error}"))?;
+        if !status.success() {
+            return Err(format!("post_process `{command}` exited with {status}"));
+        }
+        outln!("Ran post_process `{command}`");
+    }
     Ok(())
 }
 
@@ -866,7 +2116,7 @@ fn job_report(input: &ReportInput, job: &Job, totals: &JobTotals) -> String {
     } = *input;
     let mut text = String::new();
     let _ = writeln!(text, "HFW engine — job report");
-    let _ = writeln!(text, "Input: {}", o.input);
+    let _ = writeln!(text, "Input: {}", o.inputs.join(", "));
     let _ = writeln!(
         &mut text,
         "Input units: {}; combined uniform scale: {total_scale:.6}",
@@ -918,15 +2168,22 @@ fn job_report(input: &ReportInput, job: &Job, totals: &JobTotals) -> String {
     );
     let _ = writeln!(
         &mut text,
-        "Wall generation: {:.0} ms total, slowest layer {} at {:.1} ms",
+        "Wall generation: {:.0} ms of work on {} threads in {:.0} ms, slowest layer {} at {:.1} ms",
         job.stats.ms_walls,
+        job.stats.threads,
+        job.stats.ms_walls_elapsed,
         job.worst_layer + 1,
         job.worst_layer_ms
     );
     let _ = writeln!(
         &mut text,
-        "Timing: slice {:.0} ms, walls {:.0} ms, infill {:.0} ms, metrics {:.0} ms",
-        job.stats.ms_slice, job.stats.ms_walls, job.stats.ms_infill, job.stats.ms_metrics
+        "Timing: slice {:.0} ms, compensating {:.0} ms, walls {:.0} ms of work in {:.0} ms, infill {:.0} ms, metrics {:.0} ms",
+        job.stats.ms_slice,
+        job.stats.ms_offset,
+        job.stats.ms_walls,
+        job.stats.ms_walls_elapsed,
+        job.stats.ms_infill,
+        job.stats.ms_metrics
     );
     let _ = writeln!(
         &mut text,
@@ -998,7 +2255,7 @@ fn job_report(input: &ReportInput, job: &Job, totals: &JobTotals) -> String {
 }
 
 fn print_mesh(label: &str, d: MeshDiagnostics) {
-    println!(
+    outln!(
         "{label}: {} vertices, {} triangles, {} boundary edges, {} non-manifold edges, \
          {} inconsistent-orientation edges, {} degenerate triangles.",
         d.vertices,
@@ -1028,7 +2285,7 @@ fn append_mesh(text: &mut String, d: MeshDiagnostics) {
 }
 
 fn print_repair(r: MeshRepairReport) {
-    println!(
+    outln!(
         "Basic repair: welded {} vertices, removed {} degenerate and {} duplicate triangles, \
          flipped {} for consistency and {} for outward orientation; {} closed components.",
         r.vertices_welded,
@@ -1041,7 +2298,7 @@ fn print_repair(r: MeshRepairReport) {
 }
 
 fn print_metrics(m: &Metrics) {
-    println!(
+    outln!(
         "Perimeter at {:.0} paths: covered {:.4}, under {:.4}, over {:.4}, spill {:.4}.",
         m.lines,
         m.bead_area / m.area_target.max(1e-9),
@@ -1049,7 +2306,7 @@ fn print_metrics(m: &Metrics) {
         m.over,
         m.spill
     );
-    println!(
+    outln!(
         "  width {:.3}..{:.3} mm, violation {:.4} of length, {:.4} mm^2 of transverse variation per mm",
         m.min_width, m.max_width, m.width_violation, m.width_tv_per_mm
     );

@@ -11,6 +11,7 @@ hfw-config = { path = "../config" }
 hfw-kernel = { path = "../kernel" }
 hfw-toolpath = { path = "../toolpath" }
 hfw-walls = { path = "../walls" }
+regex = "1"
 
 [dev-dependencies]
 hfw-engine = { path = "../engine" }

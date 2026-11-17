@@ -1,9 +1,16 @@
 //! Indexed triangle mesh storage and basic structural validation.
 //!
-//! STL parsing and optional repair are explicit operations kept separate from
-//! the canonical in-memory mesh representation.
+//! STL parsing, 3MF import and optional repair are explicit operations kept
+//! separate from the canonical in-memory mesh representation.
 
 #![forbid(unsafe_code)]
+
+mod threemf;
+
+pub use threemf::{
+    from_3mf_reader, from_3mf_text, load_3mf, load_3mf_objects, metadata_from_reader,
+    objects_from_3mf_text, three_mf_metadata, ModelObject,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -102,6 +109,8 @@ pub enum MeshError {
     Io(String),
     /// The input bytes are neither a supported binary nor ASCII STL file.
     InvalidStl(String),
+    /// The file is a ZIP but not a readable 3MF model part.
+    InvalidThreeMf(String),
     /// A model transform contains invalid parameters.
     InvalidTransform(String),
     /// A mesh coordinate could not be represented.
@@ -129,6 +138,7 @@ impl fmt::Display for MeshError {
             Self::NonPositiveDimension => formatter.write_str("box dimensions must be positive"),
             Self::Io(message) => write!(formatter, "could not read STL file: {message}"),
             Self::InvalidStl(message) => write!(formatter, "invalid STL file: {message}"),
+            Self::InvalidThreeMf(message) => write!(formatter, "invalid 3MF file: {message}"),
             Self::InvalidTransform(message) => {
                 write!(formatter, "invalid mesh transform: {message}")
             }
@@ -654,6 +664,24 @@ impl Mesh {
         ]
     }
 
+    /// Loads a model by file extension: STL or 3MF.
+    ///
+    /// 3MF carries its own units and per-item placement, so the returned mesh is
+    /// already in millimetres and already arranged; an STL is read raw and the
+    /// caller applies units as before.
+    pub fn load_model<P: AsRef<Path>>(path: P) -> Result<Self, MeshError> {
+        let is_3mf = path
+            .as_ref()
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("3mf"));
+        if is_3mf {
+            load_3mf(path)
+        } else {
+            Self::load_stl(path)
+        }
+    }
+
     /// Loads a binary or ASCII STL file and welds coincident vertices.
     ///
     /// STL does not preserve units or object-level project metadata. The caller
@@ -661,6 +689,44 @@ impl Mesh {
     pub fn load_stl<P: AsRef<Path>>(path: P) -> Result<Self, MeshError> {
         let bytes = fs::read(path).map_err(|error| MeshError::Io(error.to_string()))?;
         Self::from_stl_bytes(&bytes)
+    }
+
+    /// Merges several meshes into one, keeping every mesh's own coordinates.
+    ///
+    /// The merged mesh slices as one body: neighbouring parts become separate
+    /// rings in the same cross-section, which is how a plate of parts prints.
+    /// Object identity is lost, so a caller that needs it keeps the originals.
+    pub fn merged(parts: &[Mesh]) -> Result<Self, MeshError> {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        for part in parts {
+            let base = u32::try_from(vertices.len()).map_err(|_| MeshError::TooManyVertices)?;
+            vertices.extend_from_slice(&part.vertices);
+            triangles.extend(part.triangles.iter().map(|triangle| {
+                Triangle([
+                    triangle.0[0] + base,
+                    triangle.0[1] + base,
+                    triangle.0[2] + base,
+                ])
+            }));
+        }
+        Self::new(vertices, triangles)
+    }
+
+    /// Bounding box in millimetres: `(min_x, min_y, max_x, max_y)`.
+    ///
+    /// `None` when the mesh has no vertices, which callers treat as an error
+    /// rather than an empty box at the origin.
+    pub fn xy_bounds_mm(&self) -> Option<(f64, f64, f64, f64)> {
+        let mut bounds: Option<(f64, f64, f64, f64)> = None;
+        for point in &self.vertices {
+            let [x, y, _] = point.to_mm();
+            bounds = Some(match bounds {
+                None => (x, y, x, y),
+                Some((lx, ly, hx, hy)) => (lx.min(x), ly.min(y), hx.max(x), hy.max(y)),
+            });
+        }
+        bounds
     }
 
     /// Parses an STL byte buffer (binary STL first, then ASCII STL).

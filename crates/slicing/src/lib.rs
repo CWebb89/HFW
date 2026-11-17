@@ -132,6 +132,108 @@ impl LayerSchedule {
         )
     }
 
+    /// Creates a schedule from a layer-height profile in millimetres.
+    ///
+    /// The profile is a list of `(z, height)` pairs in ascending `z`: the layer
+    /// whose bottom sits at or above `z` uses `height` until the next pair takes
+    /// over, so a profile is a step function of Z that a GUI can draw. The first
+    /// layer keeps `first_layer_height` whatever the profile says, because bed
+    /// adhesion is a property of the first layer and not of the model, and any
+    /// height outside `min_height..=max_height` is clamped into it.
+    ///
+    /// Each step is a whole number of layers of the requested height, and the
+    /// last layer is trimmed to land exactly on `z_max`. An empty profile falls
+    /// back to a uniform stack of `layer_height`.
+    pub fn from_profile(
+        z_min: Coord,
+        z_max: Coord,
+        first_layer_height: Coord,
+        layer_height: Coord,
+        profile: &[(f64, f64)],
+        min_height: f64,
+        max_height: f64,
+    ) -> Result<Self, SliceError> {
+        if profile.is_empty() {
+            return Self::new(z_min, z_max, first_layer_height, layer_height);
+        }
+        if !(-MAX_ABS_COORD..=MAX_ABS_COORD).contains(&z_min)
+            || !(-MAX_ABS_COORD..=MAX_ABS_COORD).contains(&z_max)
+            || z_max <= z_min
+        {
+            return Err(SliceError::InvalidZRange { z_min, z_max });
+        }
+        if first_layer_height <= 0 || layer_height <= 0 {
+            return Err(SliceError::NonPositiveLayerHeight);
+        }
+        let ceiling_mm = if max_height > 0.0 {
+            max_height
+        } else {
+            NO_CEILING_MM
+        };
+        if !(min_height.is_finite() && ceiling_mm.is_finite())
+            || min_height <= 0.0
+            || ceiling_mm < min_height
+        {
+            return Err(SliceError::NonPositiveLayerHeight);
+        }
+        let floor = mm_to_coord(min_height)?;
+        let ceiling = mm_to_coord(ceiling_mm)?;
+        let mut steps: Vec<(Coord, Coord)> = Vec::with_capacity(profile.len());
+        for (z, height) in profile {
+            if !(z.is_finite() && height.is_finite()) {
+                return Err(SliceError::NonPositiveLayerHeight);
+            }
+            let requested = mm_to_coord(*height)?;
+            if requested <= 0 {
+                return Err(SliceError::NonPositiveLayerHeight);
+            }
+            steps.push((mm_to_coord(*z)?, requested.clamp(floor, ceiling)));
+        }
+        steps.sort_by_key(|(z, _)| *z);
+
+        let mut layers: Vec<LayerSpec> = Vec::new();
+        let mut bottom_z = z_min;
+        while bottom_z < z_max {
+            if layers.len() >= Self::MAX_LAYERS {
+                return Err(SliceError::TooManyLayers {
+                    limit: Self::MAX_LAYERS,
+                });
+            }
+            let requested_height = if layers.is_empty() {
+                first_layer_height
+            } else {
+                let wanted = height_at(&steps, bottom_z, layer_height, floor, ceiling);
+                match next_step(&steps, bottom_z) {
+                    Some(next) if next - bottom_z > 0 && next - bottom_z < wanted => {
+                        let room = next - bottom_z;
+                        if room >= floor {
+                            room
+                        } else {
+                            wanted
+                        }
+                    }
+                    _ => wanted,
+                }
+            };
+            let remaining = z_max - bottom_z;
+            let actual_height = requested_height.min(remaining);
+            let top_z = bottom_z
+                .checked_add(actual_height)
+                .ok_or(SliceError::LayerCoordinateOverflow)?;
+            let slice_z = bottom_z + actual_height / 2;
+            layers.push(LayerSpec {
+                index: layers.len(),
+                bottom_z,
+                top_z,
+                slice_z,
+                print_z: top_z,
+            });
+            bottom_z = top_z;
+        }
+        trim_thin_top(&mut layers, floor);
+        Ok(Self { layers })
+    }
+
     /// Returns the scheduled layers in bottom-to-top order.
     pub fn layers(&self) -> &[LayerSpec] {
         &self.layers
@@ -146,6 +248,57 @@ impl LayerSchedule {
     pub fn is_empty(&self) -> bool {
         self.layers.is_empty()
     }
+}
+
+/// Ceiling used when a profile asks for no upper layer-height bound.
+const NO_CEILING_MM: f64 = 1.0e6;
+
+/// Folds a final layer thinner than the floor into the one below it.
+///
+/// The stack has to end exactly on `z_max`, so the last step is whatever is
+/// left over. Left over can be thinner than the machine prints, and a layer
+/// below the floor is one the first layer's height would have avoided: merging
+/// it into its neighbour keeps the top of the print where the model puts it and
+/// the count of layers printable.
+fn trim_thin_top(layers: &mut Vec<LayerSpec>, floor: Coord) {
+    if layers.len() < 2 {
+        return;
+    }
+    let last = layers[layers.len() - 1];
+    if last.top_z - last.bottom_z >= floor {
+        return;
+    }
+    layers.pop();
+    let previous = layers.len() - 1;
+    let bottom = layers[previous].bottom_z;
+    let top = last.top_z;
+    layers[previous].index = previous;
+    layers[previous].top_z = top;
+    layers[previous].slice_z = bottom + (top - bottom) / 2;
+    layers[previous].print_z = top;
+}
+
+/// The first profile step above `z`.
+fn next_step(steps: &[(Coord, Coord)], z: Coord) -> Option<Coord> {
+    steps.iter().map(|(at, _)| *at).find(|at| *at > z)
+}
+
+/// The clamped layer height a profile asks for at `z`.
+fn height_at(
+    steps: &[(Coord, Coord)],
+    z: Coord,
+    fallback: Coord,
+    floor: Coord,
+    ceiling: Coord,
+) -> Coord {
+    let mut chosen = fallback;
+    for (at, height) in steps {
+        if *at > z {
+            break;
+        }
+        chosen = *height;
+    }
+    chosen.clamp(floor, ceiling)
 }
 
 /// Counts useful diagnostics for one mesh/plane intersection.
@@ -684,6 +837,10 @@ mod tests {
     use super::*;
     use hfw_mesh::Mesh;
 
+    fn height_mm(layer: LayerSpec) -> f64 {
+        (layer.top_z - layer.bottom_z) as f64 / 1e6
+    }
+
     #[test]
     fn twenty_mm_cube_has_one_hundred_regular_layers() {
         let schedule = LayerSchedule::from_mm(0.0, 20.0, 0.2, 0.2).expect("valid layer schedule");
@@ -706,6 +863,88 @@ mod tests {
         assert_eq!(
             schedule.layers()[2].top_z - schedule.layers()[2].bottom_z,
             300_000
+        );
+    }
+
+    #[test]
+    fn a_profile_changes_the_height_part_way_up_and_clamps_to_the_bounds() {
+        let schedule = LayerSchedule::from_profile(
+            0,
+            2_000_000,
+            300_000,
+            200_000,
+            &[(0.0, 0.2), (1.0, 0.1), (1.5, 0.5)],
+            0.12,
+            0.28,
+        )
+        .expect("valid profile schedule");
+        let heights: Vec<f64> = schedule.layers().iter().map(|l| height_mm(*l)).collect();
+        assert!(
+            (heights[0] - 0.3).abs() < 1e-9,
+            "the first layer kept its own height"
+        );
+        assert!(
+            heights
+                .iter()
+                .skip(1)
+                .all(|h| (0.12..=0.28 + 1e-9).contains(h)),
+            "every later layer stayed inside the bounds"
+        );
+        assert!(
+            heights.iter().any(|h| (h - 0.12).abs() < 1e-9),
+            "the 0.1 step was clamped up to the floor"
+        );
+        assert!(
+            heights.iter().any(|h| (h - 0.28).abs() < 1e-9),
+            "the 0.5 step was clamped down to the ceiling"
+        );
+        let top = schedule.layers().last().expect("layers").top_z;
+        assert_eq!(top, 2_000_000, "the stack still ends on z_max");
+    }
+
+    #[test]
+    fn a_final_layer_below_the_floor_is_folded_into_its_neighbour() {
+        let schedule =
+            LayerSchedule::from_profile(0, 1_050_000, 200_000, 200_000, &[(0.0, 0.2)], 0.1, 0.3)
+                .expect("valid profile");
+        let heights: Vec<f64> = schedule.layers().iter().map(|l| height_mm(*l)).collect();
+        assert_eq!(
+            schedule.layers().last().expect("a last layer").top_z,
+            1_050_000
+        );
+        assert!(
+            heights.iter().all(|h| *h >= 0.1 - 1e-9),
+            "a 0.05 mm layer survived: {heights:?}"
+        );
+        assert_eq!(heights.len(), 5);
+    }
+
+    #[test]
+    fn an_empty_profile_falls_back_to_a_uniform_stack() {
+        let uniform = LayerSchedule::from_mm(0.0, 1.0, 0.2, 0.2).expect("uniform");
+        let from_empty = LayerSchedule::from_profile(0, 1_000_000, 200_000, 200_000, &[], 0.1, 0.3)
+            .expect("empty profile");
+        assert_eq!(uniform, from_empty);
+    }
+
+    #[test]
+    fn a_profile_out_of_order_is_sorted_and_a_bad_bound_is_rejected() {
+        let sorted = LayerSchedule::from_profile(
+            0,
+            1_000_000,
+            200_000,
+            200_000,
+            &[(0.6, 0.1), (0.4, 0.2)],
+            0.1,
+            0.3,
+        )
+        .expect("sorted profile");
+        let heights: Vec<f64> = sorted.layers().iter().map(|l| height_mm(*l)).collect();
+        assert!((heights[1] - 0.2).abs() < 1e-9);
+        assert!((heights[3] - 0.1).abs() < 1e-9);
+        assert_eq!(
+            LayerSchedule::from_profile(0, 1_000_000, 200_000, 200_000, &[(0.0, 0.2)], 0.3, 0.1),
+            Err(SliceError::NonPositiveLayerHeight)
         );
     }
 

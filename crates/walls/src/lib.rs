@@ -11,16 +11,20 @@
 
 #![forbid(unsafe_code)]
 
-mod contour;
+pub mod contour;
 pub mod field;
+pub mod offset;
 pub mod params;
+pub mod repair;
 pub mod ridge;
 
 use hfw_kernel::{Region, SegIndex, V2};
 use params::{Mode, Params};
 
 pub use field::{Field, FieldError, Grid, MAX_FIELD_CELLS};
+pub use offset::offset_region;
 pub use params::{Beading, Mode as WallMode, Params as WallParams};
+pub use repair::{close_gaps, simplify_region};
 
 /// Semantic class of a generated path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,10 +37,16 @@ pub enum Kind {
     Infill,
     /// Solid skin line.
     Solid,
+    /// Solid skin line on the visible surface, where the layer above does not
+    /// cover it. Printed at the top-surface speed and acceleration when those
+    /// are set, because that is the face the print is judged on.
+    TopSolid,
     /// Adhesion brim loop, outside the part on the first layer.
     Brim,
     /// Skin line printed over air, anchored at both ends.
     Bridge,
+    /// Slow, near-zero-flow pass that flattens an already printed top surface.
+    Ironing,
     /// Crossing strand laid down before the bridge fill, so the fill spans
     /// material instead of bare air.
     BridgeAnchor,
@@ -64,6 +74,26 @@ pub struct Line {
     pub closed: bool,
     /// Semantic class of this path.
     pub kind: Kind,
+    /// Extrusion multiplier for this path; 1.0 is normal flow.
+    ///
+    /// Combined infill is printed on one layer where two would have been, so its
+    /// bead carries twice the plastic at twice the spacing. The volume has to
+    /// live somewhere, and a wider bead would not fit a 0.4 nozzle, so it is a
+    /// flow multiplier on an unchanged bead.
+    pub flow: f64,
+    /// Share of this path that hangs over air, `0..=1`.
+    ///
+    /// Filled in by the engine once the layer below is known: a generated path
+    /// cannot tell whether the material under it exists. Zero means either "fully
+    /// supported" or "nobody measured", which is why the writer only looks at it
+    /// when a profile asks for overhang speeds or fans.
+    pub overhang: f64,
+    /// Object on the plate this path belongs to, counted from zero.
+    ///
+    /// The engine plans a plate as one body, so this is filled in by the caller
+    /// that knows where each object sits. It only changes print order: paths are
+    /// printed object by object within a layer.
+    pub object: u16,
 }
 
 impl Line {
@@ -345,6 +375,9 @@ fn finish(raw: contour::RawLine, index: &SegIndex, p: &Params, kind: Kind) -> Op
         width: sw,
         closed: raw.closed && n > 2,
         kind,
+        overhang: 0.0,
+        object: 0,
+        flow: 1.0,
     };
     if line.pts.len() < 2 || line.length() < 3.0 * h {
         return None;
@@ -402,7 +435,7 @@ fn classify(
             if let Some((q, dist)) = rg.points.nearest(c, reach) {
                 let rq = rg.rs[q as usize];
                 if dist <= p.ext * rq + 2.0 * p.h && rq < thick_r && d + t <= rq * 1.05 + p.h {
-                    if rg.bd[q as usize].is_none() {
+                    if !p.thin_walls || rg.bd[q as usize].is_none() {
                         kind[id] = NodeKind::Dropped;
                     } else {
                         kind[id] = NodeKind::Thin;
@@ -465,6 +498,9 @@ fn middle_lines(rg: &ridge::Ridge, p: &Params) -> Vec<Line> {
                     width: vec![d, d],
                     closed: false,
                     kind: Kind::Middle,
+                    flow: 1.0,
+                    overhang: 0.0,
+                    object: 0,
                 });
                 continue;
             }
@@ -479,6 +515,9 @@ fn middle_lines(rg: &ridge::Ridge, p: &Params) -> Vec<Line> {
                 width: sw,
                 closed: closed_all,
                 kind: Kind::Middle,
+                flow: 1.0,
+                overhang: 0.0,
+                object: 0,
             };
             if line.pts.len() >= 2 && line.length() >= 2.0 * p.h {
                 out.push(line);
@@ -526,8 +565,8 @@ pub fn generate(region: &Region, p: &Params, mode: Mode) -> Result<Output, Walls
                 NodeKind::Out | NodeKind::Dropped => -p.w,
                 NodeKind::Deep => p.w,
                 NodeKind::Thick => {
-                    let l = (i as f64 + 0.5) * p.w;
-                    bw[id] = p.w;
+                    let l = p.loop_offset(i);
+                    bw[id] = p.loop_width(i);
                     lv[id] = l;
                     field.d[id] - l
                 }
@@ -552,7 +591,9 @@ pub fn generate(region: &Region, p: &Params, mode: Mode) -> Result<Output, Walls
     let mut ridge_dbg = Vec::new();
     let (mut rv, mut rb_n) = (0, 0);
     if let Some(rg) = &ridge {
-        lines.extend(middle_lines(rg, p));
+        if p.thin_walls && p.gap_fill {
+            lines.extend(middle_lines(rg, p));
+        }
         rv = rg.graph.pos.len();
         rb_n = rg.branches.len();
         for br in &rg.branches {
@@ -591,6 +632,19 @@ pub fn generate(region: &Region, p: &Params, mode: Mode) -> Result<Output, Walls
     })
 }
 
+/// Which side of the part outline an adhesion brim grows on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrimSide {
+    /// Outside the part only, the usual pad on the bed.
+    Outer,
+    /// Inside the part's holes only, so a hole gets a lip.
+    Inner,
+    /// Both.
+    Both,
+    /// No brim.
+    None,
+}
+
 /// Solid adhesion pad around one layer's boundary.
 ///
 /// The band from `gap` to `gap + loops * w` outside the part is filled with
@@ -603,11 +657,18 @@ pub fn generate(region: &Region, p: &Params, mode: Mode) -> Result<Output, Walls
 ///
 /// Rows are sampled every `max(1, round(w / h))` grid rows so the bead pitch
 /// matches the extrusion width regardless of field resolution.
-pub fn brim(region: &Region, p: &Params, loops: usize, gap: f64) -> Result<Vec<Line>, WallsError> {
-    if loops == 0 || region.is_empty() {
+pub fn brim(
+    region: &Region,
+    p: &Params,
+    loops: usize,
+    gap: f64,
+    separation: f64,
+    side: BrimSide,
+) -> Result<Vec<Line>, WallsError> {
+    if loops == 0 || region.is_empty() || side == BrimSide::None {
         return Ok(Vec::new());
     }
-    let band = loops as f64 * p.w;
+    let band = loops as f64 * p.w + (loops as f64 - 1.0) * separation.max(0.0);
     let reach = gap + band + p.w;
     let rb = region.bounds().grown(reach + 6.0 * p.h + p.w);
     let index = SegIndex::new(region.segments(), rb, 6.0 * p.h);
@@ -625,18 +686,26 @@ pub fn brim(region: &Region, p: &Params, loops: usize, gap: f64) -> Result<Vec<L
             None => hi + p.w,
         };
     }
+    let enclosed = hole_areas(region, &grid, &inside);
+    let wanted = |id: usize| match side {
+        BrimSide::Outer => !enclosed[id],
+        BrimSide::Inner => enclosed[id],
+        BrimSide::Both => true,
+        BrimSide::None => false,
+    };
     let stride = ((p.w / grid.h).round() as usize).max(1);
     let mut out: Vec<Line> = Vec::new();
     for iy in (0..grid.ny).step_by(stride) {
         let row = &dist[iy * grid.nx..(iy + 1) * grid.nx];
         let mut ix = 0;
         while ix < grid.nx {
-            if row[ix] < lo || row[ix] > hi {
+            let here = iy * grid.nx + ix;
+            if row[ix] < lo || row[ix] > hi || !wanted(here) {
                 ix += 1;
                 continue;
             }
             let start = ix;
-            while ix < grid.nx && row[ix] >= lo && row[ix] <= hi {
+            while ix < grid.nx && row[ix] >= lo && row[ix] <= hi && wanted(iy * grid.nx + ix) {
                 ix += 1;
             }
             let a = grid.pos(start, iy);
@@ -649,6 +718,9 @@ pub fn brim(region: &Region, p: &Params, loops: usize, gap: f64) -> Result<Vec<L
                 width: vec![p.w; 2],
                 closed: false,
                 kind: Kind::Brim,
+                flow: 1.0,
+                overhang: 0.0,
+                object: 0,
             });
         }
     }
@@ -659,9 +731,187 @@ pub fn brim(region: &Region, p: &Params, loops: usize, gap: f64) -> Result<Vec<L
         phi[id] = if *flag { -1.0 } else { dist[id] - hi };
     }
     for raw in contour::trace(&grid, &phi, &bw, &lv) {
+        let keep = raw.pts.first().is_some_and(|q| wanted(grid_id(&grid, *q)));
         if let Some(line) = finish(raw, &index, p, Kind::Brim) {
-            out.push(line);
+            if keep {
+                out.push(line);
+            }
         }
     }
     Ok(out)
+}
+
+fn grid_id(grid: &Grid, p: V2) -> usize {
+    let ix = (((p.x - grid.origin.x) / grid.h).floor() as isize).clamp(0, grid.nx as isize - 1);
+    let iy = (((p.y - grid.origin.y) / grid.h).floor() as isize).clamp(0, grid.ny as isize - 1);
+    iy as usize * grid.nx + ix as usize
+}
+
+/// Marks the empty cells enclosed by an outer ring, which is where an inner brim
+/// belongs: the band grows into a hole instead of away from the part.
+fn hole_areas(region: &Region, grid: &Grid, inside: &[bool]) -> Vec<bool> {
+    let mut out = vec![false; inside.len()];
+    let rings: Vec<&Vec<V2>> = region
+        .rings
+        .iter()
+        .filter(|r| r.len() >= 3 && ring_area(r) > 0.0)
+        .collect();
+    if rings.is_empty() {
+        return out;
+    }
+    for (id, solid) in inside.iter().enumerate() {
+        if *solid {
+            continue;
+        }
+        let q = grid.pos_id(id);
+        out[id] = rings.iter().any(|r| contains(r, q));
+    }
+    out
+}
+
+fn ring_area(ring: &[V2]) -> f64 {
+    let n = ring.len();
+    let mut sum = 0.0;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[(i + 1) % n];
+        sum += a.x * b.y - b.x * a.y;
+    }
+    0.5 * sum
+}
+
+fn contains(ring: &[V2], q: V2) -> bool {
+    let n = ring.len();
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let a = ring[i];
+        let b = ring[j];
+        if (a.y > q.y) != (b.y > q.y) {
+            let x = a.x + (q.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if q.x < x {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn square(size: f64) -> Region {
+        Region::new(vec![vec![
+            V2::new(0.0, 0.0),
+            V2::new(size, 0.0),
+            V2::new(size, size),
+            V2::new(0.0, size),
+        ]])
+    }
+
+    fn mean_width_of(lines: &[Line], loop_index: u8) -> Option<f64> {
+        let widths: Vec<f64> = lines
+            .iter()
+            .filter(|line| line.kind == Kind::Side(loop_index))
+            .map(|line| line.mean_width())
+            .collect();
+        if widths.is_empty() {
+            None
+        } else {
+            Some(widths.iter().sum::<f64>() / widths.len() as f64)
+        }
+    }
+
+    fn inset_of(lines: &[Line], loop_index: u8, size: f64) -> Option<f64> {
+        let line = lines
+            .iter()
+            .find(|line| line.kind == Kind::Side(loop_index))?;
+        let point = line.pts[0];
+        Some(point.x.min(point.y).min(size - point.x).min(size - point.y))
+    }
+
+    #[test]
+    fn a_configured_outer_width_reaches_the_outer_loop_only() {
+        let region = square(20.0);
+        let plain = generate(&region, &Params::new(0.4, 3), Mode::Classic).expect("walls");
+        assert!((mean_width_of(&plain.lines, 0).expect("outer") - 0.4).abs() < 0.05);
+        assert!((mean_width_of(&plain.lines, 1).expect("inner") - 0.4).abs() < 0.05);
+
+        let mut wide = Params::new(0.4, 3);
+        wide.w_outer = 0.62;
+        let output = generate(&region, &wide, Mode::Classic).expect("walls");
+        assert!(
+            (mean_width_of(&output.lines, 0).expect("outer") - 0.62).abs() < 0.05,
+            "the outer loop should carry the configured width"
+        );
+        assert!(
+            (mean_width_of(&output.lines, 1).expect("inner") - 0.4).abs() < 0.05,
+            "the inner loops should keep the nominal width"
+        );
+    }
+
+    #[test]
+    fn a_wider_outer_loop_keeps_the_band_contiguous() {
+        let region = square(20.0);
+        let mut wide = Params::new(0.4, 3);
+        wide.w_outer = 0.62;
+        let output = generate(&region, &wide, Mode::Classic).expect("walls");
+
+        let first = inset_of(&output.lines, 0, 20.0).expect("outer");
+        let second = inset_of(&output.lines, 1, 20.0).expect("middle");
+        let third = inset_of(&output.lines, 2, 20.0).expect("inner");
+        assert!(
+            (second - first - 0.51).abs() < 0.06,
+            "spacing {first} -> {second} should be half the outer width plus half the inner one"
+        );
+        assert!(
+            (third - second - 0.4).abs() < 0.06,
+            "spacing {second} -> {third} should be the nominal bead width"
+        );
+        assert!(
+            (first - 0.31).abs() < 0.05,
+            "the outer loop should sit half its own width inside the surface, got {first}"
+        );
+    }
+
+    #[test]
+    fn turning_gap_fill_off_drops_the_middle_beads_and_keeps_the_loops() {
+        let region = square(20.0);
+        let p = Params::new(0.4, 2);
+        let on = generate(&region, &p, Mode::Hfw).expect("walls");
+        let off = generate(
+            &region,
+            &Params {
+                gap_fill: false,
+                ..p
+            },
+            Mode::Hfw,
+        )
+        .expect("walls");
+        let sides = |o: &Output, i: u8| o.lines.iter().filter(|l| l.kind == Kind::Side(i)).count();
+        assert_eq!(sides(&on, 0), sides(&off, 0));
+        assert_eq!(sides(&on, 1), sides(&off, 1));
+        assert!(
+            off.lines.iter().all(|l| l.kind != Kind::Middle),
+            "a gap-fill bead survived the switch"
+        );
+    }
+
+    #[test]
+    fn a_first_layer_scaled_band_is_wider_than_the_rest() {
+        let region = square(20.0);
+        let p = Params::new(0.4, 2);
+        let wide = p.scaled_to(0.6);
+        let base = generate(&region, &p, Mode::Classic).expect("walls");
+        let first = generate(&region, &wide, Mode::Classic).expect("walls");
+        let width = |o: &Output| mean_width_of(&o.lines, 1).expect("inner loop");
+        assert!(
+            width(&first) > width(&base) * 1.4,
+            "the scaled band should be half again as wide: {} against {}",
+            width(&base),
+            width(&first)
+        );
+    }
 }
