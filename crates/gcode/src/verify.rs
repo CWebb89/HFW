@@ -76,13 +76,39 @@ fn parse_line(line: &str) -> Option<Command<'_>> {
             Ok(v) if v.is_finite() => params.push((letter, v)),
             Ok(_) => bad = Some(format!("non-finite value in '{token}'")),
             Err(_) => {
-                if (code.starts_with('G') || code.starts_with('M')) && !rest.contains('=') {
+                // Only a command this verifier reads numerically needs a number in
+                // its parameters. `M862.6 P"Input shaper"` and `M115 U6.4.0+11974`
+                // are firmware handshakes; their text is the machine's business.
+                if is_numeric_command(code) {
                     bad = Some(format!("unreadable value in '{token}'"));
                 }
             }
         }
     }
     Some(Command { code, params, bad })
+}
+
+/// Whether a command's parameters are all read as numbers, so a word among them is
+/// a broken value rather than a handshake string.
+fn is_numeric_command(code: &str) -> bool {
+    matches!(
+        code,
+        "G0" | "G1"
+            | "G2"
+            | "G3"
+            | "G28"
+            | "G90"
+            | "G91"
+            | "G92"
+            | "M82"
+            | "M83"
+            | "M104"
+            | "M106"
+            | "M109"
+            | "M140"
+            | "M190"
+            | "M200"
+    )
 }
 
 fn get(command: &Command<'_>, key: char) -> Option<f64> {

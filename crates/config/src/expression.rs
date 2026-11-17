@@ -100,6 +100,146 @@ pub(crate) fn expand(text: &str, lookup: Lookup<'_>) -> (String, Vec<String>) {
     (out, unknown)
 }
 
+/// Whether `pattern` matches anywhere in `text`.
+///
+/// The dialect spells a match `=~/(FLEX|TPU|TPE)/`, so what this has to understand
+/// is literal characters, `.` for any one, `*` for any number of the atom before
+/// it, `|` between alternatives and `(` `)` to group them -- and nothing more. A
+/// pattern using anything else matches nothing rather than being guessed at.
+fn matches_pattern(pattern: &str, text: &str) -> bool {
+    let text: Vec<char> = text.chars().collect();
+    let alternatives = split_alternatives(pattern);
+    alternatives
+        .iter()
+        .filter_map(|alternative| pieces(alternative))
+        .any(|pieces| (0..=text.len()).any(|start| matches_at(&pieces, &text[start..])))
+}
+
+/// The alternatives of a pattern, split at every `|` outside a group.
+fn split_alternatives(pattern: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    for c in pattern.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(c);
+            }
+            '|' if depth == 0 => out.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    out.push(current);
+    out
+}
+
+enum Atom {
+    Char(char),
+    Any,
+    Group(Vec<String>),
+}
+
+struct Piece {
+    atom: Atom,
+    star: bool,
+}
+
+/// One alternative as a sequence of atoms, or `None` if it uses a construct this
+/// does not understand.
+fn pieces(alternative: &str) -> Option<Vec<Piece>> {
+    let chars: Vec<char> = alternative.chars().collect();
+    let mut out: Vec<Piece> = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let atom = match chars[at] {
+            '.' => Atom::Any,
+            '(' => {
+                let close = chars[at + 1..].iter().position(|c| *c == ')')? + at + 1;
+                let inner: String = chars[at + 1..close].iter().collect();
+                at = close;
+                Atom::Group(split_alternatives(&inner))
+            }
+            '\\' => {
+                at += 1;
+                Atom::Char(*chars.get(at)?)
+            }
+            '*' | ')' | ']' | '[' | '+' | '?' | '{' | '}' | '^' | '$' => return None,
+            c => Atom::Char(c),
+        };
+        at += 1;
+        let star = chars.get(at) == Some(&'*');
+        if star {
+            at += 1;
+        }
+        out.push(Piece { atom, star });
+    }
+    Some(out)
+}
+
+fn matches_at(pieces: &[Piece], text: &[char]) -> bool {
+    let Some((piece, rest)) = pieces.split_first() else {
+        return true;
+    };
+    for taken in lengths(&piece.atom, text) {
+        if piece.star {
+            if (0..=taken).any(|used| matches_at(&pieces[1..], &text[used..]))
+                || matches_at(rest, &text[taken..])
+            {
+                return true;
+            }
+        } else if matches_at(rest, &text[taken..]) {
+            return true;
+        }
+    }
+    piece.star && matches_at(rest, text)
+}
+
+/// How many characters the atom at the front of `text` can consume, longest first.
+fn lengths(atom: &Atom, text: &[char]) -> Vec<usize> {
+    match atom {
+        Atom::Char(c) => match text.first() {
+            Some(found) if found == c => vec![1],
+            _ => Vec::new(),
+        },
+        Atom::Any => match text.first() {
+            Some(_) => vec![1],
+            None => Vec::new(),
+        },
+        Atom::Group(alternatives) => alternatives
+            .iter()
+            .filter_map(|alternative| pieces(alternative))
+            .filter_map(|pieces| consumed(&pieces, text))
+            .collect(),
+    }
+}
+
+/// The length a group's alternative takes when it matches the front of `text`.
+fn consumed(pieces: &[Piece], text: &[char]) -> Option<usize> {
+    match pieces.split_first() {
+        None => Some(0),
+        Some((piece, rest)) => {
+            for taken in lengths(&piece.atom, text) {
+                if let Some(more) = consumed(rest, &text[taken..]) {
+                    return Some(taken + more);
+                }
+                if piece.star && matches_at(rest, text) {
+                    return Some(0);
+                }
+            }
+            if piece.star {
+                consumed(rest, text)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Whether a token is decided by the writer rather than here: a conditional, or a
 /// function of the layer height, both of which the writer knows and this does not.
 pub(crate) fn deferred(token: &str) -> bool {
@@ -221,6 +361,10 @@ enum Token {
     Text(String),
     Name(String),
     Index(usize),
+    /// `[initial_tool]`: an index the dialect computes rather than writes.
+    NamedIndex(String),
+    /// `/.*MBL160.*/`: the pattern of a match operator.
+    Pattern(String),
     Open,
     Close,
     Symbol(String),
@@ -270,16 +414,13 @@ fn tokenize(expr: &str) -> Option<Vec<Token>> {
         }
         if c == '[' {
             let start = at + 1;
-            at += 1;
-            while at < bytes.len() && bytes[at].is_ascii_digit() {
-                at += 1;
+            let end = bytes[start..].iter().position(|c| *c == ']')? + start;
+            let inner: String = bytes[start..end].iter().collect();
+            at = end + 1;
+            match inner.trim().parse::<usize>() {
+                Ok(index) => tokens.push(Token::Index(index)),
+                Err(_) => tokens.push(Token::NamedIndex(inner.trim().to_owned())),
             }
-            let index: usize = bytes[start..at].iter().collect::<String>().parse().ok()?;
-            if bytes.get(at) != Some(&']') {
-                return None;
-            }
-            at += 1;
-            tokens.push(Token::Index(index));
             continue;
         }
         if c == '(' {
@@ -293,6 +434,17 @@ fn tokenize(expr: &str) -> Option<Vec<Token>> {
             continue;
         }
         let two: String = bytes[at..(at + 2).min(bytes.len())].iter().collect();
+        if matches!(two.as_str(), "=~" | "!~") {
+            let opened = at + 2;
+            if bytes.get(opened) != Some(&'/') {
+                return None;
+            }
+            let close = bytes[opened + 1..].iter().position(|c| *c == '/')? + opened + 1;
+            tokens.push(Token::Symbol(two));
+            tokens.push(Token::Pattern(bytes[opened + 1..close].iter().collect()));
+            at = close + 1;
+            continue;
+        }
         if ["==", "!=", "<=", ">=", "&&", "||"].contains(&two.as_str()) {
             tokens.push(Token::Symbol(two));
             at += 2;
@@ -318,6 +470,17 @@ impl Cursor {
         self.tokens.get(self.at)
     }
 
+    /// Consumes a word operator such as `or`, which the dialect spells out where
+    /// its sibling writes `||`.
+    fn word(&mut self, keyword: &str) -> bool {
+        if let Some(Token::Name(name)) = self.peek() {
+            if name == keyword {
+                self.at += 1;
+                return true;
+            }
+        }
+        false
+    }
     fn eat(&mut self, symbol: &str) -> bool {
         if let Some(Token::Symbol(found)) = self.peek() {
             if found == symbol {
@@ -343,7 +506,7 @@ impl Cursor {
 
     fn or(&mut self, lookup: Lookup<'_>) -> Option<Value> {
         let mut value = self.and(lookup)?;
-        while self.eat("||") {
+        while self.eat("||") || self.word("or") {
             let right = self.and(lookup)?;
             value = Value::Number(if value.truthy() || right.truthy() {
                 1.0
@@ -356,7 +519,7 @@ impl Cursor {
 
     fn and(&mut self, lookup: Lookup<'_>) -> Option<Value> {
         let mut value = self.comparison(lookup)?;
-        while self.eat("&&") {
+        while self.eat("&&") || self.word("and") {
             let right = self.comparison(lookup)?;
             value = Value::Number(if value.truthy() && right.truthy() {
                 1.0
@@ -369,6 +532,18 @@ impl Cursor {
 
     fn comparison(&mut self, lookup: Lookup<'_>) -> Option<Value> {
         let left = self.sum(lookup)?;
+        for symbol in ["=~", "!~"] {
+            if self.eat(symbol) {
+                let pattern = match self.peek() {
+                    Some(Token::Pattern(pattern)) => pattern.clone(),
+                    _ => return None,
+                };
+                self.at += 1;
+                let found = matches_pattern(&pattern, &left.print());
+                let truth = if symbol == "=~" { found } else { !found };
+                return Some(Value::Number(if truth { 1.0 } else { 0.0 }));
+            }
+        }
         for symbol in ["==", "!=", "<=", ">=", "<", ">"] {
             if self.eat(symbol) {
                 let right = self.sum(lookup)?;
@@ -455,9 +630,46 @@ impl Cursor {
         match name {
             "interpolate_table" => self.interpolate_table(lookup),
             "min" => self.aggregate(lookup, true),
+            "is_nil" => self.is_nil(lookup),
             "max" => self.aggregate(lookup, false),
             _ => None,
         }
+    }
+
+    /// `is_nil(x)`: 1 when `x` names a setting the profile leaves unset, 0 when it
+    /// has a value.
+    ///
+    /// The dialect writes `{if is_nil(idle_temperature[initial_tool])}100{else}…`:
+    /// the point of the call is the argument that cannot be read, so a failed read
+    /// is the answer, not an error to give up on.
+    fn is_nil(&mut self, lookup: Lookup<'_>) -> Option<Value> {
+        if !matches!(self.peek(), Some(Token::Open)) {
+            return None;
+        }
+        self.at += 1;
+        let start = self.at;
+        let unset = match self.ternary(lookup) {
+            Some(value) => match self.peek() {
+                Some(Token::Close) => value.print().trim().is_empty(),
+                _ => true,
+            },
+            None => true,
+        };
+        self.at = start;
+        let mut depth = 0usize;
+        while let Some(token) = self.peek() {
+            match token {
+                Token::Open => depth += 1,
+                Token::Close if depth == 0 => {
+                    self.at += 1;
+                    return Some(Value::Number(if unset { 1.0 } else { 0.0 }));
+                }
+                Token::Close => depth -= 1,
+                _ => {}
+            }
+            self.at += 1;
+        }
+        None
     }
 
     /// `min(a, b, …)` / `max(a, b, …)`: whichever of the arguments is smallest or
@@ -535,6 +747,19 @@ impl Cursor {
                         let index = *index;
                         self.at += 1;
                         Some(index)
+                    }
+                    Some(Token::NamedIndex(inner)) => {
+                        let inner = inner.clone();
+                        self.at += 1;
+                        // `[initial_tool]` names the element, so the element is
+                        // worked out from the same settings before it is read.
+                        let tokens = tokenize(&inner)?;
+                        let mut cursor = Cursor { tokens, at: 0 };
+                        let value = cursor.ternary(lookup)?;
+                        if cursor.at != cursor.tokens.len() {
+                            return None;
+                        }
+                        Some(value.number()? as usize)
                     }
                     _ => None,
                 };

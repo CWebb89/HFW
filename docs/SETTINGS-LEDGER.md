@@ -159,7 +159,7 @@ falls to zero.
 | `filament_type` | 0m | applied |  | str | "PLA" |  | Filament |
 | `bed_temperature` | 1 | applied | bed_temp | int | 0 | °C | Filament |
 | `chamber_minimal_temperature` | 1 | applied |  | int | 0 | °C | Filament |
-| `chamber_temperature` | 1 | applied | chamber_temp — M141; a machine without a chamber ignores it | int | 0 | °C | Filament |
+| `chamber_temperature` | 1 | applied |  | int | 0 | °C | Filament |
 | `first_layer_bed_temperature` | 1 | applied | first_layer_bed_temp | int | 0 | °C | Filament |
 | `first_layer_temperature` | 1 | applied | first_nozzle_temp | int | 200 | °C | Filament |
 | `idle_temperature` | 1 | applied | idle_temp | optional<int> | std::optional<int>() | °C | Filament |

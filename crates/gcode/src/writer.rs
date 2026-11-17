@@ -2664,7 +2664,30 @@ pub fn generate(
         prev_bridges: Vec::new(),
         layer_bridges: Vec::new(),
     };
-    let extra = [("{total_layers}", layer_count.to_string())];
+    // The reference dialects hand a machine's start G-code where the part sits, so
+    // its bed-mesh probe can be kept inside the plate the part leaves it.
+    let print_min = (extent.xy.min.x + tx, extent.xy.min.y + ty);
+    let print_max = (extent.xy.max.x + tx, extent.xy.max.y + ty);
+    let bed_max = (
+        cfg.bed_shape.iter().map(|p| p.0).fold(cfg.bed_x, f64::max),
+        cfg.bed_shape.iter().map(|p| p.1).fold(cfg.bed_y, f64::max),
+    );
+    let extra = [
+        ("{total_layers}", layer_count.to_string()),
+        (
+            "{first_layer_print_min}",
+            format!("{:.3},{:.3}", print_min.0, print_min.1),
+        ),
+        (
+            "{first_layer_print_max}",
+            format!("{:.3},{:.3}", print_max.0, print_max.1),
+        ),
+        (
+            "{print_bed_max}",
+            format!("{:.3},{:.3}", bed_max.0, bed_max.1),
+        ),
+        ("{max_print_height}", format!("{:.3}", cfg.max_z)),
+    ];
     w.out.push_str(&cfg.fill(&cfg.start_gcode, &extra));
     w.out.push('\n');
     let _ = &extra;
@@ -3087,11 +3110,17 @@ pub fn generate(
     w.retract();
     let top = (w.z + 10.0).min(cfg.max_z);
     w.z_move(top);
+    // The end of the print is the last layer as far as a machine's end G-code is
+    // concerned: `{if layer_z < max_print_height}` lifts the head for a tall part
+    // and leaves it where it is for a short one.
+    let mut ending = extra.to_vec();
+    ending.push(("{layer_z}", format!("{:.3}", extent.max_z)));
+    ending.push(("{layer_num}", layer_count.to_string()));
     if !cfg.end_filament_gcode.trim().is_empty() {
-        w.out.push_str(&cfg.fill(&cfg.end_filament_gcode, &extra));
+        w.out.push_str(&cfg.fill(&cfg.end_filament_gcode, &ending));
         w.out.push('\n');
     }
-    w.out.push_str(&cfg.fill(&cfg.end_gcode, &extra));
+    w.out.push_str(&cfg.fill(&cfg.end_gcode, &ending));
     w.out.push('\n');
     if cfg.idle_temp > 0.0 {
         let _ = writeln!(w.out, "M104 S{:.0}", cfg.idle_temp);

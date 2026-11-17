@@ -517,6 +517,14 @@ pub(crate) fn intrinsic(config: &PrinterConfig, name: &str) -> Option<String> {
         "bed_shape" => Some(config.bed_shape_text()),
         "max_layer_z" | "max_print_height" => number(config.max_z),
         "filament_type" => Some(config.filament_type.clone()),
+        "filament_notes" => Some(config.filament_notes.clone()),
+        "filament_vendor" => Some(config.filament_vendor.clone()),
+        "idle_temperature" => number(config.idle_temp),
+        "chamber_temperature" => number(config.chamber_temperature),
+        "chamber_minimal_temperature" => number(config.chamber_minimal_temperature),
+        // This engine prints one tool, so the tool a machine's start G-code asks
+        // about is always the first one.
+        "initial_tool" => Some("0".to_owned()),
         "filament_abrasive" => Some(if config.filament_abrasive { "1" } else { "0" }.to_owned()),
         _ => None,
     }

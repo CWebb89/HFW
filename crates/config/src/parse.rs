@@ -1048,6 +1048,7 @@ impl PrinterConfig {
             }
             "overhangs" => self.overhangs = boolean(key, value)?,
             "chamber_minimal_temperature" => self.chamber_minimal_temperature = number(key, value)?,
+            "chamber_temperature" => self.chamber_temperature = number(key, value)?,
             "infill_every_layers" => self.infill_every_layers = whole(key, value)?,
             "automatic_infill_combination" => {
                 self.automatic_infill_combination = boolean(key, value)?

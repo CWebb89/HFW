@@ -847,7 +847,7 @@ pub const PARTIAL: &[(&str, &str)] = &[
     ),
 ];
 
-/// Key names this crate's own profiles use (317), accepted as-is.
+/// Key names this crate's own profiles use (318), accepted as-is.
 pub const NATIVE: &[&str] = &[
     "arc_fitting",
     "arc_fitting_tolerance",
@@ -885,6 +885,7 @@ pub const NATIVE: &[&str] = &[
     "brim_width",
     "chamber_minimal_temperature",
     "chamber_temp",
+    "chamber_temperature",
     "color_change_gcode",
     "complete_objects",
     "cooling",

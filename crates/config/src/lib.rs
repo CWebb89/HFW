@@ -610,6 +610,8 @@ pub struct PrinterConfig {
     pub overhangs: bool,
     /// Chamber temperature the print waits for, in °C; 0 does not wait.
     pub chamber_minimal_temperature: f64,
+    /// Nominal chamber temperature the machine is asked to hold.
+    pub chamber_temperature: f64,
     /// Print the sparse fill of N layers in one thicker layer; 1 is off.
     ///
     /// A combinfill layer is printed at N times the spacing with N times the
@@ -1159,6 +1161,7 @@ impl Default for PrinterConfig {
             wall_transition_filter_deviation: 0.0,
             overhangs: true,
             chamber_minimal_temperature: 0.0,
+            chamber_temperature: 0.0,
             infill_every_layers: 1,
             automatic_infill_combination: false,
             infill_combination_max_layer_height: 0.0,
