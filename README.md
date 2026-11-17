@@ -5,16 +5,19 @@ independent verifier that re-reads the file and checks it before anyone prints i
 
 It is the merge of two earlier prototypes (a variable-width wall generator and an
 integer slicing pipeline) and it is the engine meant to replace `libslic3r` in
-next-layer. **It is not ready for that yet** — `docs/ENGINE-PARITY.md` is the list
-of what has to be true first, and `docs/STATUS.md` says where it stands today in
-plain language.
+next-layer. Since 2026-11-17 it **is** the engine next-layer slices with: the
+application hands it a plate and gets verified G-code back
+(`next-layer/src/qt/src/HfwEngine.cpp`, `NEXT_LAYER_ENGINE=hfw`). What is left is
+the rest of that library's job — the plate model, settings, preview, project
+files — which is planned in `next-layer/docs/rust-engine-plan.md` and is Rust work
+in this repository, not a reason to keep the C++ engine.
 
 ## Read this first
 
 | document | answers |
 |---|---|
 | `docs/STATUS.md` | where the project stands, in two minutes, with the numbers |
-| `docs/ROADMAP.md` | the order of work and why it is that order |
+| `docs/ROADMAP.md` | the order of work and why it is that order, including the crates that retire the C++ engine |
 | `docs/ENGINE-PARITY.md` | what must be true before it can replace libslic3r |
 | `docs/ENGINE-PARITY.md` → `docs/SETTINGS-LEDGER.md` | every setting, applied or not, generated from the reference dialect |
 | `docs/ORACLE.md` | measured agreement with OrcaSlicer and PrusaSlicer |

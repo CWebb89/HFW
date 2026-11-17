@@ -10,10 +10,16 @@ estimate).
 
 HFW is our own slicing engine: it takes a 3D model and a printer profile and
 writes printable G-code. It works end to end for **one extruder, one material,
-on parts that arrive as STL or 3MF**. It is not yet wired into next-layer, and it
-cannot replace libslic3r — that library is not just a slicer in that app, it is
-the project model, the settings system, the mesh importers, arrange, cut, hollow,
-paint and the G-code preview. Details in `ENGINE-PARITY.md`.
+on parts that arrive as STL or 3MF**, and since 2026-11-17 next-layer slices its
+plates with it.
+
+What it cannot yet do is take over the *rest* of what libslic3r does in that
+application: the project model, the settings system, arrange, preview and project
+files. That work is planned phase by phase in `next-layer/docs/rust-engine-plan.md`
+and is Rust, here, in this repository — the C++ engine is not the destination for
+any of it. `ENGINE-PARITY.md` remains the measured list of what a slicing engine
+must honour; it is about parity with the reference slicers now, not about
+deciding whether to swap.
 
 ## The three numbers
 

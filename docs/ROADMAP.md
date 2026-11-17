@@ -5,7 +5,8 @@ The order of work, so the next action is never a question. State as of
 can produce them.
 
 Related: `STATUS.md` for the plain-language summary, `ENGINE-PARITY.md` for the
-gate list the swap depends on, `SETTINGS-LEDGER.md` for the per-setting
+gate list parity depends on, `next-layer/docs/rust-engine-plan.md` for the phases
+that retire the C++ engine, `SETTINGS-LEDGER.md` for the per-setting
 inventory (generated), `SETTINGS-GAPS.md` for what is left and what it costs
 (generated).
 
@@ -31,6 +32,23 @@ applied (97%).
 on hardware* with the reason written beside it. The old wording ("100% applied")
 was unreachable while 57 rows wait for a toolchanger, and a finish line nobody
 can reach stops being read.
+
+## The second job: the crates that retire the C++ engine
+
+Replacing libslic3r completely is not a settings problem, so it is not tracked in
+the ledger. It is tracked by phase in `next-layer/docs/rust-engine-plan.md`, and
+each phase lands as a crate here:
+
+| Phase | Crate | What it is |
+| --- | --- | --- |
+| 1 | `crates/capi` | The C ABI: mesh handles in, slice out, so the application can hold geometry without a process |
+| 2 | `crates/plate` | The plate model: object, mesh, transform, per-object settings, instances |
+| 3 | — (extends `crates/config`) | The settings surface next-layer's panel reads, as JSON |
+| 5 | — (extends `crates/mesh`, `crates/geometry`) | Load, transform, scale, rotate, shelf layout |
+| 6 | — (extends `crates/mesh/threemf.rs`) | Writing a `.3mf` project, not only reading one |
+
+These are additions to what is here, not a rewrite of it: the slicing path those
+crates serve is the one already tested by the gate.
 
 ## The order of work
 
