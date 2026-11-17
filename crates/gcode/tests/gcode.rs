@@ -374,8 +374,17 @@ fn exclude_object_is_emitted_when_enabled() {
     let job = plan("cube.stl", &cfg);
     let gcode = generate(&job.layers, &cfg, Some("my part")).expect("gcode builds");
     assert!(gcode.text.contains("EXCLUDE_OBJECT_DEFINE NAME=MY_PART"));
-    let plain = generate(&job.layers, &cfg, None).expect("gcode builds");
+    assert!(gcode.text.contains("EXCLUDE_OBJECT_START NAME=MY_PART"));
+    assert!(gcode.text.contains("EXCLUDE_OBJECT_END NAME=MY_PART"));
+    let unnamed = generate(&job.layers, &cfg, None).expect("gcode builds");
+    assert!(
+        unnamed.text.contains("EXCLUDE_OBJECT_DEFINE NAME=HFW_MODEL"),
+        "a part with no name still needs one the machine can cancel"
+    );
+    cfg.exclude_object = false;
+    let plain = generate(&job.layers, &cfg, Some("my part")).expect("gcode builds");
     assert!(!plain.text.contains("EXCLUDE_OBJECT_DEFINE"));
+    assert!(!plain.text.contains("EXCLUDE_OBJECT_START"));
 }
 
 const GOOD_HEAD: &str = ";LAYER_CHANGE\n;HEIGHT:0.2\nM140 S60\nM109 S210\nG90\nM83\nG92 E0\nG1 Z0.2 F600\nG0 X50 Y50 F3000\n";
@@ -1018,6 +1027,27 @@ fn printing_retract_travel_acceleration_and_min_rates_reach_their_commands() {
     assert!(
         !gcode.text.contains("M205"),
         "klipper has no junction deviation"
+    );
+}
+
+#[test]
+fn the_header_carries_every_audit_finding() {
+    let mut cfg = voron();
+    cfg.retract_len = 0.8;
+    cfg.z_hop = 0.0;
+    cfg.pressure_advance = 0.0;
+    let (gcode, _) = make("cube.stl", &cfg);
+    let head = &gcode.text[..gcode.text.find("\nG").unwrap_or(gcode.text.len())];
+    for finding in cfg.audit() {
+        assert!(
+            head.contains(&format!("; AUDIT: {}", finding.line())),
+            "the header is missing its finding: {}: {head}",
+            finding.line()
+        );
+    }
+    assert!(
+        head.contains("; AUDIT: off: z_hop is 0"),
+        "the retraction finding is not in the header: {head}"
     );
 }
 
@@ -1923,8 +1953,8 @@ fn comments_and_object_labels_can_be_switched_off() {
     cfg.label_objects = false;
     let quiet = generate(&job.layers, &cfg, Some("part")).expect("gcode builds");
     assert!(
-        !quiet.text.contains(";TYPE:"),
-        "a comment survived the switch"
+        quiet.text.contains(";TYPE:"),
+        "the line types are what the preview reads, not commentary"
     );
     assert!(!quiet.text.contains(";WIDTH:"), "a width comment survived");
     assert!(!quiet.text.contains(";OBJECT:"), "an object label survived");

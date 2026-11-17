@@ -108,6 +108,12 @@ impl Feature {
     }
 }
 
+/// The object number of a path that belongs to the plate rather than a part.
+///
+/// Skirt and draft shield surround every part at once, so they cannot sit inside
+/// one part's cancellation block without being cancelled with it.
+pub const PLATE_OBJECT: u16 = u16::MAX;
+
 /// One ordered bead path in machine coordinates.
 #[derive(Clone, Debug)]
 pub struct Path {
@@ -130,6 +136,11 @@ pub struct Path {
     /// True when this closed wall loop sits inside another loop of the same
     /// wall index, so it bounds a hole rather than the part.
     pub hole: bool,
+    /// Which object on the plate this path belongs to, `0` for a single part.
+    ///
+    /// Kept rather than folded into `rank` alone: the file needs a boundary the
+    /// machine can cancel at, and a rank only says what prints first.
+    pub object: u16,
 }
 
 /// Totals for one emitted file.
@@ -887,6 +898,7 @@ fn path_from(line: &Line, tx: f64, ty: f64, cfg: &PrinterConfig) -> Option<Path>
         span,
         overhang: line.overhang,
         hole: false,
+        object: line.object,
         flow: if feature == Feature::Ironing {
             cfg.ironing_flow
         } else {
@@ -1597,6 +1609,7 @@ fn skirt_paths(first: &PlannedLayer, tx: f64, ty: f64, cfg: &PrinterConfig) -> V
             flow: 1.0,
             overhang: 0.0,
             hole: false,
+            object: PLATE_OBJECT,
         });
     }
     out
@@ -1694,6 +1707,7 @@ fn raster_fill(poly: &[V2], step: f64, width: f64, feature: Feature, rank: i32) 
             flow: 1.0,
             overhang: 0.0,
             hole: false,
+            object: PLATE_OBJECT,
         });
     }
     out
@@ -1867,8 +1881,14 @@ struct Writer<'a> {
     layer_bead: f64,
     stats: GcodeStats,
     bbox_set: bool,
-    object_label: Option<String>,
     labelled: bool,
+    /// Name Klipper cancels each object by, indexed by the path's object number.
+    ///
+    /// Empty when the profile does not ask for object cancellation, which is what
+    /// keeps a single-part file free of markers nothing reads.
+    object_names: Vec<String>,
+    /// The object the file is currently inside, if any.
+    written_object: Option<u16>,
     segs: Vec<crate::thumb::Segment>,
     spiral: Option<Spiral>,
     /// Bridge segments of the layer below, in machine coordinates.
@@ -2034,6 +2054,53 @@ impl Writer<'_> {
     }
 
     /// Writes a `;` comment when the profile asks for comments.
+    /// Closes the last object's block, so every `START` has its `END`.
+    fn close_object(&mut self) {
+        if let Some(object) = self.written_object.take() {
+            if let Some(name) = self.object_names.get(usize::from(object)) {
+                let _ = writeln!(self.out, "EXCLUDE_OBJECT_END NAME={name}");
+            }
+        }
+    }
+
+    /// Opens or closes a Klipper object block as the object being printed changes.
+    ///
+    /// Cancelling one part of a plate means skipping every move between its `START`
+    /// and its `END`, so the block has to be a contiguous run of its own paths. The
+    /// boundary is written after the travel that arrives at the path, which leaves
+    /// the inter-object travel inside the block being left: cancelling a part
+    /// should also skip the trip it was going to make.
+    fn object_boundary(&mut self, object: u16) {
+        if self.object_names.is_empty() {
+            return;
+        }
+        let wanted = if object == PLATE_OBJECT {
+            None
+        } else {
+            Some(object)
+        };
+        if self.written_object == wanted {
+            return;
+        }
+        if let Some(previous) = self.written_object {
+            if let Some(name) = self.object_names.get(usize::from(previous)) {
+                let _ = writeln!(self.out, "EXCLUDE_OBJECT_END NAME={name}");
+            }
+        }
+        if let Some(next) = wanted {
+            if let Some(name) = self.object_names.get(usize::from(next)).cloned() {
+                if !self.labelled {
+                    if self.cfg.label_objects {
+                        let _ = writeln!(self.out, ";OBJECT:{name}");
+                    }
+                    self.labelled = true;
+                }
+                let _ = writeln!(self.out, "EXCLUDE_OBJECT_START NAME={name}");
+            }
+        }
+        self.written_object = wanted;
+    }
+
     fn comment(&mut self, text: &str) {
         if self.cfg.gcode_comments {
             self.out.push_str(text);
@@ -2391,16 +2458,14 @@ impl Writer<'_> {
             }
         }
         self.unretract();
+        self.object_boundary(path.object);
         self.previous_feature = Some(path.feature);
-        if !self.labelled {
-            if let Some(name) = self.object_label.clone() {
-                let _ = writeln!(self.out, ";OBJECT:{name}");
-            }
-            self.labelled = true;
-        }
         if self.last_feature != Some(path.feature) {
-            let label = format!(";TYPE:{}", path.feature.label());
-            self.comment(&label);
+            // Always written: the preview colours the file by these names, and a
+            // profile that turns verbatim comments off is asking for fewer
+            // `;WIDTH:`/`;HEIGHT:` lines, not for a file whose line types are
+            // unreadable. Both reference slicers emit `;TYPE:` regardless.
+            let _ = writeln!(self.out, ";TYPE:{}", path.feature.label());
             if path.feature == Feature::Bridge {
                 if self.fan_saved.is_none() {
                     self.fan_saved = Some(self.fan_pwm);
@@ -2601,10 +2666,70 @@ impl Writer<'_> {
     }
 }
 
+/// The centre of one object's printed footprint, in machine coordinates.
+///
+/// Klipper draws the cancelled object's marker at this point, so it has to be the
+/// object's own middle rather than the plate's -- two parts at opposite corners of
+/// a bed would otherwise share a marker.
+fn object_centre(layers: &[PlannedLayer], object: u16, tx: f64, ty: f64) -> Option<(f64, f64)> {
+    let mut low = V2::new(f64::INFINITY, f64::INFINITY);
+    let mut high = V2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let mut seen = false;
+    for layer in layers {
+        for path in &layer.paths {
+            if path.object != object {
+                continue;
+            }
+            for point in &path.pts {
+                low = V2::new(low.x.min(point.x), low.y.min(point.y));
+                high = V2::new(high.x.max(point.x), high.y.max(point.y));
+                seen = true;
+            }
+        }
+    }
+    if !seen {
+        return None;
+    }
+    Some((0.5 * (low.x + high.x) + tx, 0.5 * (low.y + high.y) + ty))
+}
+
+/// One name per object, indexed by the object number a path carries.
+///
+/// Klipper cancels an object by the name in its `EXCLUDE_OBJECT_*` commands, so the
+/// name has to be unique on the plate and legal as a Klipper object name: letters,
+/// digits, `_` and `-`. A single part keeps the name the caller gave it; a plate
+/// numbers its parts under that name, so a file sliced from one model still reads
+/// `MY_PART_2` for the second copy of it rather than `OBJECT_2`.
+fn object_names(layers: &[PlannedLayer], cfg: &PrinterConfig, stem: Option<&str>) -> Vec<String> {
+    if !cfg.exclude_object {
+        return Vec::new();
+    }
+    let stem = stem.map(sanitise).unwrap_or_else(|| "HFW_MODEL".to_owned());
+    let mut highest = 0u16;
+    for layer in layers {
+        for path in &layer.paths {
+            if path.object != PLATE_OBJECT {
+                highest = highest.max(path.object);
+            }
+        }
+    }
+    let count = usize::from(highest) + 1;
+    (0..count)
+        .map(|index| {
+            if count == 1 {
+                stem.clone()
+            } else {
+                format!("{}_{}", stem, index + 1)
+            }
+        })
+        .collect()
+}
+
 /// Emits a complete G-code file for a planned job.
 ///
-/// `object_name` is used only when the profile enables `EXCLUDE_OBJECT_DEFINE`;
-/// it names the single printed object so the machine can cancel it.
+/// `object_name` names the part the file prints: a single part is cancelled by that
+/// name, and the parts of a plate are numbered under it, both only when the profile
+/// enables `EXCLUDE_OBJECT_DEFINE`.
 pub fn generate(
     layers: &[PlannedLayer],
     cfg: &PrinterConfig,
@@ -2648,8 +2773,9 @@ pub fn generate(
         layer_bead: 0.0,
         stats: GcodeStats::default(),
         bbox_set: false,
-        object_label: object_name.filter(|_| cfg.label_objects).map(sanitise),
         labelled: false,
+        object_names: object_names(layers, cfg, object_name),
+        written_object: None,
         spiral: None,
         segs: Vec::new(),
         over_raft: false,
@@ -2751,14 +2877,15 @@ pub fn generate(
         let _ = writeln!(w.out, "SET_PRINT_STATS_INFO TOTAL_LAYER={layer_count}");
     }
     if cfg.exclude_object {
-        if let Some(name) = object_name {
-            let _ = writeln!(
-                w.out,
-                "EXCLUDE_OBJECT_DEFINE NAME={} CENTER={:.3},{:.3}",
-                sanitise(name),
-                0.5 * (extent.xy.min.x + extent.xy.max.x) + tx,
-                0.5 * (extent.xy.min.y + extent.xy.max.y) + ty
-            );
+        for (index, name) in w.object_names.iter().enumerate() {
+            let object = index as u16;
+            if let Some(centre) = object_centre(layers, object, tx, ty) {
+                let _ = writeln!(
+                    w.out,
+                    "EXCLUDE_OBJECT_DEFINE NAME={} CENTER={:.3},{:.3}",
+                    name, centre.0, centre.1
+                );
+            }
         }
     }
     let first = layers
@@ -2892,6 +3019,7 @@ pub fn generate(
                 flow: 1.0,
                 overhang: 0.0,
                 hole: false,
+                object: PLATE_OBJECT,
             });
         }
         paths.sort_by_key(|p| p.rank);
@@ -3110,6 +3238,7 @@ pub fn generate(
     // The end of the print is the last layer as far as a machine's end G-code is
     // concerned: `{if layer_z < max_print_height}` lifts the head for a tall part
     // and leaves it where it is for a short one.
+    w.close_object();
     let mut ending = extra.to_vec();
     ending.push(("{layer_z}", format!("{:.3}", extent.max_z)));
     ending.push(("{layer_num}", layer_count.to_string()));
@@ -3166,6 +3295,9 @@ pub fn generate(
     );
     for (label, value) in metadata_lines(cfg) {
         let _ = writeln!(head, "; {label} = {value}");
+    }
+    for finding in cfg.audit() {
+        let _ = writeln!(head, "; AUDIT: {}", finding.line());
     }
     if !cfg.thumbnails.is_empty() {
         let specs: Vec<crate::thumb::Spec> = cfg
@@ -3324,6 +3456,7 @@ mod tests {
             flow: 1.0,
             overhang: 0.0,
             hole: false,
+            object: 0,
         }
     }
 
