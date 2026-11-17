@@ -392,6 +392,15 @@ fn verifier_accepts_a_minimal_good_file() {
 }
 
 #[test]
+fn verifier_lets_the_head_park_past_the_bed_edge() {
+    // A reference machine's end G-code parks the head a few millimetres beyond the
+    // bed: `G1 X225 Y-2.5` on a 220 mm machine. Nothing is extruded, so nothing can
+    // be ruined, and rejecting it refuses every real profile.
+    let report = check("G90\nM83\nG0 X100 Y100 F3000\nG1 X110 Y100 E0.33 F3000\nG1 X225 Y-2.5\n");
+    assert!(report.ok(), "{:?}", report.errors);
+}
+
+#[test]
 fn verifier_rejects_unsafe_files() {
     let cfg = voron();
     let cold = verify(
@@ -402,10 +411,13 @@ fn verifier_rejects_unsafe_files() {
         .errors
         .iter()
         .any(|e| e.contains("before the nozzle was heated")));
-    assert!(check("G0 X999 Y100 F3000\n")
-        .errors
-        .iter()
-        .any(|e| e.contains("outside the bed")));
+    assert!(
+        check("G90\nM83\nG0 X100 Y100 F3000\nG1 X999 Y100 E0.33 F3000\n")
+            .errors
+            .iter()
+            .any(|e| e.contains("outside the bed")),
+        "plastic laid down outside the bed is an error"
+    );
     assert!(check("G0 X100 Y100 F99999\n")
         .errors
         .iter()

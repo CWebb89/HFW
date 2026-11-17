@@ -371,12 +371,16 @@ end
 printf 'Verified: tree tips merge downward, thicken, and hold their clearance.\n'
 
 section 'The verifier rejects an unsafe file'
-printf 'G1 X9999 Y0 F100\n' >"$tmp/bad.gcode"
+printf 'G90\nM83\nG1 X100 Y100 E0.5 F100\nG1 X9999 Y0 E1 F100\n' >"$tmp/bad.gcode"
 $bin --check-gcode "$tmp/bad.gcode" --profile profiles/voron_klipper.cfg >"$tmp/bad.log" 2>&1
 and fail 'an unsafe file passed verification'
 grep -q 'verify RESULT FAIL' "$tmp/bad.log"; or fail 'the verifier did not report a failure'
 grep -q 'outside the bed' "$tmp/bad.log"; or fail 'the bed overflow was not named'
-printf 'Verified: bed overflow is caught.\n'
+printf 'G90\nM83\n;LAYER_CHANGE\n;Z:0.200\nG1 Z0.2 F600\nG1 X100 Y100 F6000\nG1 X110 Y100 E0.5 F1200\nG1 X225 Y-2.5 F6000\n' >"$tmp/park.gcode"
+$bin --check-gcode "$tmp/park.gcode" --profile profiles/voron_klipper.cfg >"$tmp/park.log" 2>&1
+grep -q 'outside the bed' "$tmp/park.log"
+ and fail 'a head parking past the bed edge was rejected'
+printf 'Verified: bed overflow is caught, and a park past the edge is not.\n'
 
 section 'Profiles reject unsafe settings'
 sed 's/^walls = 2/walls = 0/' profiles/voron_klipper.cfg >"$tmp/bad.cfg"

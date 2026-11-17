@@ -318,14 +318,19 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                         f64::NAN
                     };
                 }
-                if x.is_finite() && (x < min_x - tolerance || x > half_x + tolerance) {
+                // Plastic outside the bed is a ruined print; the head going there is
+                // every machine's park, prime and wipe. Reference start and end
+                // G-code parks the head a few millimetres past the bed edge as a
+                // matter of course, so only a move that extrudes is held to the bed.
+                let prints = extrusion.is_some_and(|delta| delta > 0.0);
+                if prints && x.is_finite() && (x < min_x - tolerance || x > half_x + tolerance) {
                     push(
                         &mut r,
                         max_errors,
                         format!("line {number}: X {x:.3} is outside the bed"),
                     );
                 }
-                if x.is_finite() && y.is_finite() && cfg.bed_shape.len() >= 3 {
+                if prints && x.is_finite() && y.is_finite() && cfg.bed_shape.len() >= 3 {
                     let (sx, sy) = if cfg.origin_center {
                         (half_x, half_y)
                     } else {
@@ -339,7 +344,7 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                         );
                     }
                 }
-                if y.is_finite() && (y < min_y - tolerance || y > half_y + tolerance) {
+                if prints && y.is_finite() && (y < min_y - tolerance || y > half_y + tolerance) {
                     push(
                         &mut r,
                         max_errors,
