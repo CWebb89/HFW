@@ -15,7 +15,7 @@ the algorithms that share a name with published work are named below.
 | `infill` | skin masks from a bounded ring of layer masks; line families clipped by a distance query | own design (`DESIGN.md` §7c) |
 | `toolpath` | planned layers, per-feature counters, coverage and spill metrics, SVG export | own design |
 | `config` | `key = value` printer profiles with validation | own design; the setting names follow slicer conventions so profiles are portable |
-| `gcode` | path ordering, seam placement, retraction, z-hop, per-segment extrusion from bead width, speeds, cooling, skirt, placement; independent verifier | public G-code command sets (Marlin and Klipper user documentation); the rectangle-bead volume model is the common simple model |
+| `gcode` | path ordering, seam placement, retraction, z-hop, per-segment extrusion from bead width, speeds, cooling, skirt, placement; independent verifier | public G-code command sets (Marlin and Klipper user documentation); the bead volume model subtracts the two corners a wall bead leaves unfilled, `h²(1 − π/4)`, which is the correction both reference slicers apply to perimeter flow |
 | `engine` | job orchestration across the pipeline | own design |
 | `cli` | headless command-line front end | own design |
 

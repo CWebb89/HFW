@@ -640,7 +640,7 @@ fn limit_rate_slope(
             continue;
         }
         let width = path.width.iter().cloned().fold(0.0f64, f64::max);
-        let section = width * height * cfg.flow * path.flow;
+        let section = section_area(path.feature, width, height) * cfg.flow * path.flow;
         if section <= 1e-12 {
             continue;
         }
@@ -1035,6 +1035,21 @@ fn nearest_entry(p: &Path, pos: V2) -> f64 {
 
 fn is_perimeter(f: Feature) -> bool {
     matches!(f, Feature::Outer | Feature::Inner | Feature::Thin)
+}
+
+/// Cross-section of one path, in square millimetres.
+///
+/// Walls round off into the corners they do not fill, and both reference slicers
+/// subtract that area from a perimeter's flow. Skin and infill do not get the same
+/// treatment: their beads merge into their neighbours and fill the region solid, so
+/// the rectangle is what they deposit. The planner's volume figures come from
+/// `hfw_toolpath::section_area`, which draws the line in the same place.
+fn section_area(feature: Feature, width: f64, height: f64) -> f64 {
+    if is_perimeter(feature) {
+        crate::bead_area(width, height)
+    } else {
+        width * height
+    }
 }
 
 /// The entry a path should take, as `(index, reverse)`, or `None` to keep its own.
@@ -2582,7 +2597,7 @@ impl Writer<'_> {
             }
             taper /= (to - from + 1) as f64;
             let width = width * taper;
-            let volume = len * width * height * flow;
+            let volume = len * section_area(path.feature, width, height) * flow;
             let delta = if self.cfg.volumetric_e {
                 volume
             } else {
@@ -3062,7 +3077,7 @@ pub fn generate(
                 } else {
                     let mut speed = path_speed(p.feature, cfg, first_layer, p.overhang);
                     if limit > 0.0 {
-                        speed = speed.min(limit / (widest * height * cfg.flow * p.flow));
+                        speed = speed.min(limit / (section_area(p.feature, widest, height) * cfg.flow * p.flow));
                     }
                     let owned = filament_speed_limit(p.feature, cfg);
                     if owned > 0.0 {

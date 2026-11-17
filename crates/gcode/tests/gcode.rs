@@ -224,7 +224,14 @@ fn every_layer_planned_covers_the_model() {
         report.volume_mm3,
         planned
     );
-    assert!((report.volume_mm3 / 8000.0 - 0.9963).abs() < 0.01);
+    // Wall beads round off into the corners they do not fill, so the file carries
+    // about 2.4% less plastic than the cube's geometric volume; the rest is solid
+    // fill at its full rectangle.
+    let covered = report.volume_mm3 / 8000.0;
+    assert!(
+        (covered - 0.9725).abs() < 0.01,
+        "the file carries {covered:.4} of the cube"
+    );
 }
 
 #[test]
@@ -2250,4 +2257,26 @@ fn a_vase_raises_z_inside_every_layer_and_verifies() {
             "a layer rose only {rise} mm; the spiral did not climb"
         );
     }
+}
+
+#[test]
+fn bead_cross_section_matches_the_reference_slicers() {
+    // A 0.4 x 0.2 bead: the rectangle is 0.08 mm2, and the two long sides rounding
+    // off costs 0.0086 mm2. Both reference slicers subtract exactly that, so a
+    // profile calibrated against their files extrudes the same volume here.
+    let area = hfw_gcode::bead_area(0.4, 0.2);
+    assert!(
+        (area - 0.071_415_9).abs() < 1e-6,
+        "bead area {area} is not the rounded 0.4x0.2 section"
+    );
+    assert!(area < 0.08 && area > 0.88 * 0.08, "{area} left the rounded range");
+    assert_eq!(hfw_gcode::bead_area(0.4, 0.0), 0.0);
+    let width = hfw_gcode::bead_width(area * 10.0, 10.0, 0.2);
+    assert!((width - 0.4).abs() < 1e-9, "inverse read back {width}");
+}
+
+#[test]
+fn a_bead_narrower_than_its_own_corners_keeps_its_rectangle() {
+    let area = hfw_gcode::bead_area(0.12, 0.2);
+    assert!(area >= 0.5 * 0.12 * 0.2, "{area} fell below half the rectangle");
 }

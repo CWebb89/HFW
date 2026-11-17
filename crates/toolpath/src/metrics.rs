@@ -226,9 +226,58 @@ pub fn line_volume(line: &Line, height: f64) -> f64 {
     for k in 0..segn {
         let a = line.pts[k];
         let b = line.pts[(k + 1) % m];
-        v += a.dist(b) * 0.5 * (line.width[k] + line.width[(k + 1) % m]) * height * line.flow;
+        let width = 0.5 * (line.width[k] + line.width[(k + 1) % m]);
+        v += a.dist(b) * section_area(line.kind, width, height) * line.flow;
     }
     v
+}
+
+/// Cross-section of one path, in square millimetres.
+///
+/// Walls are beads squeezed between the nozzle and the wall beside them, so their two
+/// long sides round off and the corners they do not fill are subtracted. Both
+/// reference slicers do that for perimeters, and a profile calibrated against their
+/// files over-extrudes by 10.7% at 0.4 × 0.2 mm if this does not. They do **not** do
+/// it for skin and infill, where beads merge into their neighbours and the region is
+/// filled solid; subtracting there would leave every solid surface 11% short, which
+/// is exactly what the oracle's 100%-infill comparison catches.
+pub fn section_area(kind: Kind, width: f64, height: f64) -> f64 {
+    if kind.is_wall() {
+        bead_area(width, height)
+    } else {
+        width * height
+    }
+}
+
+/// Cross-section of a wall bead, in square millimetres.
+///
+/// A bead pressed between the nozzle and the wall beside it is not a rectangle: its
+/// two long sides round off into the corners, and the four corners are not filled.
+/// Both reference slicers subtract that missing corner area, `h²(1 − π/4)`. At 0.4 mm
+/// wide and 0.2 mm tall the term is 10.7% of the rectangle, which is the whole gap
+/// between this engine's filament figure and theirs on a wall-heavy model.
+///
+/// A bead narrower than its own corners would come out thinner than nothing, so half
+/// the rectangle stays as a floor for that case.
+pub fn bead_area(width: f64, height: f64) -> f64 {
+    if height <= 0.0 || width <= 0.0 {
+        return 0.0;
+    }
+    let rectangle = width * height;
+    let corners = height * height * (1.0 - std::f64::consts::FRAC_PI_4);
+    (rectangle - corners).max(0.5 * rectangle).min(rectangle)
+}
+
+/// The width a bead of this volume must have had, the inverse of [`bead_area`].
+///
+/// The verifier reads `E` values back out of a finished file and has to name the
+/// width they imply; that name only compares with the profile's widths if the same
+/// corner term is added back.
+pub fn bead_width(volume: f64, length: f64, height: f64) -> f64 {
+    if length <= 0.0 || height <= 0.0 {
+        return 0.0;
+    }
+    volume / (length * height) + height * (1.0 - std::f64::consts::FRAC_PI_4)
 }
 
 /// Total deposited volume, split into perimeter and interior.
@@ -337,9 +386,9 @@ mod tests {
             overhang: 0.0,
             object: 0,
         };
-        assert!((line_volume(&line, 0.2) - 10.0 * 0.6 * 0.2).abs() < 1e-9);
+        assert!((line_volume(&line, 0.2) - 10.0 * bead_area(0.6, 0.2)).abs() < 1e-9);
         let (w, i) = extruded_volume(std::slice::from_ref(&line), 0.2);
-        assert!((w - 1.2).abs() < 1e-9);
+        assert!((w - 10.0 * bead_area(0.6, 0.2)).abs() < 1e-9);
         assert_eq!(i, 0.0);
     }
 }

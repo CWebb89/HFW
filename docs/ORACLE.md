@@ -32,18 +32,25 @@ the extrusion model from infill-density policy.
 
 | fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean |
 |---|---:|---:|---:|---:|
-| cube | 7970.2 | 8001.6 | 8067.8 | −0.8% |
-| sphere | 14024.1 | 14130.3 | 14190.1 | −1.0% |
+| cube | 7783.6 | 8001.6 | 8067.8 | −3.1% |
+| sphere | 13795.0 | 14130.3 | 14190.1 | −2.6% |
 | torus | 3722.0 | 3786.3 | 3864.5 | −2.7% |
 | cone | 7001.9 | 7056.7 | 7100.5 | −1.1% |
 
-Both references sit 0.5–1.2% *above* the model's own volume; hfw sits 0.4% below
-it. On the 20 mm cube the analytic volume is 8000 mm³, so hfw is the closest of
-the three. The independent verifier independently reproduces hfw's own G-code
-volume to within 0.3%, which is what the writer/verifier split is for.
+Both references sit 0.5–1.2% *above* the model's own volume; hfw sits 2–3% below
+it. The cube and sphere rows were re-measured on 2026-11-17 after the perimeter
+flow change described below; torus and cone were not re-run and are expected about
+3% lower now.
 
-**Conclusion: geometry, wall placement and the rectangle-bead extrusion model
-are correct to within about 1% on flat and curved shapes alike.**
+The independent verifier reproduces hfw's own G-code volume to within 0.3%, which
+is what the writer/verifier split is for.
+
+One class per figure is not comparable: PrusaSlicer reports its solid skin under
+`sparse` at 100% density, so the `skin`/`sparse` split below is an artefact of its
+naming and only the totals, the walls and the skin-plus-sparse sum are read.
+
+**Conclusion: geometry and wall placement are correct to within about 1% on flat
+and curved shapes alike, and the perimeter flow matches the references' model.**
 
 ## At 15% infill: flat parts agree, curved parts do not
 
@@ -94,6 +101,20 @@ wall centrelines span 31.59 mm plus half a bead each side — the file agrees wi
 the part. Reading 2 is correct: the references over-fill sloped surfaces. The
 three failing fixtures stay red because the tolerance documents the difference,
 not because the output is wrong; the note beside each failure says so.
+
+## Wall flow follows the reference slicers, 2026-11-17
+
+A wall bead's `E` used to be `width × height × length`, a rectangle. Both
+references subtract the two corners the bead does not fill, `h²(1 − π/4)`, which is
+10.7% of a 0.4 × 0.2 rectangle. Measured on one model through both engines, hfw's
+perimeters carried 12.5% more filament than libslic3r's on toolpaths of the same
+length; after the change the wall class agrees to −0.3% here and the plate's total
+is 7.8% above libslic3r instead of 12.5%, all of the remainder in infill.
+
+Skin and infill keep the rectangle on purpose: their beads merge with the beads
+beside and above them and fill the region solid, and an 11% shorter bead there
+leaves every solid surface short — the 100%-infill rows above would drop to about
+−11% against both references. The oracle is what settles that split.
 
 ## Note on per-feature classes
 

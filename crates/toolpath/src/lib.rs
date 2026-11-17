@@ -19,7 +19,10 @@ use std::fmt::Write as _;
 use hfw_kernel::V2;
 use hfw_walls::{Kind, Line};
 
-pub use metrics::{evaluate, evaluate_full, extruded_volume, is_interior, line_volume, Metrics};
+pub use metrics::{
+    bead_area, bead_width, evaluate, evaluate_full, extruded_volume, is_interior, line_volume,
+    section_area, Metrics,
+};
 
 /// Semantic class of a printable path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,10 +406,12 @@ mod tests {
     }
 
     #[test]
-    fn volume_matches_length_times_width_times_height() {
+    fn volume_follows_the_section_each_kind_deposits() {
         let l = layer();
-        let expected = (4.0 * 19.6 + 18.0) * 0.4 * 0.2;
-        assert!((l.counts.volume - expected).abs() < 1e-6);
+        let wall = bead_area(0.4, 0.2) * 4.0 * 19.6;
+        let infill = 0.4 * 0.2 * 18.0;
+        assert!((l.counts.volume - (wall + infill)).abs() < 1e-6);
+        assert!(wall < 0.9 * 4.0 * 19.6 * 0.4 * 0.2);
     }
 
     #[test]

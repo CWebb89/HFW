@@ -492,7 +492,11 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                             );
                         }
                         if height.is_finite() && height > 0.0 {
-                            let width = volume / (distance * height);
+                            let width = if in_perimeter {
+                                crate::bead_width(volume, distance, height)
+                            } else {
+                                volume / (distance * height)
+                            };
                             if width > 4.0 * cfg.nozzle_diameter || width < 0.05 {
                                 push(
                                     &mut r,

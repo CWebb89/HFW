@@ -109,7 +109,10 @@ Everything below exists only here.
 ## Verification of the port
 
 The three published material-accounting ratios reproduce to the fourth decimal
-(0.9963 cube, 0.9930 sphere, 0.9853 torus). Any structural mistake in the port —
-a shifted grid, a lost jitter, a changed overlap — moves those numbers. The
-integration test `solid_infill_reproduces_the_published_volume_ratios` asserts
-them, so a regression fails the suite rather than being noticed later.
+(0.9725 cube, 0.9700 sphere, 0.9449 torus). Any structural mistake in the port —
+a shifted grid, a lost jitter, a changed overlap — moves those numbers. They are
+below 1.0 because a wall bead rounds off into the two corners it does not fill,
+which is the same correction both reference slicers apply to perimeter flow; the
+numbers were 0.9963/0.9930/0.9853 while the bead was a rectangle. The integration
+test `solid_infill_reproduces_the_published_volume_ratios` asserts them, so a
+regression fails the suite rather than being noticed later.

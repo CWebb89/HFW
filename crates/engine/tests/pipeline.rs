@@ -150,12 +150,18 @@ fn a_thin_wall_is_printed_by_hfw_and_missed_by_classic() {
     assert_eq!(classic.layers[0].counts.middle, 0);
 }
 
+/// The share of a shape's own volume that reaches the bed when every cell is solid.
+///
+/// Below 1.0 because a wall bead rounds off into the two corners it does not fill,
+/// which is the same correction both reference slicers apply to perimeter flow; skin
+/// and infill keep the full rectangle. A shifted grid, a lost jitter or a changed
+/// overlap moves these by more than the tolerance, which is why they are pinned.
 #[test]
 fn solid_infill_reproduces_the_published_volume_ratios() {
     for (name, expected) in [
-        ("cube.stl", 0.9963),
-        ("sphere.stl", 0.9930),
-        ("torus.stl", 0.9853),
+        ("cube.stl", 0.9725),
+        ("sphere.stl", 0.9700),
+        ("torus.stl", 0.9449),
     ] {
         let m = mesh(name);
         let mut s = settings(3);
