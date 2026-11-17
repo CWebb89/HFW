@@ -82,6 +82,24 @@ pub enum ConfigError {
         /// Files visited, in order.
         chain: Vec<String>,
     },
+    /// A bundle directory held no preset at all.
+    BundleEmpty {
+        /// Directory as given on the command line.
+        path: String,
+    },
+    /// A bundle has no preset of that kind under that name.
+    MissingPreset {
+        /// Machine, process or filament.
+        kind: &'static str,
+        /// Name asked for.
+        name: String,
+        /// Bundle root.
+        where_: String,
+        /// Up to eight names the bundle does hold, to show the spelling it uses.
+        available: Vec<String>,
+        /// How many names of that kind the bundle holds in total.
+        total: usize,
+    },
     /// A file that holds several presets in `[print:…]` sections rather than one
     /// preset. Exporting the single preset is the fix.
     SectionedPreset {
@@ -151,6 +169,29 @@ impl fmt::Display for ConfigError {
             ConfigError::Read { path, message } => write!(f, "cannot read {path}: {message}"),
             ConfigError::RecursivePreset { chain } => {
                 write!(f, "preset inheritance loops: {}", chain.join(" -> "))
+            }
+            ConfigError::BundleEmpty { path } => {
+                write!(f, "no presets under {path}")
+            }
+            ConfigError::MissingPreset {
+                kind,
+                name,
+                where_,
+                available,
+                total,
+            } => {
+                write!(f, "no {kind} called '{name}' in {where_}")?;
+                if available.is_empty() {
+                    write!(f, "; the bundle has no {kind} presets at all")?;
+                } else {
+                    write!(
+                        f,
+                        "; it holds {} {kind} preset(s), such as {}",
+                        total,
+                        available.join(", ")
+                    )?;
+                }
+                Ok(())
             }
             ConfigError::SectionedPreset { line, section } => write!(
                 f,

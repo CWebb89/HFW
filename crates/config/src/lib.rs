@@ -15,6 +15,12 @@
 //! that refuses a user's preset teaches nothing; one that reports what it did is
 //! verifiable.
 //!
+//! A **bundle** is a whole collection of presets — a slicer's shipped profiles or
+//! a user's own — from which one machine, one process and one filament are picked
+//! and layered. `Bundle` indexes a directory or a sectioned vendor file and
+//! resolves the inheritance chains across it, which is the step between "the
+//! presets exist on disk" and "the engine can be handed this job".
+//!
 //! `crates/config/src/dialect_table.rs` is generated from next-layer's proven
 //! rename table and the engine's own definition table by
 //! `tools/gen-dialect-table.py`.
@@ -22,11 +28,13 @@
 #![forbid(unsafe_code)]
 
 mod alias_table;
+mod bundle;
 mod dialect;
 mod dialect_table;
 mod error;
 mod parse;
 
+pub use bundle::{Bundle, Kind, Loaded, Resolution};
 pub use dialect::{
     object_overrides, Intake, IntakeReport, ObjectOverride, Preset, ProjectSettings,
 };

@@ -103,14 +103,31 @@ def model_xml(triangles: list[tuple[tuple[float, float, float], ...]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(target: Path, triangles: list[tuple[tuple[float, float, float], ...]], project: bool) -> None:
+def write_parts(target: Path, parts: list[tuple[str, str]]) -> None:
+    """Writes a 3MF with fixed entry timestamps.
+
+    A fixture that changes bytes every time it is rebuilt shows up as a dirty
+    working tree after every gate run, which hides real changes. The archive
+    format stores a modification time per entry, so it is pinned; the contents are
+    what the fixture is for, not when it was written.
+    """
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml", CONTENT_TYPES)
-        archive.writestr("_rels/.rels", RELS)
-        archive.writestr("3D/3dmodel.model", model_xml(triangles))
-        if project:
-            archive.writestr("Metadata/Slic3r_PE.config", PROJECT_CONFIG)
-            archive.writestr("Metadata/Slic3r_PE_model.config", PROJECT_MODEL)
+        for name, body in parts:
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, body)
+
+
+def write(target: Path, triangles: list[tuple[tuple[float, float, float], ...]], project: bool) -> None:
+    parts = [
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", RELS),
+        ("3D/3dmodel.model", model_xml(triangles)),
+    ]
+    if project:
+        parts.append(("Metadata/Slic3r_PE.config", PROJECT_CONFIG))
+        parts.append(("Metadata/Slic3r_PE_model.config", PROJECT_MODEL))
+    write_parts(target, parts)
     print(
         f"wrote {target.relative_to(ROOT)}: {len(triangles)} triangles, "
         f"{target.stat().st_size} bytes"

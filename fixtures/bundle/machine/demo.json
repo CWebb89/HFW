@@ -1,0 +1,14 @@
+{
+ "name": "Demo Klipper 220",
+ "type": "machine",
+ "from": "system",
+ "bed_shape": ["0x0", "220x0", "220x220", "0x220"],
+ "nozzle_diameter": ["0.4"],
+ "machine_max_acceleration_x": ["3000"],
+ "machine_max_acceleration_y": ["3000"],
+ "machine_max_speed_x": ["300"],
+ "machine_max_speed_y": ["300"],
+ "gcode_flavor": "klipper",
+ "machine_start_gcode": "PRINT_START BED={bed_temp} EXTRUDER={first_nozzle_temp}",
+ "machine_end_gcode": "PRINT_END"
+}

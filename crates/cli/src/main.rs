@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod arrange;
 mod json;
 
 /// True when the human report goes to stderr because `--json` owns stdout.
@@ -32,7 +33,7 @@ macro_rules! outln {
 }
 
 use hfw_config::PrinterConfig;
-use hfw_config::{Intake, IntakeReport, Preset, PrintSequence, ProjectSettings};
+use hfw_config::{Bundle, Intake, IntakeReport, Kind, Preset, PrintSequence, ProjectSettings};
 use hfw_engine::{
     evaluate_all, evaluate_perimeter, run, slice_plane, InfillPattern, Job, JobTotals, MaskCache,
     Mesh, MeshDiagnostics, MeshRepairReport, MeshTransform, Metrics, Mode, PlannedSlice, Settings,
@@ -45,6 +46,8 @@ Usage:
   All layers:  hfw <model.stl> --layer-height <mm> --out-dir <folder> [options]
   Print file:  hfw <model.stl> --profile <p.cfg> --gcode <out.gcode>
   A plate:     hfw <a.stl> <b.stl> <plate.3mf> --profile <p.cfg> --gcode <out.gcode>
+  A bundle:    hfw <model.stl> --bundle <dir> --machine <n> --process <n>
+                               --filament <n> --gcode <out.gcode>
   Check file:  hfw --check-gcode <out.gcode> --profile <p.cfg>
 
 Environment:
@@ -119,6 +122,12 @@ Printer:
                               report says what was applied and what was not.
   --preset-strict             Fail instead of reporting when a preset carries a
                               key this engine cannot apply.
+  --bundle <dir>              A whole profile collection: a directory of presets
+                              or one sectioned vendor file.
+  --machine <name>            Machine preset of that name in the bundle.
+  --process <name>            Print-settings preset of that name in the bundle.
+  --filament <name>           Material preset of that name in the bundle.
+  --list-bundle               Name every preset in --bundle and stop.
   --flow <f>                  Extrusion multiplier 0.5..1.5, overriding the
                               profile. 1.0 prints the geometric volume.
   --gcode <path>              Emit G-code for the whole job (needs --profile,
@@ -197,6 +206,11 @@ struct Options {
     profile_config: Option<PrinterConfig>,
     preset_strict: bool,
     preset_report: Option<IntakeReport>,
+    bundle: Option<PathBuf>,
+    machine: Option<String>,
+    filament: Option<String>,
+    process: Option<String>,
+    list_bundle: bool,
     flow: Option<f64>,
     gcode: Option<PathBuf>,
     check_gcode: Option<PathBuf>,
@@ -244,6 +258,11 @@ impl Options {
             profile_config: None,
             preset_strict: false,
             preset_report: None,
+            bundle: None,
+            machine: None,
+            filament: None,
+            process: None,
+            list_bundle: false,
             flow: None,
             gcode: None,
             check_gcode: None,
@@ -566,6 +585,70 @@ fn print_report(report: &IntakeReport) {
     }
 }
 
+/// Resolves `--bundle` into one machine, process and filament, and layers them.
+///
+/// The three names are looked up across the whole bundle by kind, so a bundle
+/// organised as `machine/`, `process/`, `filament/` and one that is a single
+/// sectioned vendor file are used the same way. A parent preset that lives inside
+/// the slicer rather than in the bundle is reported and skipped: the file is
+/// still a usable preset, and saying which parent was missing is what makes the
+/// omission checkable.
+fn resolve_bundle(o: &mut Options) -> Result<(), String> {
+    let root = o
+        .bundle
+        .clone()
+        .ok_or_else(|| "--bundle needs a directory".to_owned())?;
+    let bundle = Bundle::discover(&root).map_err(|error| error.to_string())?;
+    outln!("Bundle {}: {}", root.display(), bundle.summary());
+    for warning in bundle.warnings() {
+        outln!("  warning: {warning}");
+    }
+    if o.list_bundle {
+        for kind in [Kind::Machine, Kind::Process, Kind::Filament] {
+            let names = bundle.names(kind);
+            outln!("{} ({}):", kind.label(), names.len());
+            for name in names {
+                outln!("  {name}");
+            }
+        }
+        return Ok(());
+    }
+    let machine = o
+        .machine
+        .clone()
+        .ok_or_else(|| "--bundle needs --machine <name>".to_owned())?;
+    let process = o
+        .process
+        .clone()
+        .ok_or_else(|| "--bundle needs --process <name>".to_owned())?;
+    let filament = o
+        .filament
+        .clone()
+        .ok_or_else(|| "--bundle needs --filament <name>".to_owned())?;
+    let loaded = bundle
+        .load(&machine, &process, &filament)
+        .map_err(|error| error.to_string())?;
+    for warning in loaded.resolution().warnings() {
+        outln!("  warning: {warning}");
+    }
+    outln!(
+        "Bundle job: {machine} + {filament} + {process} -> '{}'",
+        loaded.config().name
+    );
+    print_report(loaded.report());
+    if o.preset_strict && !loaded.report().is_complete() {
+        return Err(format!(
+            "--preset-strict: {} of {} keys were not applied",
+            loaded.report().len() - loaded.report().count(Intake::Applied),
+            loaded.report().len()
+        ));
+    }
+    o.profile_config = Some(loaded.config().clone());
+    o.preset_report = Some(loaded.report().clone());
+    o.profile = Some(root);
+    Ok(())
+}
+
 fn number(value: &str, option: &str) -> Result<f64, String> {
     let parsed = value
         .parse::<f64>()
@@ -765,6 +848,11 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.preset_report = Some(report);
             }
             "--preset-strict" => o.preset_strict = true,
+            "--bundle" => o.bundle = Some(PathBuf::from(next_value(&mut arguments, "--bundle")?)),
+            "--list-bundle" => o.list_bundle = true,
+            "--machine" => o.machine = Some(next_value(&mut arguments, "--machine")?),
+            "--filament" => o.filament = Some(next_value(&mut arguments, "--filament")?),
+            "--process" => o.process = Some(next_value(&mut arguments, "--process")?),
             "--gcode" => o.gcode = Some(PathBuf::from(next_value(&mut arguments, "--gcode")?)),
             "--pause-at" => {
                 let value = next_value(&mut arguments, "--pause-at")?;
@@ -818,12 +906,14 @@ fn parse_arguments() -> Result<Option<Options>, String> {
             unknown => return Err(format!("unknown option: {unknown}\n\n{USAGE}")),
         }
     }
-    if o.check_gcode.is_none() && o.inputs.is_empty() {
+    let listing = o.list_bundle && o.bundle.is_some();
+    if o.check_gcode.is_none() && o.inputs.is_empty() && !listing {
         return Err(format!("missing model path\n\n{USAGE}"));
     }
     if o.preset_strict {
         match o.preset_report.as_ref() {
-            None => return Err("--preset-strict needs --preset".to_owned()),
+            None if o.bundle.is_some() => {}
+            None => return Err("--preset-strict needs --preset or --bundle".to_owned()),
             Some(report) if !report.is_complete() => {
                 return Err(format!(
                     "--preset-strict: {} of {} keys were not applied",
@@ -847,6 +937,12 @@ fn run_cli() -> Result<(), String> {
 
     if let Some(path) = o.check_gcode.clone() {
         return run_check(&o, &path);
+    }
+    if o.bundle.is_some() {
+        resolve_bundle(&mut o)?;
+        if o.list_bundle {
+            return Ok(());
+        }
     }
     o.apply_project_settings()?;
     if let Some(config) = o.profile_config.clone() {
@@ -913,18 +1009,6 @@ fn run_cli() -> Result<(), String> {
     }
     o.settings.metrics_res = o.metrics_res;
 
-    let mut plate = load_plate(&o)?;
-    let mut mesh = Mesh::merged(
-        &plate
-            .iter()
-            .map(|part| part.mesh.clone())
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| error.to_string())?;
-    if mesh.triangle_count() == 0 {
-        return Err("the model contains no triangles".to_owned());
-    }
-
     let unit_scale = if o.units == "inch" { 25.4 } else { 1.0 };
     let shrink = o.profile_config.as_ref().map_or([1.0; 3], |cfg| {
         let factor = |percent: f64| {
@@ -946,26 +1030,20 @@ fn run_cli() -> Result<(), String> {
         total_scale * shrink[1],
         total_scale * shrink[2],
     ];
-    if factors
-        .iter()
-        .any(|value| (*value - 1.0).abs() > f64::EPSILON)
-    {
-        mesh = mesh
-            .transformed(MeshTransform {
-                scale: factors,
-                ..MeshTransform::default()
-            })
-            .map_err(|error| error.to_string())?;
-        for part in &mut plate {
-            part.mesh = part
-                .mesh
-                .transformed(MeshTransform {
-                    scale: factors,
-                    ..MeshTransform::default()
-                })
-                .map_err(|error| error.to_string())?;
-            part.refresh_bounds();
-        }
+
+    // Scaling happens before arranging, because the packer works in bed
+    // millimetres and a plate laid out at model size then scaled would overlap
+    // itself and could pass a bed check it no longer fits.
+    let plate = load_plate(&o, factors)?;
+    let mut mesh = Mesh::merged(
+        &plate
+            .iter()
+            .map(|part| part.mesh.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
+    if mesh.triangle_count() == 0 {
+        return Err("the model contains no triangles".to_owned());
     }
 
     let before = mesh.diagnostics();
@@ -1051,7 +1129,7 @@ const PLATE_SPACING_MM: f64 = 5.0;
 /// model, so a strict box test would mislabel them.
 const OBJECT_LABEL_TOLERANCE_MM: f64 = 5.0;
 
-fn load_plate(o: &Options) -> Result<Vec<PlatePart>, String> {
+fn load_plate(o: &Options, factors: [f64; 3]) -> Result<Vec<PlatePart>, String> {
     let mut parts = Vec::new();
     for input in &o.inputs {
         let path = PathBuf::from(input);
@@ -1089,6 +1167,7 @@ fn load_plate(o: &Options) -> Result<Vec<PlatePart>, String> {
     if parts.is_empty() {
         return Err("no model path".to_owned());
     }
+    scale_plate(&mut parts, factors)?;
     arrange_plate(&mut parts, o)?;
     for (index, part) in parts.iter().enumerate() {
         for other in &parts[index + 1..] {
@@ -1120,6 +1199,30 @@ fn load_plate(o: &Options) -> Result<Vec<PlatePart>, String> {
         }
     }
     Ok(parts)
+}
+
+/// Scales every object's mesh, then its bounding box.
+///
+/// Units, `--scale` and the profile's shrinkage are one multiplication each axis,
+/// so they are applied together and once, before anything reads an object's size.
+fn scale_plate(parts: &mut [PlatePart], factors: [f64; 3]) -> Result<(), String> {
+    if factors
+        .iter()
+        .all(|value| (*value - 1.0).abs() <= f64::EPSILON)
+    {
+        return Ok(());
+    }
+    for part in parts {
+        part.mesh = part
+            .mesh
+            .transformed(MeshTransform {
+                scale: factors,
+                ..MeshTransform::default()
+            })
+            .map_err(|error| error.to_string())?;
+        part.refresh_bounds();
+    }
+    Ok(())
 }
 
 /// Applies a project's per-object settings to one object's planner settings.
@@ -1255,21 +1358,74 @@ fn infill_pattern(name: &str) -> Option<InfillPattern> {
     }
 }
 
-/// Places objects that no file positioned, to the right of the ones it did.
+/// Places the objects no file positioned, packing them onto the bed.
 ///
-/// A 3MF already carries a plate layout, so those objects keep their coordinates.
-/// An STL carries only model coordinates, and several of them usually sit on top
-/// of each other at the origin, so they are laid out left to right with
-/// `--spacing` between them, wrapping to a new row when the bed runs out. The
-/// writer centres the finished plate on the bed and refuses it if it no longer
-/// fits.
+/// A 3MF already carries a plate layout, so those objects keep their coordinates
+/// and the STLs are laid out to the right of them, wrapping as the bed runs out.
+/// When nothing was positioned — several STLs, or one, which is the common case —
+/// every object is packed instead: the packer turns one a quarter turn when that
+/// is what makes it fit, and the arrangement is centred on the bed. A part that
+/// cannot be made to fit is refused here, naming its size, rather than being
+/// emitted and rejected later by the writer's fit check.
 fn arrange_plate(parts: &mut [PlatePart], o: &Options) -> Result<(), String> {
-    if !o.arrange || parts.len() < 2 {
+    if !o.arrange {
         return Ok(());
     }
-    let bed_width = o.profile_config.clone().unwrap_or_default().bed_x;
+    let config = o.profile_config.clone().unwrap_or_default();
+    let bed = (config.bed_x, config.bed_y);
     let spacing = o.spacing.unwrap_or(PLATE_SPACING_MM);
+    if parts.iter().any(|part| part.positioned) {
+        return arrange_beside_positioned(parts, bed.0, spacing);
+    }
+    let items: Vec<arrange::Item> = parts
+        .iter()
+        .map(|part| arrange::Item {
+            width: part.bounds.2 - part.bounds.0,
+            height: part.bounds.3 - part.bounds.1,
+        })
+        .collect();
+    let placements = arrange::pack(&items, bed, spacing).map_err(|error| {
+        format!(
+            "{} does not fit on a {} x {} bed: it needs {:.1} x {:.1} mm with the \
+             spacing this plate uses, and leaving it out would print a different job",
+            parts[error.item].name, bed.0, bed.1, error.footprint.0, error.footprint.1
+        )
+    })?;
+    for (part, placement) in parts.iter_mut().zip(placements) {
+        let (min_x, min_y) = (part.bounds.0, part.bounds.1);
+        let mut transform = MeshTransform {
+            translation_mm: [placement.x - min_x, placement.y - min_y, 0.0],
+            ..MeshTransform::default()
+        };
+        if placement.rotated {
+            transform.rotation_degrees = [0.0, 0.0, 90.0];
+            let centred_x = 0.5 * (part.bounds.0 + part.bounds.2);
+            let centred_y = 0.5 * (part.bounds.1 + part.bounds.3);
+            transform.translation_mm = [
+                placement.x + 0.5 * (part.bounds.3 - part.bounds.1) - centred_x,
+                placement.y + 0.5 * (part.bounds.2 - part.bounds.0) - centred_y,
+                0.0,
+            ];
+        }
+        part.mesh = part
+            .mesh
+            .transformed(transform)
+            .map_err(|error| error.to_string())?;
+        part.refresh_bounds();
+    }
+    Ok(())
+}
 
+/// Lays the unpositioned objects out to the right of the ones a file placed.
+///
+/// A 3MF's own layout is a decision the user made in the slicer, so it is kept and
+/// the packer is not turned on the plate: mixing objects that have coordinates with
+/// ones that do not would need to know which of them the user moved on purpose.
+fn arrange_beside_positioned(
+    parts: &mut [PlatePart],
+    bed_width: f64,
+    spacing: f64,
+) -> Result<(), String> {
     let positioned: Vec<&PlatePart> = parts.iter().filter(|part| part.positioned).collect();
     let row_start = match positioned
         .iter()

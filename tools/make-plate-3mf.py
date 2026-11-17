@@ -54,11 +54,15 @@ def main() -> int:
         "    </object>\n"
     )
     model = model.replace("  </resources>", nested + "  </resources>")
-    with zipfile.ZipFile(TARGET, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml", fixture.CONTENT_TYPES)
-        archive.writestr("_rels/.rels", fixture.RELS)
-        archive.writestr("3D/3dmodel.model", model)
-        archive.writestr("Metadata/Slic3r_PE_model.config", MODEL_CONFIG)
+    fixture.write_parts(
+        TARGET,
+        [
+            ("[Content_Types].xml", fixture.CONTENT_TYPES),
+            ("_rels/.rels", fixture.RELS),
+            ("3D/3dmodel.model", model),
+            ("Metadata/Slic3r_PE_model.config", MODEL_CONFIG),
+        ],
+    )
     print(f"wrote {TARGET.relative_to(ROOT)}: 2 objects, 25 mm apart, one overridden")
     return 0
 

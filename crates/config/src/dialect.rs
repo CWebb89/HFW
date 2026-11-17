@@ -321,6 +321,9 @@ impl PrinterConfig {
         if !preset.name().is_empty() {
             config.name = preset.name().to_owned();
         }
+        config.adopt_bed_shape();
+        config.adopt_speed_ceiling();
+        report_placeholders(&mut report, preset);
         if let Err(problem) = config.resolve_widths(preset.entries()) {
             report.warnings.push(problem.to_string());
         }
@@ -329,6 +332,89 @@ impl PrinterConfig {
         }
         (config, report)
     }
+}
+
+/// Placeholders this engine substitutes in start and end G-code.
+const KNOWN_PLACEHOLDERS: &[&str] = &[
+    "bed_temp",
+    "nozzle_temp",
+    "first_nozzle_temp",
+    "bed_x",
+    "bed_y",
+    "bed_shape",
+    "max_z",
+    "pressure_advance",
+    "layer_z",
+    "layer_num",
+    "total_layers",
+];
+
+/// Records start and end G-code this engine cannot fully substitute.
+///
+/// The reference dialects templated their machine G-code with placeholders of
+/// their own, and a machine preset in the wild is full of them:
+/// `[bed_temperature_initial_layer_single]` and
+/// `{during_print_exhaust_fan_speed_num[current_extruder]}` are two from Orca's
+/// own Voron profile. This engine substitutes a small set of its own and leaves
+/// everything else as literal text, which the verifier then rejects as unreadable.
+/// That is the right outcome for a file that must not be printed, so the job here
+/// is to say it at intake rather than after the G-code has been written: the keys
+/// are reported as partial, and `--preset-strict` refuses the job.
+fn report_placeholders(report: &mut IntakeReport, preset: &Preset) {
+    for key in ["start_gcode", "end_gcode"] {
+        let Some((written, text)) = preset
+            .entries()
+            .iter()
+            .find(|(name, _)| resolve(name).0 == key)
+        else {
+            continue;
+        };
+        let key = written.clone();
+        let mut unknown: Vec<String> = Vec::new();
+        for token in placeholders(text) {
+            if !KNOWN_PLACEHOLDERS.contains(&token.as_str()) && !unknown.contains(&token) {
+                unknown.push(token);
+            }
+        }
+        if unknown.is_empty() {
+            continue;
+        }
+        report.record(&key, Intake::Partial);
+        let shown = unknown
+            .iter()
+            .take(4)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = match unknown.len() {
+            0..=4 => String::new(),
+            count => format!(" and {} more", count - 4),
+        };
+        report.warnings.push(format!(
+            "{key} uses {} placeholder(s) this engine does not substitute: {shown}{more}; \
+             the file would carry them as literal text and fail verification",
+            unknown.len()
+        ));
+    }
+}
+
+/// Every bracketed or braced placeholder in a block of G-code, without its delimiters.
+fn placeholders(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(['[', '{']) {
+        let open = rest.as_bytes()[start] as char;
+        let close = if open == '[' { ']' } else { '}' };
+        let after = &rest[start + 1..];
+        match after.find(close) {
+            Some(end) => {
+                out.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+            None => break,
+        }
+    }
+    out
 }
 
 /// Maps one preset key to the name this crate uses, and says how it is known.
@@ -487,7 +573,7 @@ impl ProjectSettings {
 /// where a value is a scalar or an array of scalars. Arrays are joined with
 /// commas, which is how every slicer writes delimiter-separated lists. Nested
 /// objects are skipped rather than approximated.
-fn flat_json(text: &str) -> Option<Vec<(String, String)>> {
+pub(crate) fn flat_json(text: &str) -> Option<Vec<(String, String)>> {
     let mut rest = text.trim_start();
     rest = rest.strip_prefix('{')?;
     let mut pairs = Vec::new();
@@ -773,6 +859,15 @@ mod tests {
   </object>
 </config>
 "#;
+
+    #[test]
+    fn a_presets_bed_outline_reaches_the_bed_size_placement_uses() {
+        let preset = Preset::parse("bed_shape = 0x0,350x0,350x350,0x350\nnozzle_diameter = 0.4\n")
+            .expect("preset parses");
+        let (config, _report) = PrinterConfig::from_preset(&preset);
+        assert!((config.bed_x - 350.0).abs() < 1e-9);
+        assert!((config.bed_y - 350.0).abs() < 1e-9);
+    }
 
     #[test]
     fn per_object_overrides_are_read_and_volume_metadata_is_not() {

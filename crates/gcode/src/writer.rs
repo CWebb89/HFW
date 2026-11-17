@@ -9,6 +9,7 @@ use hfw_walls::{Kind, Line};
 
 use crate::error::GcodeError;
 use crate::route;
+use crate::time::{Move as TimedMove, Planner, Tune};
 
 /// Print feature a path belongs to, in the order the machine prints it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1847,6 +1848,14 @@ struct Writer<'a> {
     fan_saved: Option<i64>,
     accel_saved: bool,
     accel: f64,
+    /// Acceleration of the bead being written, whether or not it was emitted.
+    ///
+    /// The time estimate needs this even when the profile sets no acceleration
+    /// command: a feature that inherits the previous feature's value must not be
+    /// timed with it.
+    path_accel: f64,
+    /// Trapezoidal time planner for the file being written.
+    time: Planner,
     last_dir: V2,
     no_hop: bool,
     drawn: Vec<(V2, V2)>,
@@ -1984,6 +1993,24 @@ impl Writer<'_> {
     /// Klipper's limit is a saved/restored pair around the change; Marlin takes
     /// `M204 S`, a print-wide setting, so it is restored to `default_accel` when
     /// the profile has one and otherwise left at the last feature's value.
+    /// Sends one move to the time planner and mirrors its running total.
+    fn timed_move(&mut self, m: TimedMove) {
+        self.time.push(m);
+        self.stats.est_seconds = self.time.seconds();
+    }
+
+    /// Tells the planner the machine comes to rest.
+    fn timed_stop(&mut self) {
+        self.time.stop();
+        self.stats.est_seconds = self.time.seconds();
+    }
+
+    /// Adds time the planner cannot model.
+    fn timed_add(&mut self, seconds: f64) {
+        self.time.add(seconds);
+        self.stats.est_seconds = self.time.seconds();
+    }
+
     fn apply_accel(&mut self, accel: f64) {
         if accel <= 0.0 || (accel - self.accel).abs() < 1.0 {
             return;
@@ -2054,7 +2081,8 @@ impl Writer<'_> {
                 self.out.push_str("G10\n");
                 self.retracted = true;
                 self.stats.retractions += 1;
-                self.stats.est_seconds += self.cfg.retract_len / self.cfg.retract_speed;
+                self.timed_stop();
+                self.timed_add(self.cfg.retract_len / self.cfg.retract_speed);
             }
             return;
         }
@@ -2062,7 +2090,8 @@ impl Writer<'_> {
             self.e_move(-self.cfg.retract_len, self.cfg.retract_speed);
             self.retracted = true;
             self.stats.retractions += 1;
-            self.stats.est_seconds += self.cfg.retract_len / self.cfg.retract_speed;
+            self.timed_stop();
+            self.timed_add(self.cfg.retract_len / self.cfg.retract_speed);
         }
     }
 
@@ -2072,7 +2101,8 @@ impl Writer<'_> {
                 self.out.push_str("G11\n");
                 self.retracted = false;
                 let distance = self.cfg.retract_len + self.cfg.retract_restart_extra;
-                self.stats.est_seconds += distance / self.cfg.retract_speed;
+                self.timed_stop();
+                self.timed_add(distance / self.cfg.retract_speed);
             }
             return;
         }
@@ -2085,7 +2115,8 @@ impl Writer<'_> {
             let distance = self.cfg.retract_len + self.cfg.retract_restart_extra;
             self.e_move(distance, speed);
             self.retracted = false;
-            self.stats.est_seconds += distance / speed;
+            self.timed_stop();
+            self.timed_add(distance / speed);
         }
     }
 
@@ -2115,7 +2146,8 @@ impl Writer<'_> {
         );
         self.last_f = speed * 60.0;
         self.stats.travel_mm += self.cfg.wipe_distance;
-        self.stats.est_seconds += self.cfg.wipe_distance / speed;
+        self.timed_stop();
+        self.timed_add(self.cfg.wipe_distance / speed);
         self.pos = to;
     }
 
@@ -2131,6 +2163,11 @@ impl Writer<'_> {
         };
         let _ = writeln!(self.out, "G1 Z{:.3} F{:.0}", z, feed * 60.0);
         self.last_f = feed * 60.0;
+        let rise = (z - self.z).abs();
+        if rise > 1e-9 {
+            self.timed_stop();
+            self.timed_add(rise / feed);
+        }
     }
 
     fn travel(&mut self, to: V2, threshold: f64) {
@@ -2140,6 +2177,11 @@ impl Writer<'_> {
             return;
         }
         let from = V2::new(self.snap(self.pos.x), self.snap(self.pos.y));
+        let travel_dir = [
+            (to.x - from.x) / d.max(1e-9),
+            (to.y - from.y) / d.max(1e-9),
+            0.0,
+        ];
         let curled_obstacles: Vec<Vec<V2>>;
         let obstacles: &[Vec<V2>] =
             if self.cfg.avoid_crossing_curled_overhangs && !self.curled.is_empty() {
@@ -2264,7 +2306,13 @@ impl Writer<'_> {
             self.last_f = travel_speed * 60.0 * 0.5;
             self.pos = to;
             self.stats.travel_mm += d;
-            self.stats.est_seconds += d / travel_speed;
+            self.timed_move(TimedMove {
+                len: d,
+                cruise: travel_speed,
+                accel: travel_accel,
+                dir: travel_dir,
+            });
+            self.timed_stop();
             self.no_hop = false;
             return;
         }
@@ -2274,7 +2322,13 @@ impl Writer<'_> {
         self.no_hop = false;
         self.pos = to;
         self.stats.travel_mm += length;
-        self.stats.est_seconds += length / travel_speed;
+        self.timed_move(TimedMove {
+            len: length,
+            cruise: travel_speed,
+            accel: travel_accel,
+            dir: travel_dir,
+        });
+        self.timed_stop();
     }
 
     /// Moves a path's entry so the travel into it does not cut a printed perimeter.
@@ -2369,6 +2423,7 @@ impl Writer<'_> {
                 base_accel(path.feature, self.cfg, first_layer)
             };
             self.apply_accel(accel);
+            self.path_accel = accel;
             self.set_path_fan(path);
             self.last_feature = Some(path.feature);
         }
@@ -2540,7 +2595,12 @@ impl Writer<'_> {
                 self.touch(pts[k % n]);
             }
             self.stats.volume_mm3 += volume;
-            self.stats.est_seconds += len / speed;
+            self.timed_move(TimedMove {
+                len,
+                cruise: speed,
+                accel: self.path_accel,
+                dir: [self.last_dir.x, self.last_dir.y, 0.0],
+            });
         }
         if let Some(spiral) = self.spiral.take() {
             self.z = spiral.from + spiral.rise;
@@ -2585,6 +2645,8 @@ pub fn generate(
         fan_saved: None,
         accel_saved: false,
         accel: 0.0,
+        path_accel: 0.0,
+        time: Planner::new(Tune::from_profile(cfg)),
         last_dir: V2::ZERO,
         no_hop: false,
         drawn: Vec::new(),
@@ -3037,6 +3099,7 @@ pub fn generate(
     let area = cfg.filament_area();
     w.stats.filament_mm = w.stats.volume_mm3 / area;
     w.stats.filament_g = w.stats.volume_mm3 / 1000.0 * cfg.filament_density;
+    w.stats.est_seconds = w.time.finish();
     let stats = w.stats.clone();
     let mut head = String::new();
     let _ = writeln!(
@@ -3062,8 +3125,13 @@ pub fn generate(
     );
     let _ = writeln!(
         head,
-        "; estimated printing time = {:.0} s",
-        stats.est_seconds
+        "; estimated printing time = {:.0} s ({})",
+        stats.est_seconds,
+        if w.time.is_modelled() {
+            "acceleration and cornering planned"
+        } else {
+            "kinematic only: the profile describes no acceleration"
+        }
     );
     let _ = writeln!(
         head,

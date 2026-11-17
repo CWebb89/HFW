@@ -140,6 +140,55 @@ def parse_gcode(path):
     return {k: v[0] for k, v in per.items()}
 
 
+def parse_seconds(text):
+    """Seconds from "1h 2m 3s", "13m 54s" or "907"."""
+    text = text.strip().rstrip(".")
+    if re.fullmatch(r"[\d.]+", text):
+        return float(text)
+    total = 0.0
+    for value, unit in re.findall(r"([\d.]+)\s*([hms])", text):
+        total += float(value) * {"h": 3600.0, "m": 60.0, "s": 1.0}[unit]
+    return total
+
+
+def parse_time(path):
+    """Each slicer own estimate, read from the file it wrote.
+
+    Reading the header rather than re-deriving the time is deliberate: the
+    question is what each slicer *says* the job costs, and then whether the three
+    of them agree about the same G-code.
+    """
+    patterns = [
+        re.compile(r";\s*estimated printing time \(normal mode\)\s*=\s*(.+)$"),
+        re.compile(r";\s*estimated printing time\s*=\s*([\d.]+\s*s)"),
+        re.compile(r";\s*PRINTING_TIME\s*[:=]\s*(.+)$"),
+        re.compile(r";\s*TIME\s*:\s*([\d.]+)$"),
+    ]
+    for line in open(path, errors="replace"):
+        if not line.startswith(";"):
+            continue
+        for pattern in patterns:
+            found = pattern.search(line)
+            if found:
+                seconds = parse_seconds(found.group(1))
+                if seconds > 0:
+                    return seconds
+    return None
+
+
+def time_line(times):
+    """One row comparing the three planners own time estimates, in minutes."""
+    if not times.get("hfw"):
+        return None
+    references = [value for name, value in times.items() if name != "hfw" and value]
+    mean = sum(references) / len(references) if references else 0.0
+    delta = (times["hfw"] - mean) / mean * 100.0 if mean else float("nan")
+    cells = " ".join(
+        "{:9.1f}".format(times[name] / 60.0) if times.get(name) else "{:>9s}".format("-")
+        for name in ("hfw", "orca", "prusa"))
+    return "  {:8s} {} {:+8.1f}%".format("time min", cells, delta)
+
+
 def run(cmd, log):
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -335,6 +384,7 @@ def main():
             print("  hfw produced no G-code; see", os.path.join(work, "oracle.log"))
             failures += 1
         results = {name: parse_gcode(path) for name, path in produced.items()}
+        times = {name: parse_time(path) for name, path in produced.items()}
         reason, tolerance = EXPECTED.get(
             os.path.basename(model), (None, args.tolerance))
         rows, total, total_delta, worst, status, agreement = compare(
@@ -347,6 +397,9 @@ def main():
                 print(f"| {kind} | {h:.1f} | {o:.1f} | {p:.1f} | {delta:+.1f}% |")
             print(f"| **total** | {total.get('hfw', 0):.1f} | {total.get('orca', 0):.1f} | "
                   f"{total.get('prusa', 0):.1f} | {total_delta:+.1f}% |")
+            time_row = time_line(times)
+            if time_row:
+                print(time_row.replace("  ", "| ", 1))
             print(f"\n`{status}` total deviation {total_delta:+.1f}% "
                   f"(tolerance {tolerance * 100:.0f}%), reference spread {agreement * 100:.1f}%"
                   + (f" — expected divergence: {reason}" if reason else "") + "\n")
@@ -356,6 +409,9 @@ def main():
                 print(f"  {kind:8s} {h:10.1f} {o:10.1f} {p:10.1f} {delta:+8.1f}%")
             print(f"  {'total':8s} {total.get('hfw', 0):10.1f} {total.get('orca', 0):10.1f} "
                   f"{total.get('prusa', 0):10.1f} {total_delta:+8.1f}%")
+            time_row = time_line(times)
+            if time_row:
+                print(time_row)
             print(f"  {status}: total deviation {total_delta:+.1f}% "
                   f"(tolerance {tolerance * 100:.0f}%), reference spread {agreement * 100:.1f}%")
             if reason:

@@ -137,8 +137,11 @@ grep -q 'PRINT_START BED=60 EXTRUDER=215' "$tmp/cube.gcode"; or fail 'the start 
 grep -q 'SET_PRESSURE_ADVANCE ADVANCE=0.045' "$tmp/cube.gcode"; or fail 'pressure advance was not emitted'
 set cube_mm (grep -oE 'G-code: 100 layers, [0-9.]+' "$tmp/gcode.log" | string replace -r '.*, ' '')
 test -n "$cube_mm"; or fail 'no layer and filament summary was printed'
-set drift (math "abs($cube_mm - 1192.1)")
-awk -v d="$drift" 'BEGIN { exit !(d < 2) }'; or fail "the filament total drifted $drift mm from 1192.1 mm"
+# 1186.1 rather than the 1192.1 this section pinned for a year: the part is now
+# arranged onto the bed before it is sliced, so the seam and the loops' entry
+# points are chosen in bed coordinates rather than around the origin.
+set drift (math "abs($cube_mm - 1186.1)")
+awk -v d="$drift" 'BEGIN { exit !(d < 2) }'; or fail "the filament total drifted $drift mm from 1186.1 mm"
 $bin fixtures/cube.stl --profile profiles/voron_klipper.cfg --layer-height 0.2 \
     --out-dir "$tmp/gcode2" --gcode "$tmp/cube2.gcode" >/dev/null
 or fail 'the second G-code run failed'
@@ -401,10 +404,60 @@ $bin fixtures/cube.3mf --profile profiles/voron_klipper.cfg --layer-height 0.2 \
  or fail 'slicing a 3MF failed'
 grep -q 'verify RESULT PASS' "$tmp/3mf.log"; or fail 'the 3MF G-code failed verification'
 set mf_mm (grep -oE 'G-code: 100 layers, [0-9.]+' "$tmp/3mf.log" | string replace -r '.*, ' '')
-set gap (math "abs($mf_mm - $cube_mm)")
+# The 3MF carries its own plate coordinates, so it is never rearranged; the STL is
+# compared with --no-arrange to keep this a test of the importer rather than of the
+# packer, whose bed placement moves a seam and so a few millimetres of filament.
+$bin fixtures/cube.stl --profile profiles/voron_klipper.cfg --layer-height 0.2 --no-arrange \
+    --out-dir "$tmp/3mf-stl" --gcode "$tmp/cube-stl.gcode" >"$tmp/3mf-stl.log"
+ or fail 'slicing the STL at its own coordinates failed'
+set plain_mm (grep -oE 'G-code: 100 layers, [0-9.]+' "$tmp/3mf-stl.log" | string replace -r '.*, ' '')
+set gap (math "abs($mf_mm - $plain_mm)")
 awk -v d="$gap" 'BEGIN { exit !(d < 2) }'
- or fail "the 3MF cube sliced to $mf_mm mm against the STL's $cube_mm mm"
+ or fail "the 3MF cube sliced to $mf_mm mm against the STL's $plain_mm mm"
 printf 'Verified: 3MF and STL produce the same 100 layers and filament total.\n'
+
+section 'Preset bundles, packing and the accelerated time estimate'
+$bin --bundle fixtures/bundle --list-bundle >"$tmp/bundle-list.log" 2>&1
+ or fail 'listing a bundle failed'
+grep -q 'Demo Klipper 220' "$tmp/bundle-list.log"; or fail 'the machine preset is not listed'
+grep -q 'Demo PLA' "$tmp/bundle-list.log"; or fail 'the filament preset is not listed'
+$bin fixtures/cube.stl --bundle fixtures/bundle --machine 'Demo Klipper 220' \
+    --process '0.20mm Demo' --filament 'Demo PLA' --layer-height 0.2 \
+    --out-dir "$tmp/bundle" --gcode "$tmp/bundle.gcode" >"$tmp/bundle.log" 2>&1
+ or fail 'slicing a bundle job failed'
+grep -q 'verify RESULT PASS' "$tmp/bundle.log"; or fail 'the bundle job failed verification'
+grep -q 'PRINT_START BED=60 EXTRUDER=215' "$tmp/bundle.gcode"
+ or fail 'the machine preset start G-code did not reach the file'
+grep -q '220 x 220 bed' "$tmp/bundle.log"; or fail 'the machine preset bed size was ignored'
+head -12 "$tmp/bundle.gcode" | grep -q 'acceleration and cornering planned'
+ or fail 'the time estimate was kinematic although the preset states accelerations'
+$bin fixtures/cube.stl --bundle fixtures/bundle --machine 'Demo Klipper 220' \
+    --process '0.20mm Demo' --filament 'No Such Filament' \
+    --out-dir "$tmp/bundle-bad" --gcode "$tmp/bundle-bad.gcode" >"$tmp/bundle-bad.log" 2>&1
+ and fail 'a filament name that is not in the bundle was accepted'
+grep -q 'Demo PLA' "$tmp/bundle-bad.log"
+ or fail 'the missing-filament error did not say which filaments the bundle holds'
+$bin fixtures/cube.stl fixtures/cube.stl fixtures/cube.stl --profile profiles/voron_klipper.cfg \
+    --spacing 5 --out-dir "$tmp/packed" --gcode "$tmp/packed.gcode" >"$tmp/packed.log" 2>&1
+ or fail 'packing three cubes failed'
+grep -q 'verify RESULT PASS' "$tmp/packed.log"; or fail 'the packed plate failed verification'
+grep -q 'share the same space' "$tmp/packed.log"
+ and fail 'the packer left two objects on top of each other'
+python3 -c 'import re, sys
+xs, ys = [], []
+for line in open(sys.argv[1], errors="replace"):
+    found = re.match("G[01] X(-?[0-9.]+) Y(-?[0-9.]+)", line)
+    if found:
+        xs.append(float(found.group(1))); ys.append(float(found.group(2)))
+assert xs and 0.0 <= min(xs) and max(xs) <= 350.0, (min(xs), max(xs))
+assert ys and 0.0 <= min(ys) and max(ys) <= 350.0, (min(ys), max(ys))' "$tmp/packed.gcode"
+ or fail 'the packed plate left the bed'
+$bin fixtures/sphere.stl fixtures/sphere.stl --scale 20 --profile profiles/voron_klipper.cfg \
+    --out-dir "$tmp/oversize" --gcode "$tmp/oversize.gcode" >"$tmp/oversize.log" 2>&1
+ and fail 'a plate that cannot fit on the bed was sliced anyway'
+grep -q 'does not fit on a 350 x 350 bed' "$tmp/oversize.log"
+ or fail 'the oversize error did not name the bed and the size'
+printf 'Verified: bundle intake, packing, the accelerated estimate and the bed refusal.\n'
 
 section 'Acceleration, cooling and retraction extras reach the file'
 sed -e 's/^min_layer_time = 8/min_layer_time = 8\ndefault_acceleration = 4000\nouter_wall_acceleration = 1200\nmachine_max_acceleration_x = 3000\nmin_fan_speed = 40\nfull_fan_speed_layer = 5\nderetract_speed = 25\nwipe = 1\nidle_temperature = 150\n/' \

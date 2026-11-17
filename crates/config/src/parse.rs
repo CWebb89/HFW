@@ -417,7 +417,51 @@ impl PrinterConfig {
     /// Placement centres the part on half of each, and the fit check compares the
     /// part against all of each, so a polygon profile that left the two numbers at
     /// their defaults would place and refuse parts against a bed it does not have.
-    fn adopt_bed_shape(&mut self) {
+    /// Raises the machine speed ceiling to cover the speeds the profile asks for.
+    ///
+    /// `max_speed` is this engine's own limit and starts at a conservative
+    /// default, but a profile that plots a bead at 350 mm/s has already decided
+    /// what its machine can do. Leaving the default in place would make the
+    /// writer emit a feed the profile itself asked for and the verifier then
+    /// reject it, which is a contradiction rather than a safety check. A profile
+    /// that states `max_speed` itself is never raised: that number is a
+    /// deliberate throttle.
+    pub(crate) fn adopt_speed_ceiling(&mut self) {
+        if self.max_speed <= 0.0 {
+            return;
+        }
+        let fastest = [
+            self.outer_wall_speed,
+            self.inner_wall_speed,
+            self.thin_speed,
+            self.infill_speed,
+            self.solid_speed,
+            self.top_solid_speed,
+            self.support_speed,
+            self.support_interface_speed,
+            self.travel_speed,
+            self.travel_speed_z,
+            self.bridge_speed,
+            self.ironing_speed,
+            self.first_layer_speed,
+            self.first_layer_infill_speed,
+            self.first_layer_outer_speed,
+            self.first_layer_inner_speed,
+            self.first_layer_solid_speed,
+            self.first_layer_thin_speed,
+            self.first_layer_support_speed,
+            self.first_layer_top_solid_speed,
+            self.retract_speed,
+            self.deretract_speed,
+        ]
+        .into_iter()
+        .fold(0.0f64, f64::max);
+        if fastest > self.max_speed {
+            self.max_speed = fastest;
+        }
+    }
+
+    pub(crate) fn adopt_bed_shape(&mut self) {
         if self.bed_shape.len() < 3 {
             return;
         }
