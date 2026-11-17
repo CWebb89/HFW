@@ -88,7 +88,7 @@ Everything below exists only here.
 - **Memory guard on the field.** The distance field allocates four parallel
   arrays per cell; a plate-sized part at 0.05 mm resolution needs several
   hundred megabytes. `MAX_FIELD_CELLS` fails with an actionable message instead
-  of exhausting memory. The real fix is a tiled field, see `docs/ROADMAP.md`.
+  of exhausting memory. The real fix is a tiled field, see `docs/ENGINE-PARITY.md` #7.
 - **One path model.** `hfw_walls::Line` (points, per-vertex width, closed, kind)
   is the only printable path type; walls, middle beads, skin and infill all
   produce it, so counting, volume and export are single implementations.
