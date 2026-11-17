@@ -4,7 +4,8 @@ The order of work, so the next action is never a question. State as of
 2026-11-17; the numbers here are regenerated, never typed by hand where a script
 can produce them.
 
-Related: `STATUS.md` for the plain-language summary, `ENGINE-PARITY.md` for the
+Related: `../next-layer/docs/ecosystem-status.md` for the verified state of both
+projects together, `STATUS.md` for the plain-language summary, `ENGINE-PARITY.md` for the
 gate list parity depends on, `next-layer/docs/rust-engine-plan.md` for the phases
 that retire the C++ engine, `SETTINGS-LEDGER.md` for the per-setting
 inventory (generated), `SETTINGS-GAPS.md` for what is left and what it costs

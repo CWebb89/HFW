@@ -73,8 +73,12 @@ why the innermost loop can move off the nominal ladder.
 | `hfw-engine` | the pipeline, the seam, job settings | CLI parsing |
 | `hfw-cli` | argument parsing and reporting | geometry |
 
-Dependencies point down that table, never up, and there are no third-party
-crates: the whole engine is standard library only.
+Dependencies point down that table, never up. Two third-party crates are used, and
+only at the edges where the standard library has no equivalent:
+`zip` (deflate only, `crates/mesh` — reading a 3MF container) and `regex`
+(`crates/gcode` — `gcode_substitutions` and the dialect's `=~` matcher). No crate
+depends on them transitively, and the geometry, slicing and toolpath crates are
+standard library only.
 
 ## Invariants
 
