@@ -1788,6 +1788,37 @@ grep -qE 'Paths: [0-9]+ walls, [0-9]+ middle' "$tmp/thin-off.out"
 awk -F, 'NR>1 && ($6+$7+$8+$9+$11) > 0 {n++} END {exit !(n>0)}' "$tmp/thin-off/manifest.csv"
  or fail 'every layer of a thin object was left empty by thin_walls = false'
 
+section 'Expressions and per-object settings'
+
+printf '%s\n' \
+    'nozzle_diameter = 0.4' \
+    'temperature = 210' \
+    'filament_abrasive = 0' \
+    'start_gcode = M862.1 P[nozzle_diameter] A{(filament_abrasive[0] ? 1 : 0)}\n{if nozzle_diameter[0] == 0.4}M900 K0.05{else}M900 K0.08{endif}' \
+    >"$tmp/expr.ini"
+$bin fixtures/cube.stl --preset "$tmp/expr.ini" --layer-height 0.2 \
+    --out-dir "$tmp/expr" --gcode "$tmp/expr.gcode" >"$tmp/expr.out" 2>&1
+ or fail 'a preset carrying expressions failed to slice'
+grep -qx 'M862.1 P0.4 A0' "$tmp/expr.gcode"
+ or fail 'an expression in machine G-code was not evaluated'
+grep -qx 'M900 K0.05' "$tmp/expr.gcode"
+ or fail 'a conditional block did not pick the branch its condition names'
+grep -q 'M900 K0.08' "$tmp/expr.gcode"
+ and fail 'a conditional block emitted the branch it did not take'
+
+printf '1 sparse_infill_density = 50%%\n1 wall_loops = 4\n' >"$tmp/objset.txt"
+$bin fixtures/cube.stl fixtures/sphere.stl --preset "$tmp/base.cfg" --layer-height 0.2 \
+    --object-settings "$tmp/objset.txt" --no-arrange \
+    --out-dir "$tmp/os" --gcode "$tmp/os.gcode" >"$tmp/os.out" 2>&1
+ or fail 'a plate with per-object settings failed to slice'
+grep -q 'Object cube (#0) overrides: sparse_infill_density, wall_loops' "$tmp/os.out"
+ or fail 'per-object settings did not reach the object they name'
+$bin fixtures/cube.stl fixtures/sphere.stl --preset "$tmp/base.cfg" --layer-height 0.2 \
+    --no-arrange --out-dir "$tmp/os-plain" --gcode "$tmp/os-plain.gcode" >"$tmp/os-plain.out" 2>&1
+ or fail 'the same plate without per-object settings failed to slice'
+cmp -s "$tmp/os.gcode" "$tmp/os-plain.gcode"
+ and fail 'per-object settings changed nothing in the output'
+
 section 'Two-reference oracle'
 
 if command -q prusa-slicer; and command -q orca-slicer

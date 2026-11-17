@@ -394,8 +394,23 @@ fn fill_placeholders(config: &mut PrinterConfig, preset: &Preset, report: &mut I
         else {
             continue;
         };
-        let mut filled = String::with_capacity(text.len());
-        let mut rest = text.as_str();
+        let lookup = |name: &str, index: Option<usize>| -> Option<String> {
+            pairs
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .and_then(|(_, value)| match index {
+                    Some(index) => value
+                        .split(',')
+                        .nth(index)
+                        .map(|part| part.trim().trim_matches('"').to_owned()),
+                    None => Some(first_value(value)),
+                })
+                .or_else(|| intrinsic(config, name))
+        };
+        let (conditioned, expressions) = crate::expression::expand(text, &lookup);
+        unresolved.extend(expressions);
+        let mut filled = String::with_capacity(conditioned.len());
+        let mut rest = conditioned.as_str();
         while let Some(at) = rest.find(['[', '{']) {
             filled.push_str(&rest[..at]);
             let open = rest.as_bytes()[at] as char;

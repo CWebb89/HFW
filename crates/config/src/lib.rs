@@ -32,6 +32,7 @@ mod bundle;
 mod dialect;
 mod dialect_table;
 mod error;
+mod expression;
 mod parse;
 
 pub use bundle::{Bundle, Kind, Loaded, Resolution};

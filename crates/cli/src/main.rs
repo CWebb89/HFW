@@ -83,6 +83,8 @@ have, never quietly dropped.
 Walls:
   --width <mm>                Extrusion width (default 0.4).
   --walls <n>                 Perimeter loops (default 3).
+  --object-settings <file>    Per-object settings, one `<input> <key> = <value>` per
+                              line; <input> is the 1-based order of the models given.
   --brim <n>                  First-layer adhesion brim loops (default 0).
   --brim-gap <mm>             Clearance between part and brim (default 0.1).
   --elephant-foot <mm>        Shrink the first layer by this much to remove the
@@ -187,6 +189,7 @@ struct Options {
     wall_width: Option<f64>,
     walls: Option<usize>,
     brim: Option<usize>,
+    object_settings: Option<PathBuf>,
     brim_gap: Option<f64>,
     elephant_foot: Option<f64>,
     xy_size: Option<f64>,
@@ -239,6 +242,7 @@ impl Options {
             wall_width: None,
             walls: None,
             brim: None,
+            object_settings: None,
             brim_gap: None,
             elephant_foot: None,
             xy_size: None,
@@ -718,6 +722,12 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 )?)
             }
             "--walls" => o.walls = Some(count(&next_value(&mut arguments, "--walls")?, "--walls")?),
+            "--object-settings" => {
+                o.object_settings = Some(PathBuf::from(next_value(
+                    &mut arguments,
+                    "--object-settings",
+                )?))
+            }
             "--brim" => o.brim = Some(count(&next_value(&mut arguments, "--brim")?, "--brim")?),
             "--brim-gap" => {
                 o.brim_gap = Some(number(
@@ -1167,6 +1177,9 @@ fn load_plate(o: &Options, factors: [f64; 3]) -> Result<Vec<PlatePart>, String> 
     if parts.is_empty() {
         return Err("no model path".to_owned());
     }
+    if let Some(path) = &o.object_settings {
+        apply_object_settings_file(&mut parts, path)?;
+    }
     scale_plate(&mut parts, factors)?;
     arrange_plate(&mut parts, o)?;
     for (index, part) in parts.iter().enumerate() {
@@ -1231,6 +1244,63 @@ fn scale_plate(parts: &mut [PlatePart], factors: [f64; 3]) -> Result<(), String>
 /// else is counted and named, never silently dropped. Layer height is refused
 /// on purpose: the whole plate shares one layer schedule, so a per-object value
 /// would either be ignored or desynchronise the stack.
+/// Reads per-object settings another application holds for a plate.
+///
+/// A 3MF carries its own per-object settings; a plate built from separate models
+/// - which is what next-layer hands this engine - has nowhere to put them.
+///
+/// One line per setting keeps the format small enough to read and to write:
+///
+/// ```text
+/// # <input> is the 1-based order of the model paths given
+/// 1 sparse_infill_density = 50%
+/// 2 wall_loops = 4
+/// ```
+fn apply_object_settings_file(parts: &mut [PlatePart], path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    for (line_number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (which, setting) = line.split_once(char::is_whitespace).ok_or_else(|| {
+            format!(
+                "{} line {}: expected `<input> <setting> = <value>`",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        let which: usize = which.parse().map_err(|_| {
+            format!(
+                "{} line {}: `{which}` is not an input number",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        let (key, value) = setting.split_once('=').ok_or_else(|| {
+            format!(
+                "{} line {}: expected `<setting> = <value>` after the input number",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        let count = parts.len();
+        let part = which
+            .checked_sub(1)
+            .and_then(|index| parts.get_mut(index))
+            .ok_or_else(|| {
+                format!(
+                    "{} line {}: input {which} is not on the plate ({count} model(s))",
+                    path.display(),
+                    line_number + 1
+                )
+            })?;
+        apply_object_overrides(part, &[(key.trim().to_owned(), value.trim().to_owned())]);
+    }
+    Ok(())
+}
+
 fn apply_object_overrides(part: &mut PlatePart, pairs: &[(String, String)]) {
     for (key, value) in pairs {
         let applied = match key.as_str() {
