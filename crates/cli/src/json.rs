@@ -524,6 +524,38 @@ pub fn slice_document(
 }
 
 /// The document for a `--check-gcode` run.
+/// The intake report as JSON: every key the preset stated and how it was handled.
+///
+/// A key missing from this document never reached the engine at all, which is the
+/// one failure the printed report cannot show -- it lists what the intake saw, and
+/// a setting lost while flattening a configuration dump is not in that list. The
+/// settings-boundary check in `next-layer` compares this against the keys of the
+/// dump it handed over.
+pub fn intake_document(report: &hfw_config::IntakeReport) -> Node {
+    let mut keys = Vec::new();
+    for (key, intake) in report.entries() {
+        let label = match intake {
+            hfw_config::Intake::Applied => "applied",
+            hfw_config::Intake::Partial => "partial",
+            hfw_config::Intake::Recognised => "recognised",
+            hfw_config::Intake::Unconverted => "unconverted",
+            hfw_config::Intake::Unknown => "unknown",
+        };
+        keys.push(Node::Obj(vec![
+            ("name", Node::Str(key.to_owned())),
+            ("intake", Node::Str(label.to_owned())),
+        ]));
+    }
+    Node::Obj(vec![
+        ("keys_seen", Node::Int(report.len() as i64)),
+        ("keys", Node::Arr(keys)),
+        (
+            "warnings",
+            Node::Arr(report.warnings().iter().cloned().map(Node::Str).collect()),
+        ),
+    ])
+}
+
 pub fn check_document(path: &std::path::Path, report: &VerifyReport) -> Node {
     Node::Obj(vec![
         ("schema", int(1)),

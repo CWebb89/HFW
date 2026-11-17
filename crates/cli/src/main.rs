@@ -125,6 +125,11 @@ Printer:
                               report says what was applied and what was not.
   --preset-strict             Fail instead of reporting when a preset carries a
                               key this engine cannot apply.
+  --intake-json <path>        Write the intake report as JSON: every key the
+                              preset stated and how it was handled. A key that is
+                              missing from this document never reached the
+                              engine, which is the one failure the printed report
+                              cannot show.
   --bundle <dir>              A whole profile collection: a directory of presets
                               or one sectioned vendor file.
   --machine <name>            Machine preset of that name in the bundle.
@@ -222,6 +227,8 @@ struct Options {
     colour_change_at: Vec<f64>,
     json: bool,
     json_paths: bool,
+    /// Where the intake report goes as JSON, one entry per key the preset stated.
+    intake_json: Option<PathBuf>,
 }
 
 impl Options {
@@ -275,6 +282,7 @@ impl Options {
             colour_change_at: Vec::new(),
             json: false,
             json_paths: false,
+            intake_json: None,
         }
     }
 
@@ -874,6 +882,9 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.check_gcode = Some(PathBuf::from(next_value(&mut arguments, "--check-gcode")?))
             }
             "--json" => o.json = true,
+            "--intake-json" => {
+                o.intake_json = Some(PathBuf::from(next_value(&mut arguments, "--intake-json")?))
+            }
             "--json-paths" => {
                 o.json = true;
                 o.json_paths = true;
@@ -941,6 +952,14 @@ fn run_cli() -> Result<(), String> {
     let Some(mut o) = parse_arguments()? else {
         return Ok(());
     };
+    if let Some(path) = o.intake_json.clone() {
+        let report = o
+            .preset_report
+            .as_ref()
+            .ok_or_else(|| "--intake-json needs --preset or --bundle".to_owned())?;
+        fs::write(&path, json::intake_document(report).to_json())
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    }
 
     if let Some(path) = o.check_gcode.clone() {
         return run_check(&o, &path);
