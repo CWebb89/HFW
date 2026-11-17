@@ -784,6 +784,77 @@ width, closed flag, overhang share, length and vertices. The cube is 772 KB that
 way, the sphere about 5 MB, which is the reason it is a second flag rather than
 the default.
 
+## E17. A bundle, a packed plate and the time estimate
+
+Bundle intake, using the three-preset fixture in the repository:
+
+```fish
+./target/release/hfw-cli --bundle fixtures/bundle --list-bundle
+./target/release/hfw-cli fixtures/cube.stl --bundle fixtures/bundle \
+    --machine "Demo Klipper 220" --process "0.20mm Demo" --filament "Demo PLA" \
+    --out-dir /tmp/bundle --gcode /tmp/bundle.gcode
+```
+
+Expected: the listing shows one machine, one process and one filament; the slice
+verifies, the header says **acceleration and cornering planned**, the footprint is
+reported on a **220 x 220 bed** (the machine preset's own bed, not this engine's
+default), and the first G-code line is the preset's `PRINT_START BED=60
+EXTRUDER=215`. Change `--filament` to a name that does not exist and the error
+lists the names the bundle does hold.
+
+Against a real library, which is the case that matters:
+
+```fish
+./target/release/hfw-cli --bundle /opt/orca-slicer/resources/profiles --list-bundle | head -3
+./target/release/hfw-cli fixtures/cube.stl --bundle /opt/orca-slicer/resources/profiles \
+    --machine "Voron 2.4 350 0.4 nozzle" --process "0.20mm Standard @Voron" \
+    --filament "Generic PLA" --out-dir /tmp/orca --gcode /tmp/orca.gcode
+```
+
+The index is **1463 machines, 3277 processes, 6650 filaments** in under a second.
+The slice comes out with **269 keys: 119 applied, 9 partial, 94 recognised, 5
+unconverted, 42 unknown**, and then fails verification on purpose: the machine's
+start G-code is full of Orca placeholders this engine does not substitute, and the
+intake names them before the file is written. That failure is the current work item.
+
+Packing, on the Voron profile:
+
+```fish
+./target/release/hfw-cli fixtures/cube.stl fixtures/cube.stl fixtures/sphere.stl \
+    --profile profiles/voron_klipper.cfg --spacing 5 \
+    --out-dir /tmp/plate --gcode /tmp/plate.gcode
+```
+
+Expected: no "share the same space" warning, the three objects inside one footprint,
+and the arrangement centred on the bed. **Six** cubes go in one row (154 mm of a
+350 mm bed); a plate that cannot fit is refused in a millisecond with its size and
+the bed's:
+
+```fish
+./target/release/hfw-cli fixtures/sphere.stl fixtures/sphere.stl --scale 20 \
+    --profile profiles/voron_klipper.cfg --out-dir /tmp/big --gcode /tmp/big.gcode
+```
+
+```
+error: sphere does not fit on a 350 x 350 bed: it needs 605.0 x 605.0 mm with the spacing this plate uses, and leaving it out would print a different job
+```
+
+The estimate, with and without the machine's acceleration, on a part whose real
+duration is known (the torus-like curvature is what the old sum got wrong):
+
+```fish
+for p in cube sphere torus
+    printf '%-8s kinematic ' $p
+    ./target/release/hfw-cli fixtures/$p.stl --profile profiles/voron_klipper.cfg \
+        --out-dir /tmp/k-$p --gcode /tmp/k-$p.gcode 2>/dev/null | grep -o 'estimated [0-9.]* min'
+end
+```
+
+Expected on this build: cube **15.1 min** kinematic → **16.2 min** with acceleration,
+sphere **20.3 → 21.8**, torus **6.7 → 10.1**. The sphere was printed in **21 min**
+and the cube in **16 min** (jobs `0003EC` and `0003E7`), so the planned numbers are
+the honest ones and the sum is 5–6 % optimistic on both.
+
 ## E15. The newer sparse patterns
 
 ```fish

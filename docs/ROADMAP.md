@@ -34,12 +34,22 @@ can reach stops being read.
 
 ## The order of work
 
-### 1. Land what exists (now)
+### 1. Preset intake finish line (next)
 
-The tree has been worked on for weeks without a commit. Nothing else should start
-until it is committed in logical pieces, with a remote decided.
+`--bundle` reads a real profile library and layers a job out of it. What is missing
+is one vocabulary: a machine preset's `machine_start_gcode` is templated with
+`[bed_temperature_initial_layer_single]` and similar, and this engine substitutes
+only its own placeholders, so the file verifies as unreadable. Substituting the
+reference dialects' vocabulary — or refusing the machine at intake with the list of
+placeholders it needs — is what makes a bundle job printable.
 
-### 2. Finish the ledger tail that is real work
+### 2. Per-object scope (then)
+
+next-layer's per-object UI offers settings this engine applies plate-wide: regions
+and layer-height ranges. Two call sites exist (the 3MF override table and the plate
+report), which is what justifies building it now rather than earlier.
+
+### 3. Finish the ledger tail that is real work
 
 Seven rows. In cost order:
 
@@ -55,17 +65,29 @@ Seven rows. In cost order:
 The 57 multi-material rows are **not** in this list. They become work when a
 toolchanger exists.
 
-### 3. Work the engine parity list, top to bottom
+### 4. Work the rest of the parity list
 
-`ENGINE-PARITY.md` §1–§9 plus §10–§11. It is ordered by what blocks a real
-project in the app, not by what is interesting. Nothing in the ledger appears on
-it, which is the clearest sign the ledger is no longer the main path.
+`ENGINE-PARITY.md` §7–§11: the tiled distance field, internal bridges, regions
+and height profiles, the in-layer G-code channel, and a gated differential corpus
+against libslic3r. §1–§5 are done: settings intake, 3MF, arranging, the
+acceleration-aware estimate.
 
-### 4. Swap behind a flag, in the app, not here
+### 5. Swap behind a flag, in the app, not here
 
 Boundary first in next-layer: a project in, G-code and a report out. Then both
 engines linked, HFW behind a flag, every gate measured on real projects. Then the
 default flips. Deleting libslic3r is the last step and the only irreversible one.
+
+## Done, so it stops being asked about
+
+- **Preset bundles.** `--bundle` reads a vendor tree or a sectioned vendor file,
+  resolves `inherits`, and layers machine, then filament, then process. Whole Orca
+  library indexes in under a second; a name it lacks is an error listing what it has.
+- **Plate packing.** MaxRects, quarter turns allowed, centred, refused before
+  slicing when it cannot fit.
+- **A time estimate with acceleration in it.** Trapezoids with one junction of
+  lookahead and the machine's own cornering model; within 4% of the two prints whose
+  real duration is recorded.
 
 ## What is deliberately not planned
 

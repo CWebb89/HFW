@@ -3,7 +3,8 @@
 Written to be read in two minutes, by someone who does not work on this code.
 Every number here is measured, and the command that measures it is named.
 
-Updated 2026-11-17.
+Updated 2026-11-17 (second pass: preset bundles, plate packing, accelerated time
+estimate).
 
 ## In one paragraph
 
@@ -49,12 +50,37 @@ Two more that matter when deciding whether to trust the output:
 
 | item | cost | notes |
 |---|---|---|
-| 7 ledger rows still `partial` or `missing` | days to a week | the largest is lightning infill, a spanning tree grown down from the surface; also snug support, routing outside the part, and the slicing-mode fill rules |
+| **Start-G-code placeholders in a machine preset** | 2–3 days | the one thing between a real Orca bundle and a printable file: `[bed_temperature_initial_layer_single]` and friends are templated into `machine_start_gcode`, and we substitute only our own vocabulary. Intake now names them before slicing |
+| 6 ledger rows still `partial` or `missing` | days to a week | the largest is lightning infill, a spanning tree grown down from the surface; also snug support, routing outside the part, and the slicing-mode fill rules |
 | 57 multi-material rows | blocked on hardware | there is no toolchanger; the setting means nothing until there is one |
-| A time estimate that respects acceleration | 1–2 days | the estimate today ignores acceleration and is optimistic by 2–3× |
-| Arranging several objects to fit a plate | 2–3 days | we place and fit-check; we do not pack |
 | Tiled distance field | 2–3 days | a 200 mm plate at fine resolution is refused rather than run |
 | Internal bridges | 2–3 days | every bridge we detect today is over air, not over infill |
+| Per-object regions and layer-height profiles | a week | next-layer's per-object UI offers settings we cannot scope to a region or a height range |
+
+## What changed in this pass
+
+Three items came off the engine-parity list, and one of them found a bug that had
+been in every run since presets were read:
+
+- **`--bundle`** indexes a vendor profile tree (Orca's shipped layout) or a
+  sectioned vendor file (PrusaSlicer's), resolves `inherits` across it, and layers
+  one machine, one process and one filament. Orca's whole library — 1463 machines,
+  3277 processes, 6650 filaments — indexes in under a second. Ambiguous names are
+  resolved toward the machine's own vendor, because every vendor ships a
+  "Generic PLA".
+- **The time estimate is planned, not summed.** Trapezoids with one junction of
+  lookahead, junction deviation from the profile (Klipper's
+  `square_corner_velocity` converted the way Klipper converts it). On the two prints
+  whose real duration is recorded it lands within 4% — cube 16.2 against 16 printed,
+  sphere 21.8 against 21 — where the old sum was 5–6% low.
+- **Plates are packed** with MaxRects and centred, and a part that cannot fit is
+  refused before slicing instead of after.
+
+Two bugs found on the way, both older than this work: a preset's `bed_shape` never
+reached the bed size that placement and the fit check use (every `--preset` run was
+centred on a 220 mm bed, whatever the machine), and `--scale` was applied *after*
+laying out a plate, so scaled parts overlapped or passed a fit check they no longer
+met.
 
 ## What needs a decision from Curtis
 
@@ -71,11 +97,13 @@ Two more that matter when deciding whether to trust the output:
 
 ## The next three actions, in order
 
-1. Commit the engine tree in logical pieces (then decide on the remote).
-2. Finish the ledger tail that is real work and leave the rest declared:
-   lightning infill, snug support, external travel routing, slicing fill modes.
-3. Then the engine parity list, top to bottom — not the ledger, which is now
-   almost entirely multi-material.
+1. **Start-G-code placeholders.** Until this is done, a job from a real machine
+   preset produces a file that verifies as unreadable. It is the last thing between
+   `--bundle` and "a user's own printer, sliced".
+2. Per-object regions and layer-height profiles — the settings next-layer exposes
+   per object that we can only apply plate-wide.
+3. The ledger tail that is real work: lightning infill, snug support, external
+   travel routing, slicing fill modes. Then the tiled field and internal bridges.
 
 ## Reading order
 

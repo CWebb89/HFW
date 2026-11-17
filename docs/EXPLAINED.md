@@ -306,3 +306,57 @@ third-party routers, not DeepSeek's own price sheet.*
 Practical rule: stay on Flash until a task loops twice on the same fix or a
 multi-file refactor falls apart. That is the signal that the ~4× price buys
 something. Paying it in advance is a guess dressed up as planning.
+
+## Where the time estimate lives
+
+The number in the file's header is not a sum of length over speed. Each emitted move
+goes into a trapezoidal planner: it accelerates from the speed the junction behind it
+allows, cruises at its commanded speed if the distance covers the ramps, and
+decelerates to whatever the junction ahead allows. Because two consecutive moves share
+a junction, the planner always holds one move back — its exit speed is decided when the
+next move arrives — which is why the estimate is only final when the file is.
+
+The junction speed is the machine's own number, not a constant. Marlin states a
+junction deviation, the distance the nozzle may cut a corner by, and the speed through
+a corner of turn angle θ follows from it: `v² = a·δ·sin(θ/2)/(1 − sin(θ/2))`. Klipper
+states `square_corner_velocity` instead, the speed a 90° corner may be taken at, and
+derives the deviation as `δ = scv²·(√2 − 1)/a` — the same formula run backwards, so a
+corner of 90° works out to exactly `scv`. A profile that says neither is timed
+kinematically, and the header says so: an invented cornering parameter would be a
+number with nothing behind it.
+
+What this cannot know is what the machine does before the first move — heat-up,
+homing, a mesh probe. Those are inside the start G-code, and every slicer's estimate
+has the same hole in the same place.
+
+## How a plate is laid out
+
+One object is centred and that is the end of it. Several objects are packed: the free
+space is kept as a list of rectangles, each object goes into the gap where it wastes
+the least, and the rectangles it lands in are split and pruned. Each object may be
+turned a quarter turn, because a part 200 mm long and 30 mm wide is a different problem
+depending on which way round the bed it faces. Spacing is air between footprints and
+half of it at the bed edge.
+
+Two things about the order of operations are easy to get wrong. Scaling — units,
+`--scale`, shrinkage — happens *before* packing, or a plate laid out at model size and
+scaled afterwards overlaps itself. And packing happens before slicing rather than after
+planning, so a part that cannot fit is refused in a millisecond instead of after the
+distance field has been built for it. The visible consequence of packing before slicing
+is that seam placement and loop entry points are chosen in bed coordinates: the same
+cube on the same printer comes out a few millimetres different in filament total,
+because a loop now starts nearest a corner of the bed rather than nearest the origin.
+
+## Where a preset bundle is read
+
+A preset is one file; a bundle is a library of them, which is what a slicer ships and
+what a user accumulates. `--bundle` walks the tree, decides each file's kind from its
+own `type` field, from the directory it sits in, or from a key only that kind carries,
+and keeps the inheritance graph. Resolving a job walks one machine's, one process's and
+one filament's chains parent-first, then layers the results machine → filament →
+process, so the print settings win over the material and both win over the machine.
+
+Names are not unique across a library — every vendor ships a "Generic PLA" — so a
+filament or a process is looked up first among the presets of the machine's own vendor.
+A parent that is not in the bundle is a warning, not an error: exported presets inherit
+from system presets that only exist inside the application.

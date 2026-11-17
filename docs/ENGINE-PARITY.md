@@ -28,10 +28,10 @@ own history. "Green" means the check below runs and passes today.
 
 | # | Item | Blocks the swap because | State |
 |---|------|------------------------|-------|
-| 1 | Settings intake: PrusaSlicer-format profile inheritance, or a translation layer with measured coverage | Users' existing machines and presets must work | **partly green.** The dialect renames the reference keys onto engine names, `inherits` chains resolve inside a bundle, `--preset` reports every key as applied/partial/unknown, and the ledger measures coverage at 299 of 364. Missing: resolving a vendor bundle (vendor → machine → process → filament as separate files) |
+| 1 | Settings intake: PrusaSlicer-format profile inheritance, or a translation layer with measured coverage | Users' existing machines and presets must work | **green for intake, one blocker left.** `--bundle` indexes a vendor profile tree or a sectioned vendor file, resolves `inherits` across it, picks one machine, one process and one filament (preferring the machine's own vendor), and reports every key as applied/partial/unknown. Orca's whole shipped library — 1463 machines, 3277 processes, 6650 filaments — indexes in under a second. **Blocker: `machine_start_gcode` placeholders.** A real machine preset is templated with `[bed_temperature_initial_layer_single]`, `{during_print_exhaust_fan_speed_num[current_extruder]}` and the like; this engine substitutes a small set of its own and leaves the rest literal, so the verifier rejects the file. Intake now names those placeholders up front instead of after the G-code is written.
 | 2 | Per-object and per-region overrides | next-layer exposes 136 of them per object | **partial.** Five keys per object (density, pattern, walls, width, support). No region volumes, no per-object height ranges |
-| 3 | Arrange: centring, `--arrange`, build-volume collision | Plates and multi-object jobs are core UI | **partial.** Objects are placed beside each other, the plate is centred and a part that does not fit is refused by axis; nothing packs |
-| 4 | Acceleration, junction deviation, honest time estimate | Current estimate is 14 min for a job that took 40 | **emission green, estimate wrong.** `M201`/`M203`/`M205`, `SET_VELOCITY_LIMIT` and per-feature acceleration all reach the file; the estimate is kinematic and says so |
+| 3 | Arrange: centring, `--arrange`, build-volume collision | Plates and multi-object jobs are core UI | **green.** A MaxRects packer places every unpositioned object in the gap it wastes least, turns one a quarter turn when that is what makes it fit, centres the arrangement on the bed, and refuses a plate that cannot fit before slicing rather than after planning it. A plate a file already positioned keeps its own layout, and the remaining objects are laid out beside it |
+| 4 | Acceleration, junction deviation, honest time estimate | A kinematic estimate is optimistic by 2–3× on short moves | **green.** Burst-free trapezoidal planner with one junction of lookahead: per-move acceleration, junction deviation (Marlin's `M205 J`, or Klipper's `square_corner_velocity` converted the way `klippy/toolhead.py` converts it), and a classic-jerk model for a Marlin profile that sets no deviation. On the two prints whose real duration is recorded, the planned estimate lands within 4% (cube 16.2 min against 16 printed, sphere 21.8 against 21) where the kinematic sum was 5–6% low. A profile that states no acceleration still gets the kinematic number, and the file's header says which one it got |
 | 5 | 3MF/AMF import with plates and instances | Most downloaded models are 3MF | **green for 3MF.** ZIP, unit, components, per-item transforms and a project's own settings file. No AMF |
 | 6 | Multi-extruder and toolchanger | next-layer's stated differentiator | deliberately deferred |
 | 7 | Tiled distance field | A 200 mm plate at 0.05 mm is refused today (~450 MB) | not started |
@@ -58,9 +58,23 @@ with validation before slicing, and it reads a PrusaSlicer/Orca file through
 back as applied, partial or unknown — never silently dropped. Coverage is the
 ledger's 299 of 364 and the ceiling is the UI's own list, not this engine's.
 
-What does not exist is the **bundle** layer: resolving
-vendor → machine → process → filament from a directory of preset files, the way
-the app does before it hands a job to an engine.
+**The bundle layer exists.** `--bundle <dir>` indexes a vendor profile tree (Orca's
+shipped layout) or a sectioned vendor file (PrusaSlicer's), resolves `inherits`
+across the whole set, and layers one machine, one process and one filament in the
+order the reference slicers use — machine, then material, then print settings, so a
+process value wins over both. A name the bundle does not hold is an error that
+lists the names it does hold; a *parent* the bundle does not hold is a warning,
+because an exported preset routinely inherits from a system preset that lives
+inside the slicer rather than next to the file.
+
+**What is still missing here is the placeholder vocabulary.** A machine preset's
+`machine_start_gcode` is a template: `[bed_temperature_initial_layer_single]`,
+`{during_print_exhaust_fan_speed_num[current_extruder]}`, `[first_layer_print_min[0]]`.
+This engine substitutes its own small set and leaves the rest as literal text,
+which the verifier then rejects as unreadable — correct, since the file must not be
+printed, but late. Intake now counts those placeholders and names them, so a bundle
+job fails in the report instead of in the file. **This is the next piece of work on
+this list.**
 
 **What next-layer feeds it.** A resolved settings object per plate: the vendor
 bundle the engine resolves as a package, plus per-object overrides. Every key
@@ -84,32 +98,46 @@ libslic3r: a 0.30 mm per-object layer height must reduce the layer count from
 
 ### 3. Arrange
 
-**Today.** `crates/gcode` places the model and rejects a file that does not fit.
+**Today.** `crates/cli/src/arrange.rs` packs a plate: MaxRects with a
+best-short-side-fit score, a quarter turn allowed per object, spacing as air
+between footprints, and the finished arrangement centred on the bed. Scaling
+(units, `--scale`, shrinkage) is applied *before* packing, so the packer works in
+the millimetres the bed is measured in. A part that cannot fit is refused with its
+size and the bed's, before any layer is planned.
 
-**What is needed.** Centring, an `--arrange` mode that packs plates, and a
-collision check that runs before slicing rather than after.
+A plate that a 3MF positioned keeps that layout, and the unpositioned objects are
+laid out beside it: a file's coordinates are a decision the user made in the
+slicer, and mixing those with objects that have no position would need to know
+which of them were moved on purpose.
 
-**Check.** A three-object plate arranges without overlap into the build volume;
-an object larger than the volume is refused with a message naming the axis and
-the overflow.
+**Check.** Three objects arrange without overlap and inside the bed; an object
+larger than the volume is refused with a message naming its size and the bed's.
+Both are gate sections.
 
 ### 4. Acceleration and junction deviation
 
 **Today.** The commands are emitted — `M201`/`M203`/`M205` for Marlin,
 `SET_VELOCITY_LIMIT` for Klipper, and per-feature acceleration with a machine
-ceiling — so the printer will honour the profile. The *estimate* is still purely
-kinematic ("estimated print time in seconds, without acceleration",
-`crates/gcode/src/writer.rs`), so it is optimistic: 14 minutes for the 20 mm cube
-against PrusaSlicer's 40.
+ceiling. The estimate is `crates/gcode/src/time.rs`: every emitted move goes
+through a trapezoidal planner (accelerate, cruise, decelerate) with one junction of
+lookahead, so a move's exit speed is decided by the corner it shares with the next.
 
-**What is needed.** A velocity profile that respects the machine's
-`max_accel`/`square_corner_velocity` (Klipper) or `M201`/`M205` (Marlin), and a
-time estimate derived from it.
+The cornering model is the machine's own. Marlin gives junction deviation directly
+(`M205 J`); Klipper gives `square_corner_velocity` instead and derives the deviation
+from it exactly as `klippy/toolhead.py` does, so a 90° corner is timed at `scv`
+by construction. A Marlin profile that sets jerk and no deviation gets the classic
+jerk model. A profile that states neither is timed kinematically, and the file's
+header says so rather than pretending.
 
-**Check.** The 20 mm cube at the shipped Voron profile estimates within 10 % of
-the reference slicers' estimates, and within 10 % of a real print's reported
-duration. It is not enough to match the slicer — the slicer is being checked
-against the printer.
+**Measured.** Against the two prints whose real duration is recorded on the Voron:
+the sphere estimated 21.8 min against 21 printed, the cube 16.2 against 16, where
+the kinematic sum was 5–6 % low on both. Against the reference slicers the numbers
+are not comparable — they print the same geometry at their own speeds, so Orca
+claims 29.9 min and PrusaSlicer 21.0 for a cube this engine plans at 15–16.
+
+**What is still missing.** Heat-up, homing and the start G-code's own work are not
+counted by anything (no planner can know them), and the firmware's lookahead through
+a fan of very short segments is approximated by the one-junction model.
 
 ### 5. 3MF and AMF
 

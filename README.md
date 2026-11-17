@@ -48,6 +48,12 @@ hfw fixtures/cube.stl --profile profiles/voron_klipper.cfg --gcode /tmp/cube.gco
 # a plate: several STLs, or a 3MF whose build items carry their own placement
 hfw a.stl b.stl project.3mf --profile profiles/voron_klipper.cfg --gcode plate.gcode
 
+# a whole profile collection: pick one machine, process and filament
+hfw --bundle /opt/orca-slicer/resources/profiles --list-bundle
+hfw part.stl --bundle /opt/orca-slicer/resources/profiles \
+    --machine "Voron 2.4 350 0.4 nozzle" --process "0.20mm Standard @Voron" \
+    --filament "Generic PLA" --gcode part.gcode
+
 # check a file from any slicer
 hfw --check-gcode /tmp/cube.gcode --profile profiles/voron_klipper.cfg
 
@@ -77,17 +83,24 @@ One extruder, one material, STL and 3MF, single and multi-object plates:
 - **Surface**: scarf seams, staggered inner seams, seam gap, fuzzy skin, brims
   including hole brims, raft, draft shield.
 - **Emission**: Klipper and Marlin dialects, machine limits, pressure advance,
-  per-feature cooling and acceleration, arcs, thumbnails, pauses, substitutions.
+  per-feature cooling and acceleration, arcs, thumbnails, pauses, substitutions, and
+  a time estimate planned move by move with the machine's own cornering model.
+- **Plates**: several objects packed onto the bed, a quarter turn allowed, centred,
+  and refused before slicing when they cannot fit. Preset bundles (a vendor profile
+  tree or a sectioned vendor file) resolve to one machine, one process, one filament.
 
 `docs/STATUS.md` holds the numbers; `docs/SETTINGS-LEDGER.md` holds the setting by
 setting truth, including what is missing and why.
 
 ## What it does not do
 
-Multi-material and toolchangers. OBJ/AMF/STEP. Arranging objects to pack a plate.
-An acceleration-aware time estimate. Support painting, per-object layer-height
-profiles, and internal bridges. A 200 mm plate at fine resolution (the distance
-field is dense, and refuses rather than crushing the machine).
+Multi-material and toolchangers. OBJ/AMF/STEP. Support painting, per-object regions
+and layer-height profiles, and internal bridges. A 200 mm plate at fine resolution
+(the distance field is dense, and refuses rather than crushing the machine). A
+machine preset's templated start G-code: the reference placeholders
+(`[bed_temperature_initial_layer_single]` and the like) are named at intake and not
+yet substituted, so a bundle job from a real Orca machine currently stops at the
+verifier rather than printing.
 
 Each of those is on the parity list with a cost beside it, except multi-material,
 which waits for hardware.
