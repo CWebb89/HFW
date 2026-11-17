@@ -3038,11 +3038,16 @@ pub fn generate(
             w.out.push_str(&cfg.fill(text, &per));
             w.out.push('\n');
         }
+        // The estimate is the time so far scaled up by the share of layers done, so a
+        // first layer of a tall print is under one percent and has no share to scale
+        // by: dividing by it wrote `M73 P0 Rinf` into the file.
         if cfg.remaining_times && printed > 0 {
             let done = (printed * 100) / layer_count.max(1);
-            let total = w.stats.est_seconds * 100.0 / done as f64;
-            let left = (total - w.stats.est_seconds).max(0.0);
-            let _ = writeln!(w.out, "M73 P{done} R{:.0}", (left / 60.0).ceil().max(0.0));
+            if done > 0 {
+                let total = w.stats.est_seconds * 100.0 / done as f64;
+                let left = (total - w.stats.est_seconds).max(0.0);
+                let _ = writeln!(w.out, "M73 P{done} R{:.0}", (left / 60.0).ceil().max(0.0));
+            }
         }
         if cfg.flavor == Flavor::Klipper && cfg.emit_print_stats {
             let _ = writeln!(w.out, "SET_PRINT_STATS_INFO CURRENT_LAYER={}", printed + 1);

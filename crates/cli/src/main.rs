@@ -59,6 +59,7 @@ Slice:
   --layer-height <mm>         Regular layer height; plans the whole stack.
   --first-layer-height <mm>   First layer height (default: layer height).
   --out-dir <folder>          Write layer SVGs, manifest.csv and job_report.txt.
+                              Optional: a run that only writes G-code skips them.
 
 Model preparation:
   --units mm|inch             Interpret STL coordinates (default mm).
@@ -2000,10 +2001,9 @@ fn run_stack(
         .layer_height
         .ok_or_else(|| "missing required --layer-height value".to_owned())?;
     let first_layer_height = o.first_layer_height.unwrap_or(layer_height);
-    let out_dir = o
-        .out_dir
-        .as_ref()
-        .ok_or_else(|| "missing required --out-dir folder".to_owned())?;
+    // Layer SVGs are for looking at a slice; a run that only wants the G-code has
+    // nothing to put in a folder.
+    let out_dir = o.out_dir.as_ref();
 
     let by_object = o
         .profile_config
@@ -2045,40 +2045,42 @@ fn run_stack(
     }
     let mesh_volume = mesh.volume_mm3();
 
-    fs::create_dir_all(out_dir)
-        .map_err(|error| format!("could not create {}: {error}", out_dir.display()))?;
-
-    let mut manifest = String::from(MANIFEST_HEADER);
-    manifest.push('\n');
     let mut totals = JobTotals::default();
-    for layer in &job.layers {
-        let path = out_dir.join(format!("layer_{:05}.svg", layer.index + 1));
-        fs::write(&path, layer.to_svg())
-            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
-        manifest.push_str(&layer.manifest_row());
-        manifest.push('\n');
-        totals.add(layer);
-    }
-    let manifest_path = out_dir.join("manifest.csv");
-    fs::write(&manifest_path, manifest)
-        .map_err(|error| format!("could not write {}: {error}", manifest_path.display()))?;
+    if let Some(out_dir) = out_dir {
+        fs::create_dir_all(out_dir)
+            .map_err(|error| format!("could not create {}: {error}", out_dir.display()))?;
 
-    let report = job_report(
-        &ReportInput {
-            options: o,
-            mesh,
-            before,
-            after,
-            repair,
-            total_scale,
-            mesh_volume,
-        },
-        &job,
-        &totals,
-    );
-    let report_path = out_dir.join("job_report.txt");
-    fs::write(&report_path, report)
-        .map_err(|error| format!("could not write {}: {error}", report_path.display()))?;
+        let mut manifest = String::from(MANIFEST_HEADER);
+        manifest.push('\n');
+        for layer in &job.layers {
+            let path = out_dir.join(format!("layer_{:05}.svg", layer.index + 1));
+            fs::write(&path, layer.to_svg())
+                .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+            manifest.push_str(&layer.manifest_row());
+            manifest.push('\n');
+            totals.add(layer);
+        }
+        let manifest_path = out_dir.join("manifest.csv");
+        fs::write(&manifest_path, manifest)
+            .map_err(|error| format!("could not write {}: {error}", manifest_path.display()))?;
+
+        let report = job_report(
+            &ReportInput {
+                options: o,
+                mesh,
+                before,
+                after,
+                repair,
+                total_scale,
+                mesh_volume,
+            },
+            &job,
+            &totals,
+        );
+        let report_path = out_dir.join("job_report.txt");
+        fs::write(&report_path, report)
+            .map_err(|error| format!("could not write {}: {error}", report_path.display()))?;
+    }
 
     outln!(
         "Planned {} layers at {first_layer_height:.3} mm first layer then {layer_height:.3} mm.",
@@ -2134,7 +2136,6 @@ fn run_stack(
             "Mean perimeter coverage: under {mean_under:.4}, over {mean_over:.4}, width violation {mean_viol:.4}."
         );
     }
-    outln!("Layer SVGs, manifest and report: {}", out_dir.display());
     let written = match &o.gcode {
         Some(path) => Some(write_gcode(o, &job, path)?),
         None => {
