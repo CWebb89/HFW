@@ -665,14 +665,23 @@ printf '%s\n' 'printer_model = Voron 2.4' \
     'gcode_substitutions = "M104 S0","M104 S0 ; park",,"footer"' \
     'infill_overlap = 20%' \
     'top_solid_min_thickness = 1.2' >"$tmp/identity.ini"
+# A --gcode path with no extension names the directory to write into, which is
+# where output_filename_format applies. A named .gcode file is written where the
+# caller asked: a caller that names its output is not asking for a suggestion.
 $bin fixtures/cube.stl --preset "$tmp/identity.ini" --layer-height 0.2 \
-    --out-dir "$tmp/identity" --gcode "$tmp/identity/asked.gcode" \
+    --out-dir "$tmp/identity" --gcode "$tmp/identity" \
     --pause-at 1.0 --colour-change-at 2.0 >"$tmp/identity.out" 2>&1
  or fail 'the identity-preset run failed'
 grep -q '15 keys: 15 applied' "$tmp/identity.out"
  or fail 'an identity or emission setting was not counted applied'
 grep -qx '; printer_model = Voron 2.4' "$tmp/identity/cube-doc.gcode"
  or fail 'output_filename_format did not rename the file'
+$bin fixtures/cube.stl --preset "$tmp/identity.ini" --layer-height 0.2 \
+    --out-dir "$tmp/identity-exact" --gcode "$tmp/identity-exact/asked.gcode" \
+    --pause-at 1.0 --colour-change-at 2.0 >"$tmp/identity-exact.out" 2>&1
+ or fail 'the named-path run failed'
+test -f "$tmp/identity-exact/asked.gcode"
+ or fail 'a named .gcode path was renamed instead of written where it was asked for'
 grep -qx '; filament_abrasive = 1' "$tmp/identity/cube-doc.gcode"
  or fail 'an identity setting did not reach the header'
 grep -q '^; substituted M104 S0 -> M104 S0 ; park (footer)' "$tmp/identity/cube-doc.gcode"

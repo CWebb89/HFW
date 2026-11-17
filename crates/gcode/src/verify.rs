@@ -436,7 +436,10 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                         r.filament_mm += if volumetric { delta / area } else { delta };
                         r.est_seconds += distance / speed;
                         let flow = volume / (distance / speed);
-                        if flow > cfg.max_volumetric_speed * 1.05 {
+                        // A zero ceiling is the reference slicers' spelling of "no
+                        // limit", so it is not a ceiling to exceed.
+                        if cfg.max_volumetric_speed > 0.0 && flow > cfg.max_volumetric_speed * 1.05
+                        {
                             push(
                                 &mut r,
                                 max_errors,

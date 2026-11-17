@@ -2193,14 +2193,23 @@ fn write_gcode(o: &Options, job: &Job, path: &Path) -> Result<Written, String> {
     })
 }
 
-/// Applies `output_filename_format` to the path the caller asked for.
+/// Applies `output_filename_format` to the path a caller did not name.
 ///
-/// The dialect writes the name as a template over the same placeholders the
-/// G-code uses, plus `{input_filename}` and `{timestamp}`. An empty format keeps
-/// the caller's path, which is what every other profile gets.
+/// The dialect writes the name as a template over `{input_filename}`,
+/// `{layer_height}`, `{nozzle_diameter}`, `{printer_model}` and
+/// `{filament_type}`. It applies only when the caller asked for a directory
+/// rather than a file: `--gcode out.gcode` is an instruction, not a suggestion,
+/// and a caller that passes it — another program, a test, a script — cannot be
+/// expected to hunt for the file it asked for. A format still holding a
+/// placeholder this engine cannot fill keeps the caller's name instead of
+/// writing braces into a path.
 fn output_path(cfg: &PrinterConfig, o: &Options, asked: &Path) -> Result<PathBuf, String> {
     let format = cfg.output_filename_format.trim();
-    if format.is_empty() {
+    let named = asked
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gcode"));
+    if format.is_empty() || named {
         return Ok(asked.to_path_buf());
     }
     let stem = std::path::Path::new(o.inputs.first().map(String::as_str).unwrap_or("plate"))
@@ -2217,12 +2226,18 @@ fn output_path(cfg: &PrinterConfig, o: &Options, asked: &Path) -> Result<PathBuf
         .replace("{printer_model}", cfg.printer_model.trim())
         .replace("{filament_type}", cfg.filament_type.trim());
     let name = name.trim();
+    if name.contains('{') || name.contains('}') {
+        return Ok(asked.to_path_buf());
+    }
     if name.is_empty() || name.contains('/') || name.contains('\\') {
         return Err(format!(
             "output_filename_format `{format}` must produce a plain file name"
         ));
     }
-    Ok(asked.with_file_name(name))
+    if named {
+        return Ok(asked.to_path_buf());
+    }
+    Ok(asked.join(name))
 }
 
 /// Runs `post_process` on the finished file, one command per `;`-separated entry.

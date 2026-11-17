@@ -1108,7 +1108,6 @@ impl PrinterConfig {
                 self.support_max_branch_diameter,
             ),
             ("travel_speed", self.travel_speed),
-            ("max_volumetric_speed", self.max_volumetric_speed),
             ("max_speed", self.max_speed),
             ("flow", self.flow),
             ("bridge_speed", self.bridge_speed),

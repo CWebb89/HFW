@@ -141,6 +141,13 @@ impl Preset {
     /// heredoc blocks. Unparseable *structure* is an error; an unrecognised
     /// *name* is not — that is the intake report's job.
     pub fn parse(text: &str) -> Result<Preset, ConfigError> {
+        if text.trim_start().starts_with('{') {
+            let pairs = flat_json(text).ok_or_else(|| ConfigError::BadValue {
+                key: "preset",
+                why: "a JSON object of settings, one level deep".to_owned(),
+            })?;
+            return Ok(Preset::from_pairs(pairs));
+        }
         let mut preset = Preset::default();
         let mut lines = text.lines().enumerate();
         while let Some((line_number, raw)) = lines.next() {
@@ -293,6 +300,9 @@ impl PrinterConfig {
         let mut config = PrinterConfig::default();
         let mut report = IntakeReport::default();
         for (key, value) in preset.entries() {
+            if key.starts_with('$') {
+                continue;
+            }
             let (name, intake) = resolve(key);
             match intake {
                 Intake::Applied | Intake::Partial => {
@@ -323,7 +333,7 @@ impl PrinterConfig {
         }
         config.adopt_bed_shape();
         config.adopt_speed_ceiling();
-        report_placeholders(&mut report, preset);
+        fill_placeholders(&mut config, preset, &mut report);
         if let Err(problem) = config.resolve_widths(preset.entries()) {
             report.warnings.push(problem.to_string());
         }
@@ -334,34 +344,49 @@ impl PrinterConfig {
     }
 }
 
-/// Placeholders this engine substitutes in start and end G-code.
-const KNOWN_PLACEHOLDERS: &[&str] = &[
-    "bed_temp",
-    "nozzle_temp",
-    "first_nozzle_temp",
-    "bed_x",
-    "bed_y",
-    "bed_shape",
-    "max_z",
-    "pressure_advance",
-    "layer_z",
-    "layer_num",
-    "total_layers",
+/// Tokens that the reference dialects write into G-code and that mean, here, one of
+/// this engine's own per-layer placeholders.
+const DYNAMIC_PLACEHOLDERS: &[(&str, &str)] = &[
+    ("layer_z", "{layer_z}"),
+    ("layer_num", "{layer_num}"),
+    ("total_layer_count", "{total_layers}"),
+    ("current_extruder", "0"),
 ];
 
-/// Records start and end G-code this engine cannot fully substitute.
+/// Substitutes the reference dialects' placeholders in the G-code a preset carries.
 ///
-/// The reference dialects templated their machine G-code with placeholders of
-/// their own, and a machine preset in the wild is full of them:
-/// `[bed_temperature_initial_layer_single]` and
-/// `{during_print_exhaust_fan_speed_num[current_extruder]}` are two from Orca's
-/// own Voron profile. This engine substitutes a small set of its own and leaves
-/// everything else as literal text, which the verifier then rejects as unreadable.
-/// That is the right outcome for a file that must not be printed, so the job here
-/// is to say it at intake rather than after the G-code has been written: the keys
-/// are reported as partial, and `--preset-strict` refuses the job.
-fn report_placeholders(report: &mut IntakeReport, preset: &Preset) {
-    for key in ["start_gcode", "end_gcode"] {
+/// A machine preset's start G-code is a template, and the two dialects template it
+/// differently: `[name]` is a setting, `{name}` is a variable, and an index after
+/// the name (`[first_layer_print_min[0]]`, `{fan[current_extruder]}`) selects an
+/// element. This engine's own G-code template language is `{name}` with a small
+/// vocabulary, so a preset's text is translated into it:
+///
+/// - a placeholder whose meaning is per-layer here is rewritten to this engine's
+///   spelling, because its value is only known once a layer is being written;
+/// - a placeholder naming a setting is replaced with that setting's value, taken
+///   from the preset itself first (it is authoritative: the user's own profile) and
+///   from the engine's configuration second;
+/// - anything else is left as literal text and reported, because a machine's macro
+///   silently receiving the word `[foo]` instead of a number is how a print starts
+///   wrong.
+///
+/// Values are flattened the way the dialect stores them: an array is comma-separated
+/// and a per-tool setting takes its first entry, because this engine prints with one
+/// extruder.
+fn fill_placeholders(config: &mut PrinterConfig, preset: &Preset, report: &mut IntakeReport) {
+    let pairs: Vec<(String, String)> = preset.entries().to_vec();
+    let known: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(key, value)| (key.clone(), first_value(value)))
+        .collect();
+    let keys = [
+        "start_gcode",
+        "end_gcode",
+        "before_layer_gcode",
+        "layer_gcode",
+    ];
+    let mut unresolved: Vec<String> = Vec::new();
+    for key in keys {
         let Some((written, text)) = preset
             .entries()
             .iter()
@@ -369,52 +394,120 @@ fn report_placeholders(report: &mut IntakeReport, preset: &Preset) {
         else {
             continue;
         };
-        let key = written.clone();
-        let mut unknown: Vec<String> = Vec::new();
-        for token in placeholders(text) {
-            if !KNOWN_PLACEHOLDERS.contains(&token.as_str()) && !unknown.contains(&token) {
-                unknown.push(token);
+        let mut filled = String::with_capacity(text.len());
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(['[', '{']) {
+            filled.push_str(&rest[..at]);
+            let open = rest.as_bytes()[at] as char;
+            let close = if open == '[' { ']' } else { '}' };
+            let after = &rest[at + 1..];
+            let Some(end) = after.find(close) else {
+                filled.push_str(&rest[at..]);
+                rest = "";
+                break;
+            };
+            let token = &after[..end];
+            rest = &after[end + 1..];
+            let name = strip_index(token);
+            if let Some((_, ours)) = DYNAMIC_PLACEHOLDERS
+                .iter()
+                .find(|(theirs, _)| *theirs == name)
+            {
+                filled.push_str(ours);
+                continue;
+            }
+            let value = known
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .or_else(|| intrinsic(config, name));
+            match value {
+                Some(value) => filled.push_str(&value),
+                None => {
+                    if !unresolved.iter().any(|seen| seen == name) {
+                        unresolved.push(name.to_owned());
+                    }
+                    filled.push(open);
+                    filled.push_str(token);
+                    filled.push(close);
+                }
             }
         }
-        if unknown.is_empty() {
-            continue;
+        filled.push_str(rest);
+        assign_gcode(config, key, filled);
+        if !unresolved.is_empty() {
+            report.record(written, Intake::Partial);
         }
-        report.record(&key, Intake::Partial);
-        let shown = unknown
-            .iter()
-            .take(4)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        let more = match unknown.len() {
-            0..=4 => String::new(),
-            count => format!(" and {} more", count - 4),
-        };
-        report.warnings.push(format!(
-            "{key} uses {} placeholder(s) this engine does not substitute: {shown}{more}; \
-             the file would carry them as literal text and fail verification",
-            unknown.len()
-        ));
+    }
+    if unresolved.is_empty() {
+        return;
+    }
+    let shown = unresolved
+        .iter()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = match unresolved.len() {
+        0..=4 => String::new(),
+        count => format!(" and {} more", count - 4),
+    };
+    report.warnings.push(format!(
+        "machine G-code uses {} placeholder(s) this engine does not know: {shown}{more}; \
+         they would reach the printer as literal text",
+        unresolved.len()
+    ));
+}
+
+/// A token's setting name, without the element index the dialect may append.
+fn strip_index(token: &str) -> &str {
+    match token.find('[') {
+        Some(at) => &token[..at],
+        None => token,
     }
 }
 
-/// Every bracketed or braced placeholder in a block of G-code, without its delimiters.
-fn placeholders(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(['[', '{']) {
-        let open = rest.as_bytes()[start] as char;
-        let close = if open == '[' { ']' } else { '}' };
-        let after = &rest[start + 1..];
-        match after.find(close) {
-            Some(end) => {
-                out.push(after[..end].to_owned());
-                rest = &after[end + 1..];
-            }
-            None => break,
+/// The first element of a dialect value, which stores lists as comma-separated text.
+fn first_value(value: &str) -> String {
+    value
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('"')
+        .to_owned()
+}
+
+/// A placeholder's value when the preset does not carry it but the engine does.
+fn intrinsic(config: &PrinterConfig, name: &str) -> Option<String> {
+    let number = |value: f64| Some(format!("{value}"));
+    match name {
+        "first_layer_temperature" => number(config.first_nozzle_temp),
+        "temperature" | "nozzle_temperature" => number(config.nozzle_temp),
+        "first_layer_bed_temperature" | "bed_temperature_initial_layer_single" => {
+            number(if config.first_layer_bed_temp > 0.0 {
+                config.first_layer_bed_temp
+            } else {
+                config.bed_temp
+            })
         }
+        "bed_temperature" => number(config.bed_temp),
+        "nozzle_diameter" => number(config.nozzle_diameter),
+        "num_extruders" => Some("1".to_owned()),
+        "bed_shape" => Some(config.bed_shape_text()),
+        "max_layer_z" | "max_print_height" => number(config.max_z),
+        _ => None,
     }
-    out
+}
+
+fn assign_gcode(config: &mut PrinterConfig, key: &str, text: String) {
+    match key {
+        "start_gcode" => config.start_gcode = text,
+        "end_gcode" => config.end_gcode = text,
+        "before_layer_gcode" => config.before_layer_gcode = text,
+        "layer_gcode" => config.layer_gcode = text,
+        _ => {}
+    }
 }
 
 /// Maps one preset key to the name this crate uses, and says how it is known.
@@ -566,13 +659,16 @@ impl ProjectSettings {
     }
 }
 
-/// Reads a flat JSON object into setting pairs, or `None` when the text is not
-/// one.
+/// Reads a JSON object of settings into pairs, or `None` when the text is not one.
 ///
-/// `project_settings.config` is exactly that: one level of `"name": value`,
-/// where a value is a scalar or an array of scalars. Arrays are joined with
-/// commas, which is how every slicer writes delimiter-separated lists. Nested
-/// objects are skipped rather than approximated.
+/// Two shapes are read. A preset is one level of `"name": value`, where a value is
+/// a scalar or an array of scalars; arrays are joined with commas, which is how
+/// every slicer writes delimiter-separated lists. The reference slicers' own
+/// `--configuration-save` is the other: one level of objects named
+/// `printer_settings`, `print_settings` and `filament_settings`, each of which is
+/// exactly the first shape. A nested object is therefore read as more settings
+/// rather than skipped, which is what lets the same reader take a preset, a
+/// project's settings part, and a full configuration dump.
 pub(crate) fn flat_json(text: &str) -> Option<Vec<(String, String)>> {
     let mut rest = text.trim_start();
     rest = rest.strip_prefix('{')?;
@@ -586,7 +682,19 @@ pub(crate) fn flat_json(text: &str) -> Option<Vec<(String, String)>> {
         rest = after_key.trim_start().strip_prefix(':')?;
         rest = rest.trim_start();
         if rest.starts_with('{') {
-            rest = skip_balanced(rest, '{', '}')?;
+            let after = skip_balanced(rest, '{', '}')?;
+            if let Some(nested) = flat_json(rest) {
+                // An empty value in a configuration dump means "inherit", not
+                // "clear": every section of the dump carries the full key list, so
+                // a later section's blank start G-code would otherwise erase the
+                // printer's own.
+                pairs.extend(
+                    nested
+                        .into_iter()
+                        .filter(|(_, value)| !value.trim().is_empty()),
+                );
+            }
+            rest = after;
         } else {
             let (value, after) = json_value(rest)?;
             rest = after;
@@ -664,7 +772,7 @@ fn json_value(text: &str) -> Option<(Option<String>, &str)> {
         return Some((None, text.strip_prefix("null")?));
     }
     let end = text
-        .find(|c: char| c == ',' || c == '}' || c.is_whitespace())
+        .find(|c: char| c == ',' || c == '}' || c == ']' || c.is_whitespace())
         .unwrap_or(text.len());
     if end == 0 {
         return None;

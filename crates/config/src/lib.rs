@@ -306,7 +306,11 @@ pub struct PrinterConfig {
     pub support_branch_diameter_angle: f64,
     /// Largest branch diameter a trunk may reach, in millimetres.
     pub support_max_branch_diameter: f64,
-    /// Volumetric flow ceiling in cubic millimetres per second.
+    /// Volumetric flow ceiling in cubic millimetres per second; 0 is no ceiling.
+    ///
+    /// The reference slicers default this to 0 and mean "unlimited", so a
+    /// configuration written by one of them carries a zero here and expecting a
+    /// positive number would refuse every such file.
     pub max_volumetric_speed: f64,
     /// Fastest the volumetric rate may rise, in cubic millimetres per second
     /// squared; 0 leaves the rate unconstrained.
