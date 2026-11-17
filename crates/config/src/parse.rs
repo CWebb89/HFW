@@ -1982,6 +1982,21 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_that_says_no_brim_gets_no_brim_loops() {
+        let off = PrinterConfig::parse("brim_type = no_brim\nbrim_width = 5\nline_width = 0.4\n")
+            .expect("brim settings parse");
+        assert_eq!(off.adhesion_brim_loops(), 0);
+
+        let shaped = PrinterConfig::parse("brim_type = outer_only\nbrim_width = 5\nline_width = 0.4\n")
+            .expect("brim settings parse");
+        assert_eq!(shaped.adhesion_brim_loops(), 13);
+
+        let counted = PrinterConfig::parse("brim_loops = 2\nline_width = 0.4\n")
+            .expect("brim settings parse");
+        assert_eq!(counted.adhesion_brim_loops(), 2);
+    }
+
+    #[test]
     fn a_layer_height_profile_is_read_as_z_height_steps() {
         let cfg = PrinterConfig::parse(
             "layer_height_profile = 0:0.2, 8:0.12; 16:0.28\nmin_layer_height = 0.1\nmax_layer_height = 0.3, 0.3\n",

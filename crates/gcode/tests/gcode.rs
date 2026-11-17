@@ -479,7 +479,14 @@ fn acceleration_is_switched_per_feature_and_restored() {
     cfg.default_accel = 4000.0;
     cfg.outer_wall_accel = 1200.0;
     let (gcode, _) = make("cube.stl", &cfg);
-    assert!(gcode.text.contains("SAVE_VELOCITY_LIMIT"));
+    assert!(
+        !gcode.text.contains("SAVE_VELOCITY_LIMIT"),
+        "klipper has no SAVE_VELOCITY_LIMIT"
+    );
+    assert!(
+        !gcode.text.contains("RESTORE_VELOCITY_LIMIT"),
+        "klipper has no RESTORE_VELOCITY_LIMIT"
+    );
     assert!(
         gcode.text.contains("SET_VELOCITY_LIMIT ACCEL=1200"),
         "outer wall acceleration missing"
@@ -488,13 +495,17 @@ fn acceleration_is_switched_per_feature_and_restored() {
         gcode.text.contains("SET_VELOCITY_LIMIT ACCEL=4000"),
         "default acceleration missing"
     );
-    assert!(gcode.text.contains("RESTORE_VELOCITY_LIMIT"));
     let outer = first_pos(&gcode.text, ";TYPE:Outer wall");
     let after = &gcode.text[outer..];
     let to_first_move = &after[..after.find("G1 X").expect("the outer wall prints a move")];
     assert!(
         to_first_move.contains("SET_VELOCITY_LIMIT ACCEL=1200"),
         "the outer wall's acceleration is not set before its first move"
+    );
+    let restored = &after[after.find(";TYPE:").expect("another feature follows")..];
+    assert!(
+        restored.contains("SET_VELOCITY_LIMIT ACCEL=4000"),
+        "the print's own acceleration is not put back after the outer wall"
     );
 }
 
@@ -1007,6 +1018,37 @@ fn printing_retract_travel_acceleration_and_min_rates_reach_their_commands() {
     assert!(
         !gcode.text.contains("M205"),
         "klipper has no junction deviation"
+    );
+}
+
+#[test]
+fn the_velocity_limit_commands_are_the_ones_the_flavour_implements() {
+    let mut klipper = voron();
+    klipper.default_accel = 4000.0;
+    klipper.outer_wall_accel = 1200.0;
+    let (k, _) = make("cube.stl", &klipper);
+    for unsupported in ["SAVE_VELOCITY_LIMIT", "RESTORE_VELOCITY_LIMIT", "M204"] {
+        assert!(
+            !k.text.contains(unsupported),
+            "klipper cannot run {unsupported}"
+        );
+    }
+
+    let mut marlin = profile("generic_marlin.cfg");
+    marlin.default_accel = 4000.0;
+    marlin.outer_wall_accel = 1200.0;
+    let (m, _) = make("cube.stl", &marlin);
+    assert!(
+        !m.text.contains("SET_VELOCITY_LIMIT"),
+        "marlin has no SET_VELOCITY_LIMIT"
+    );
+    assert!(
+        m.text.contains("M204 S1200"),
+        "the outer wall's acceleration never reaches marlin"
+    );
+    assert!(
+        m.text.contains("M204 S4000"),
+        "the print's own acceleration is not put back"
     );
 }
 

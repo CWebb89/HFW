@@ -1195,6 +1195,12 @@ fn base_accel(feature: Feature, cfg: &PrinterConfig, first_layer: bool) -> f64 {
     accel
 }
 
+/// The acceleration a print keeps between features: the profile's own default,
+/// capped by the machine ceiling, or 0 when the profile states neither.
+fn print_accel(cfg: &PrinterConfig) -> f64 {
+    base_accel(Feature::Skirt, cfg, false)
+}
+
 /// The lower of two axis ceilings, with 0 meaning unset.
 fn xy_ceiling(x: f64, y: f64) -> f64 {
     match (x, y) {
@@ -1533,20 +1539,6 @@ fn bridge_flow_scale(cfg: &PrinterConfig, span: f64) -> f64 {
     cfg.bridge_flow * (1.0 + cfg.bridge_span_flow * over)
 }
 
-/// Adhesion brim loops, from the width when the profile states one.
-///
-/// A width is how the reference dialects state a brim and a loop count is how
-/// this engine draws it, so the count is the width divided by a bead and rounded
-/// to the nearest whole loop; one loop is the floor, because a brim that rounds
-/// to zero is a brim the profile asked for and did not get.
-fn brim_loops(cfg: &PrinterConfig) -> usize {
-    if cfg.brim_width > 0.0 {
-        ((cfg.brim_width / cfg.line_width).round() as usize).max(1)
-    } else {
-        cfg.brim_loops
-    }
-}
-
 /// Bridge speed for a span, falling with span and never below a floor.
 ///
 /// A long bridge pulls its own bead into a straight line only while the bead is
@@ -1714,8 +1706,8 @@ fn skirt_margin(cfg: &PrinterConfig) -> f64 {
     } else {
         0.0
     };
-    let brim = if brim_loops(cfg) > 0 {
-        cfg.brim_gap + brim_loops(cfg) as f64 * cfg.line_width
+    let brim = if cfg.adhesion_brim_loops() > 0 {
+        cfg.brim_gap + cfg.adhesion_brim_loops() as f64 * cfg.line_width
     } else {
         0.0
     };
@@ -1846,7 +1838,6 @@ struct Writer<'a> {
     previous_feature: Option<Feature>,
     fan_pwm: i64,
     fan_saved: Option<i64>,
-    accel_saved: bool,
     accel: f64,
     /// Acceleration of the bead being written, whether or not it was emitted.
     ///
@@ -1976,9 +1967,16 @@ impl Writer<'_> {
     }
 
     fn restore_accel(&mut self) {
-        if self.accel_saved {
-            self.accel_saved = false;
-            let _ = writeln!(self.out, "RESTORE_VELOCITY_LIMIT");
+        let base = print_accel(self.cfg);
+        if self.accel > 0.0 && base > 0.0 {
+            match self.cfg.flavor {
+                Flavor::Klipper => {
+                    let _ = writeln!(self.out, "SET_VELOCITY_LIMIT ACCEL={base:.0}");
+                }
+                Flavor::Marlin => {
+                    let _ = writeln!(self.out, "M204 S{base:.0}");
+                }
+            }
         }
         self.accel = 0.0;
     }
@@ -1990,9 +1988,8 @@ impl Writer<'_> {
 
     /// Switches the machine to `accel` mm/s^2, or leaves it alone at 0.
     ///
-    /// Klipper's limit is a saved/restored pair around the change; Marlin takes
-    /// `M204 S`, a print-wide setting, so it is restored to `default_accel` when
-    /// the profile has one and otherwise left at the last feature's value.
+    /// Each flavour states the same change its own way: Klipper takes
+    /// `SET_VELOCITY_LIMIT ACCEL=`, Marlin takes `M204 S`.
     /// Sends one move to the time planner and mirrors its running total.
     fn timed_move(&mut self, m: TimedMove) {
         self.time.push(m);
@@ -2017,10 +2014,6 @@ impl Writer<'_> {
         }
         match self.cfg.flavor {
             Flavor::Klipper => {
-                if !self.accel_saved {
-                    self.accel_saved = true;
-                    let _ = writeln!(self.out, "SAVE_VELOCITY_LIMIT");
-                }
                 let _ = writeln!(self.out, "SET_VELOCITY_LIMIT ACCEL={accel:.0}");
             }
             Flavor::Marlin => {
@@ -2643,7 +2636,6 @@ pub fn generate(
         previous_feature: None,
         fan_pwm: 0,
         fan_saved: None,
-        accel_saved: false,
         accel: 0.0,
         path_accel: 0.0,
         time: Planner::new(Tune::from_profile(cfg)),

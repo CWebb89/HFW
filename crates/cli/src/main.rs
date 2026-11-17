@@ -403,11 +403,7 @@ impl Options {
         } else {
             0.25 * cfg.nozzle_diameter
         };
-        self.settings.brim_loops = if cfg.brim_width > 0.0 {
-            ((cfg.brim_width / cfg.line_width).round() as usize).max(1)
-        } else {
-            cfg.brim_loops
-        };
+        self.settings.brim_loops = cfg.adhesion_brim_loops();
         self.settings.brim_gap = cfg.brim_gap;
         self.settings.elephant_foot = cfg.elefant_foot_compensation;
         self.settings.xy_size = cfg.xy_size_compensation;

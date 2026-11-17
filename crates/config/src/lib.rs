@@ -682,9 +682,8 @@ pub struct PrinterConfig {
     pub bridge_fan_speed: f64,
     /// Acceleration applied while bridges print, in mm/s^2; 0 leaves it alone.
     ///
-    /// Only Klipper profiles get this: the value is wrapped in
-    /// `SAVE_VELOCITY_LIMIT`/`RESTORE_VELOCITY_LIMIT` so the print's own limit is
-    /// restored afterwards.
+    /// The bead runs at this value and the print's own acceleration is put back
+    /// afterwards, each flavour in its own command.
     pub bridge_acceleration: f64,
     /// Longest span bridged without help, in millimetres; 0 means no limit.
     pub max_bridge_length: f64,
@@ -1290,6 +1289,27 @@ impl Default for PrinterConfig {
 }
 
 impl PrinterConfig {
+    /// Adhesion brim loops this profile asks for, resolving `no_brim` to none.
+    ///
+    /// A width is how the reference dialects state a brim and a loop count is
+    /// how this engine draws it, so the count is the width divided by a bead and
+    /// rounded to the nearest whole loop; one loop is the floor, because a brim
+    /// that rounds to zero is a brim the profile asked for and did not get. A
+    /// profile that states a width and also `no_brim` asked for no brim: the
+    /// reference slicers keep the width as a remembered value for the next
+    /// profile that wants one, and drawing from it would put a brim on a plate
+    /// that disabled it.
+    pub fn adhesion_brim_loops(&self) -> usize {
+        if self.brim_type == "no_brim" {
+            return 0;
+        }
+        if self.brim_width > 0.0 {
+            ((self.brim_width / self.line_width).round() as usize).max(1)
+        } else {
+            self.brim_loops
+        }
+    }
+
     /// Thickest layer this machine prints, resolving `0` to 80% of the nozzle.
     pub fn max_layer(&self) -> f64 {
         if self.max_layer_height > 0.0 {
