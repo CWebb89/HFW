@@ -13,6 +13,7 @@
 
 use hfw_kernel::{Bounds, Hit, Region, SegIndex, V2};
 use hfw_walls::field::{scan_inside, Grid};
+
 use hfw_walls::{Kind, Line, WallParams};
 
 mod curves;
@@ -672,11 +673,12 @@ impl<'a> MaskCache<'a> {
 #[derive(Clone, Copy)]
 struct Ctx<'a> {
     region: &'a Region,
+    inset: &'a Region,
+    inset_solid: &'a Region,
     index: &'a SegIndex,
     grid: &'a SkinGrid,
     mask: &'a [u64],
     thr: f64,
-    thr_solid: f64,
     ip: &'a InfillParams,
     all_solid: bool,
     width: f64,
@@ -700,7 +702,11 @@ fn family(cx: &Ctx, theta: f64, spacing: f64, want_solid: bool) -> Vec<Line> {
     let i0 = (cmin / spacing).ceil() as i64;
     let i1 = (cmax / spacing).floor() as i64;
     let min_len = cx.width;
-    let thr = if want_solid { cx.thr_solid } else { cx.thr };
+    let span_rings = if want_solid {
+        &cx.inset_solid.rings
+    } else {
+        &cx.inset.rings
+    };
     let kind = if want_solid {
         Kind::Solid
     } else {
@@ -710,7 +716,7 @@ fn family(cx: &Ctx, theta: f64, spacing: f64, want_solid: bool) -> Vec<Line> {
     for i in i0..=i1 {
         let c = (i as f64 + 1e-7) * spacing;
         let mut ts: Vec<f64> = Vec::new();
-        for ring in &cx.region.rings {
+        for ring in span_rings {
             let m = ring.len();
             for k in 0..m {
                 let a = ring[k];
@@ -725,13 +731,10 @@ fn family(cx: &Ctx, theta: f64, spacing: f64, want_solid: bool) -> Vec<Line> {
         }
         ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let valid = |t: f64| -> bool {
-            let p = n * c + u * t;
-            if cx.index.nearest(p, thr).is_some() {
-                return false;
-            }
             if cx.all_solid {
                 return want_solid;
             }
+            let p = n * c + u * t;
             cx.grid.is_set(cx.mask, p) == want_solid
         };
         for pair in ts.chunks(2) {
@@ -1318,6 +1321,7 @@ pub fn infill_layer(
     );
     let all_solid = ip.density >= 0.999;
     let inset = inset_region(region, thr);
+    let inset_solid = inset_region(region, thr_solid);
     let inner = anchor_walk(&inset, thr, ip);
     let mut covered = solid.clone();
     for (c, a) in covered.iter_mut().zip(&air) {
@@ -1375,11 +1379,12 @@ pub fn infill_layer(
     }
     let cx = Ctx {
         region,
+        inset: &inset,
+        inset_solid: &inset_solid,
         index: &index,
         grid: &grid,
         mask: &covered,
         thr,
-        thr_solid,
         ip,
         all_solid,
         width: ip.width,
@@ -1475,11 +1480,12 @@ pub fn infill_layer(
     if air.iter().any(|w| *w != 0) {
         let cx_bridge = Ctx {
             region,
+            inset: &inset,
+            inset_solid: &inset_solid,
             index: &index,
             grid: &grid,
             mask: &air,
             thr,
-            thr_solid,
             ip,
             all_solid: false,
             width: ip.bridge.width,
