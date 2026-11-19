@@ -51,3 +51,63 @@ engine in this repository.
 
 Written by an AI model directed by the project owner, November 2026. Human
 review: pending.
+
+## Audit, 2026-11-19: Arachne identifiers and structure
+
+Append-only. The identifiers the audit looks for are the distinctive ones from
+CuraEngine's Arachne, which is AGPL-3.0 and reaches this tree through OrcaSlicer:
+
+```
+SkeletalTrapezoidation updateIsCentral filterCentral filterOuterCentral
+propagateBeadingsUpward propagateBeadingsDownward generateTransitionMids
+generateTransitioningRibs generateTransitionEnds applyTransitions BeadingStrategy
+DistributedBeadingStrategy LimitedBeadingStrategy RedistributeBeadingStrategy
+stitchToolPaths removeSmallLines separateOutInnerContour discretization_step_size
+transition_filter_dist
+```
+
+**Code**: `grep -rn '<those names>' crates` returns nothing. No C++ identifier,
+no upstream comment and no upstream constant table appears in any Rust file.
+
+**Docs**: all matches are in `docs/WALLS-SKELETON.md` (lines 44–78 and 119, 349),
+which is the design note for `crates/skeleton` and states plainly that its stage
+list was read from `~/dev/reference/OrcaSlicer/src/libslic3r/Arachne` and follows
+`WallToolPaths::generate` in order.
+
+**Structure**, compared by hand, `crates/skeleton/src` against that list:
+
+| upstream stage | this tree | judgement |
+|---|---|---|
+| prepare the outline | `build::prepare` | generic (offset out/in, simplify, union) |
+| build the skeletal trapezoidation | `build::build` → `graph` | derived structure: same half-edge/twin arena, same three edge classes (`boundary`, `rib`, `central`) |
+| classify central edges, filter | `classify::classify` | derived structure: same two filters in the same order |
+| bead count per location | documented, not implemented | — |
+| beading strategies composed | `bead` module (`Widening`, `Distributed`, `Limited`) | derived structure: same composition order |
+| transitions | absent (`docs/WALLS-SKELETON.md` error, see below) | — |
+| toolpaths | `emit` | derived structure |
+| post: stitch, drop short lines | `emit` | derived structure |
+
+**Error found in the note**: `docs/WALLS-SKELETON.md` lists
+`transition.rs` in the planned layout, and `crates/skeleton/src/transition.rs`
+does not exist. The note describes a stage the crate does not have.
+
+**Judgement**: `crates/skeleton` is a derived work in structure, not in text. The
+`SkeletalTrapezoidation` half-edge/twin graph is not a coincidence of subject
+matter; the stage decomposition and its order are the upstream algorithm's. It is
+**not used by any shipped wall path** (`hfw_walls::Mode::Hfw` is the polygon
+ladder, `Mode::Field` the raster), so nothing in a released slice depends on it.
+
+**Recommendation (for the owner, not decided here)**: delete `crates/skeleton` and
+the design note's stage list, and let the variable-width work be the P2.6
+redistribution design, which needs no Voronoi and no upstream structure. The
+alternatives and their consequences are in `DECISIONS.md` DECISION-6.
+
+## Audit, 2026-11-19: infill and support
+
+Same grep over `crates/infill` and `crates/support` for PrusaSlicer's fill and
+support identifiers (`FillRectilinear`, `ExtrusionEntityCollection`,
+`SupportMaterial`, `TreeSupport`, `Slic3r::`): no matches. The pattern names in
+`crates/infill` are the public names of the patterns themselves (`grid`, `gyroid`,
+`honeycomb`), which are geometry, not code. No tuning table in either crate is
+attributed to upstream; the numbers there are either physics or measured against
+`docs/ORACLE.md`.

@@ -48,7 +48,9 @@ Two more that matter when deciding whether to trust the output:
 ## What is actually finished
 
 - Parsing and slicing: STL and 3MF, exact integer geometry, plates of several
-  objects, per-object overrides from a 3MF, deterministic output.
+  objects, per-object overrides from a 3MF, deterministic output. A layer's material
+  is the union of its counter-clockwise contours minus its clockwise ones, and open
+  outlines are closed in stages (`--close-gaps`).
 - Walls: a ladder of polygon offsets of the layer, one loop at `Params::loop_offset(i)`
   with a miter join, and a gap pass over the strip the beads leave behind so a feature
   narrower than its walls is printed by a strand of its measured width. Beads divided
@@ -74,6 +76,34 @@ Two more that matter when deciding whether to trust the output:
 | Per-object regions and layer-height profiles | a week | next-layer's per-object UI offers settings we cannot scope to a region or a height range |
 
 ## What changed in this pass
+
+**A layer is material, not a nesting puzzle.** Each triangle/plane chord is ordered
+by its triangle's outward normal, so a contour arrives wound the way the solid is:
+counter-clockwise adds, clockwise removes. The layer region is the union of the
+positive contours minus each negative one, in the integer kernel. Two overlapping
+boxes now print their union — 632.000 mm² at z=12, one ring, against an L-shaped
+232 before — and a shell drawn inside another with the same winding stays material
+instead of becoming a hole.
+
+**Open outlines close in stages instead of emptying a layer.** Nearest endpoints are
+joined at 0, 0.001, 0.1 and 1 mm, then at `--close-gaps` (default 2 mm, max 10). On
+the defect corpus that takes `hole_small` from 116 to 120 planned layers and
+`hole_large` from 102 to 106 at the default; `--close-gaps 4` plans all 120. A trail
+that had to guess at a junction is a fragment of a self-touching surface and is
+dropped rather than joined into a spur.
+
+**Mesh repair runs on every job**, not on `--repair-basic`: welding exact duplicates,
+dropping degenerate and duplicate triangles and orienting closed components outward
+cannot turn a correct mesh wrong, and the slice now depends on face winding. A mesh
+with four faces reversed slices to the same 1611.143 mm³ as the clean cube.
+
+**A gap strand is charged for the slot it fills.** `Kind::Middle` fills the slot
+between the loops either side of it, so it deposits the rectangle, not a free bead's
+rectangle minus the corner term `h²(1 − π/4)`. That term was 14% of a 0.3 mm rib by
+construction: `thin_wall` goes from −24.3% to −11.7% against the two references, and
+`taper_wall` from −10.5% to −10.3%.
+
+The wall rewrite of the pass before this one, kept because its reasoning still holds:
 
 Walls went back to the polygon offset ladder, the two phases that dominated the clock
 were measured and made cheaper, and nothing about the deposited geometry moved by more
@@ -186,17 +216,16 @@ at 16 threads, of which 3.9 s is the engine and 8.8 s is rendering and re-readin
 of G-code single-threaded against PrusaSlicer's 9.4 and OrcaSlicer's 14.4. What is left
 is spread over four things, and two of them are bigger than they look.
 
-1. **The band's width policy** — two pieces, in this order:
-   - **`bead_area` for a slotted strand.** A `Kind::Middle` gap strand fills a slot
-     whose corners its neighbours are, so the free-bead corner correction
-     `h²(1 − π/4)` is wrong for it: it withholds 14% of a 0.3 mm rib's volume by
-     construction. `fixtures/thin_wall.stl` is −24.3% and this is most of it. Hours,
-     not days, but it moves every pinned volume in the tests.
+1. **The band's width policy** — the first of its two pieces is done, the second is
+   not:
+   - **`bead_area` for a slotted strand** is fixed: a `Kind::Middle` strand deposits the
+     rectangle, measured −24.3% → −11.7% on `thin_wall` (`DECISIONS.md` DECISION-5).
    - **Redistribution.** Share the leftover band width across the existing loops
      instead of squeezing a separate strand into it, so a 1.0 mm wall is 0.5 + 0.5
      rather than 0.4 + 0.4 + 0.2. `Params` already carries the parabolic weighting
      and `Line` already carries per-vertex width, so it is a change to how widths
-     are chosen plus a transition rule, not new geometry. 3-5 days.
+     are chosen plus a transition rule, not new geometry. 3-5 days. The spacing model
+     it depends on is DECISION-7.
 
    `DESIGN.md` under *Walls* holds the measurement and the reasoning; the sub-width
    case (`thin_wall`) and the fractional-band case (`sphere`, `cone`, `taper_wall`)
@@ -219,6 +248,14 @@ things a user can see.
 - `README.md` — what it is and how to run it.
 - `STATUS.md` — this page.
 - `ROADMAP.md` — the work order, with the reasoning for it.
+- `DECISIONS.md` — every choice the code cannot explain by itself, with the reason
+  and how to reverse it.
+- `BEHAVIOR-NOTES.md` — what each stage does in plain words, independent of any
+  source tree.
+- `AUDIT-2026-11.md` — one table per phase, `metric | before | after | command`.
+- `PROVENANCE.md` — what was read from where, and the licence audit.
+- `NEXTLAYER-BRIDGE.md` — how next-layer hands a job to this engine today and the
+  ABI it would need instead.
 - `ENGINE-PARITY.md` — what must be true before it can replace libslic3r.
 - `SETTINGS-LEDGER.md` — the generated, complete per-setting inventory.
 - `ORACLE.md` — the measured comparison against OrcaSlicer and PrusaSlicer.

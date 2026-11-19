@@ -69,6 +69,28 @@ sum are read.
 **Conclusion: geometry, wall placement and skin extent agree with both references
 to within 1.5% on flat and curved shapes alike.**
 
+## At 15% infill, 2026-11-19 (sixth pass: a gap strand deposits the slot it fills)
+
+`scripts/oracle.py --hfw target/release/hfw-cli fixtures/cube.stl fixtures/sphere.stl
+fixtures/cone.stl fixtures/torus.stl fixtures/thin_wall.stl fixtures/taper_wall.stl`
+
+| fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean | verdict |
+|---|---:|---:|---:|---:|:--|
+| cube | 3266.5 | 3293.2 | 3307.6 | −1.0% | pass |
+| sphere | 4462.5 | 4871.6 | 4990.3 | −9.5% | pass |
+| cone | 2937.6 | 3130.4 | 3353.1 | −9.4% | pass |
+| torus | 2230.6 | 2243.2 | 2328.1 | −2.4% | pass |
+| taper_wall | 524.0 | 571.7 | 596.3 | −10.3% | pass, expected |
+| thin_wall | 89.0 | 100.8 | 100.8 | −11.7% | pass, expected |
+
+What changed: a `Kind::Middle` strand fills a slot whose corners its neighbours
+already occupy, so it deposits the rectangle rather than a free bead's rectangle
+minus `h²(1 − π/4)`. The withheld corner term was 14% of a 0.3 mm rib by
+construction and is most of the old −24.3%. The remaining gap is the reference
+policy of substituting a full-width bead for a sub-bead feature; the `thin` class
+in the file is 89.0 mm³ against a model volume of 90.0. See `DECISIONS.md`
+DECISION-5.
+
 ## At 15% infill, 2026-11-19 (fifth pass: offset ladder and gap pass restored)
 
 | fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean | verdict |
@@ -117,14 +139,15 @@ leaves nothing for a gap pass to fill, so it deposits the same material under th
 `wall` class instead. The two classes are not comparable; the totals are, and they
 are 9.7% and 9.8% short.
 
-`fixtures/thin_wall.stl` is a 0.3 mm rib and it is **red**: 76.3 mm³ against a
+`fixtures/thin_wall.stl` is a 0.3 mm rib and it is **red** in that pass: 76.3 mm³ against a
 model volume of 90.0 mm³ (84.7%), where both references deposit 100.8 mm³ (112%).
 It was 88.7 mm³ before the walk budget, i.e. the difference was the walked bead at
 the rib's ends. Both references over-deposit by substituting a 0.4 mm bead for a
 0.3 mm feature; this engine under-deposits, and the `Gap` class in the file says why
-— 71.24 mm³ where the rib's own volume is 90.0 mm³. Most of that is `bead_area`
+— 71.24 mm³ where the rib's own volume is 90.0 mm³. Most of that was `bead_area`
 subtracting a free-standing bead's corner area from a strand that fills a slot and
-has no such corners. See `DESIGN.md`, *Walls*.
+has no such corners, which the sixth pass above fixed: the same row is 89.0 mm³ and
+−11.7%. See `DESIGN.md`, *Walls*.
 
 At 100% infill the difference vanishes, which is the proof that this is a
 skin-versus-wall accounting policy and not a geometry error.
