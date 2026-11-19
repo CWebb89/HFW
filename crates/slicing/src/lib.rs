@@ -1,17 +1,16 @@
 //! Triangle/plane intersection and deterministic contour reconstruction.
 //!
-//! The first implementation deliberately accepts only closed, degree-two
-//! contour graphs. It reports open and branching topology instead of silently
-//! producing incomplete perimeters.
+//! Each contour keeps the winding its triangles gave it, so overlapping shells
+//! and holes survive to the region builder instead of being re-decided by
+//! containment depth. Open outlines are closed in stages, nearest endpoints
+//! first, before a layer is reported as unprintable.
 
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
-use hfw_geometry::{
-    mm_to_coord, Contour, Coord, GeometryError, Point2, PointLocation, Segment2, MAX_ABS_COORD,
-};
+use hfw_geometry::{mm_to_coord, Contour, Coord, GeometryError, Point2, Segment2, MAX_ABS_COORD};
 use hfw_mesh::{Mesh, Point3};
 
 /// A horizontal slicing plane, represented by its printer-space Z coordinate.
@@ -319,8 +318,12 @@ pub struct SliceDiagnostics {
     /// Segments that met three or more others at one point, which a closed
     /// outline cannot: the mesh touches itself there.
     pub branch_points: usize,
-    /// Outline fragments abandoned because a branch left them open.
+    /// Outline fragments abandoned because no closing stage could join them.
     pub contours_dropped: usize,
+    /// Endpoint pairs joined by one of the staged closing passes.
+    pub gaps_closed: usize,
+    /// Largest gap this layer needed closed, in nanometres; zero when none.
+    pub gap_closed_nm: Coord,
     /// Closed contours reconstructed.
     pub contours_reconstructed: usize,
 }
@@ -330,8 +333,10 @@ pub struct SliceDiagnostics {
 pub struct SliceLayer {
     /// The plane used to produce this layer.
     pub plane: SlicePlane,
-    /// Reconstructed contours. For this initial milestone, winding is
-    /// normalized by even/odd nesting depth (outer CCW, hole CW).
+    /// Reconstructed contours, wound as the mesh wound them: material on the
+    /// left of the contour, so an outer boundary is counter-clockwise and a
+    /// hole clockwise. Overlapping shells are left overlapping for the region
+    /// builder to unite.
     pub contours: Vec<Contour>,
     /// Diagnostic counters for this operation.
     pub diagnostics: SliceDiagnostics,
@@ -341,7 +346,8 @@ impl SliceLayer {
     /// Exports this layer as a small, self-contained SVG drawing.
     ///
     /// The output uses nanometre coordinates in its viewBox and millimetres
-    /// for physical width/height. Even/odd fill handles nested contours.
+    /// for physical width/height. Non-zero fill handles overlapping shells as
+    /// a union and holes by their winding.
     pub fn to_svg(&self, padding_mm: f64) -> Result<String, SliceError> {
         use std::fmt::Write as _;
 
@@ -382,7 +388,7 @@ impl SliceLayer {
         .expect("writing to String cannot fail");
         writeln!(
             &mut svg,
-            r##"  <path d="{}" fill="#dce7f5" fill-rule="evenodd" stroke="#172638" stroke-width="100000" stroke-linejoin="round"/>"##,
+            r##"  <path d="{}" fill="#dce7f5" fill-rule="nonzero" stroke="#172638" stroke-width="100000" stroke-linejoin="round"/>"##,
             self.contours
                 .iter()
                 .map(|contour| {
@@ -496,24 +502,72 @@ impl fmt::Display for SliceError {
 
 impl std::error::Error for SliceError {}
 
-/// Slices a mesh at one horizontal plane.
+/// Options that act while a plane's segments are assembled into contours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SliceOptions {
+    /// Largest endpoint gap the closing ladder may bridge, in millimetres.
+    ///
+    /// The ladder tries a nanometre, a micrometre, a tenth of a millimetre and
+    /// a millimetre before this value, so a mesh whose facets nearly meet is
+    /// closed at the smallest gap that works and the reported stage says how
+    /// far the mesh was from watertight.
+    pub close_gaps: f64,
+}
+
+impl Default for SliceOptions {
+    fn default() -> SliceOptions {
+        SliceOptions { close_gaps: 2.0 }
+    }
+}
+
+/// The closing ladder, in millimetres, ending at [`SliceOptions::close_gaps`].
+const GAP_LADDER: [f64; 4] = [0.0, 0.001, 0.1, 1.0];
+
+/// Largest closing gap this crate accepts, in millimetres.
+pub const MAX_CLOSE_GAPS: f64 = 10.0;
+
+/// One triangle/plane crossing, directed so material lies on its left.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Directed {
+    from: Point2,
+    to: Point2,
+}
+
+impl Directed {
+    fn key(self) -> Result<Segment2, GeometryError> {
+        Segment2::new(self.from, self.to)
+    }
+}
+
+/// Slices a mesh at one horizontal plane with the default closing ladder.
 ///
 /// This version:
 /// - uses integer mesh coordinates and integer output coordinates;
 /// - treats a triangle/plane crossing using exact integer Z classification;
 /// - rounds interpolated XY coordinates to the nearest internal unit;
-/// - removes duplicate undirected segments deterministically;
-/// - returns an error for open or branching intersection graphs.
+/// - keeps each contour's winding, so a hole stays a hole and a second shell
+///   stays material;
+/// - joins open outlines in stages, nearest endpoints first;
+/// - returns an error only for a gap the last stage cannot bridge.
 ///
-/// It does not repair meshes, union overlapping shells or interpret facet
-/// winding as material semantics yet. Those are explicit future milestones.
+/// Overlapping shells are left overlapping; uniting them is the region
+/// builder's job.
 pub fn slice_mesh(mesh: &Mesh, plane: SlicePlane) -> Result<SliceLayer, SliceError> {
+    slice_mesh_with(mesh, plane, SliceOptions::default())
+}
+
+/// Slices a mesh at one plane with explicit closing options.
+pub fn slice_mesh_with(
+    mesh: &Mesh,
+    plane: SlicePlane,
+    options: SliceOptions,
+) -> Result<SliceLayer, SliceError> {
     slice_mesh_candidates(
         mesh,
         plane,
         0..mesh.triangle_count(),
         mesh.triangle_count(),
-        mesh.diagnostics().boundary_edges == 0,
+        options,
     )
 }
 
@@ -522,7 +576,7 @@ fn slice_mesh_candidates<I>(
     plane: SlicePlane,
     candidates: I,
     candidate_count: usize,
-    watertight: bool,
+    options: SliceOptions,
 ) -> Result<SliceLayer, SliceError>
 where
     I: IntoIterator<Item = usize>,
@@ -531,8 +585,9 @@ where
         triangles_tested: candidate_count,
         ..SliceDiagnostics::default()
     };
+    let close_gaps = options.close_gaps.clamp(0.0, MAX_CLOSE_GAPS);
 
-    let mut unique_segments = BTreeSet::<Segment2>::new();
+    let mut unique_segments = BTreeMap::<Segment2, Directed>::new();
 
     for triangle_index in candidates {
         if mesh.triangle_is_degenerate(triangle_index) {
@@ -552,12 +607,18 @@ where
         deduplicate_points(&mut points);
 
         if points.len() == 2 {
-            let (a, b) = if points[0] < points[1] {
-                (points[0], points[1])
-            } else {
-                (points[1], points[0])
-            };
-            unique_segments.insert(Segment2::new(a, b)?);
+            let segment = directed_chord(points[0], points[1], a, b, c);
+            let key = segment.key()?;
+            match unique_segments.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(segment);
+                }
+                std::collections::btree_map::Entry::Occupied(slot) => {
+                    if slot.get().to == segment.from {
+                        slot.remove();
+                    }
+                }
+            }
             diagnostics.raw_segments += 1;
             diagnostics.intersecting_triangles += 1;
         }
@@ -565,10 +626,9 @@ where
 
     diagnostics.duplicate_segments_removed = diagnostics.raw_segments - unique_segments.len();
 
-    let segments: Vec<Segment2> = unique_segments.into_iter().collect();
-    let mut contours = stitch_contours(&segments, &mut diagnostics, watertight)?;
+    let segments: Vec<Directed> = unique_segments.into_values().collect();
+    let mut contours = stitch_contours(&segments, &mut diagnostics, close_gaps)?;
 
-    normalize_by_nesting(&mut contours);
     contours.sort_by(|left, right| {
         right
             .signed_area2()
@@ -610,6 +670,15 @@ pub fn slice_mesh_layers_lenient(
     mesh: &Mesh,
     schedule: &LayerSchedule,
 ) -> Vec<Result<SliceLayer, SliceError>> {
+    slice_mesh_layers_with(mesh, schedule, SliceOptions::default())
+}
+
+/// Slices every scheduled layer with explicit closing options, keeping failures.
+pub fn slice_mesh_layers_with(
+    mesh: &Mesh,
+    schedule: &LayerSchedule,
+    options: SliceOptions,
+) -> Vec<Result<SliceLayer, SliceError>> {
     // Each triangle is assigned only to scheduled planes within its Z range.
     // Very tall triangles can overlap a large number of layers; cap the total
     // index references and use the simple reference path if bucketing would
@@ -641,12 +710,10 @@ pub fn slice_mesh_layers_lenient(
         }
     }
 
-    let watertight = mesh.diagnostics().boundary_edges == 0;
-
     if should_fallback {
         return layer_specs
             .iter()
-            .map(|layer| slice_mesh(mesh, SlicePlane { z: layer.slice_z }))
+            .map(|layer| slice_mesh_with(mesh, SlicePlane { z: layer.slice_z }, options))
             .collect();
     }
 
@@ -657,10 +724,36 @@ pub fn slice_mesh_layers_lenient(
             SlicePlane { z: layer.slice_z },
             candidates.iter().copied(),
             candidates.len(),
-            watertight,
+            options,
         ));
     }
     layers
+}
+
+/// Orients a triangle/plane chord so that material lies on its left.
+///
+/// The chord is the intersection of the triangle's plane with a horizontal
+/// plane, so it is perpendicular to the horizontal part of the triangle's
+/// outward normal. That perpendicular, rotated a quarter turn, is the direction
+/// a boundary of the cross-section runs when the solid is on its left; the two
+/// endpoints only have to be put in that order.
+fn directed_chord(p: Point2, q: Point2, a: Point3, b: Point3, c: Point3) -> Directed {
+    let normal_x = (b.y as i128 - a.y as i128) * (c.z as i128 - a.z as i128)
+        - (b.z as i128 - a.z as i128) * (c.y as i128 - a.y as i128);
+    let normal_y = (b.z as i128 - a.z as i128) * (c.x as i128 - a.x as i128)
+        - (b.x as i128 - a.x as i128) * (c.z as i128 - a.z as i128);
+    let along_x = -normal_y;
+    let along_y = normal_x;
+    let dot = (q.x() as i128 - p.x() as i128) * along_x + (q.y() as i128 - p.y() as i128) * along_y;
+    if dot > 0 {
+        Directed { from: p, to: q }
+    } else if dot < 0 {
+        Directed { from: q, to: p }
+    } else if p < q {
+        Directed { from: p, to: q }
+    } else {
+        Directed { from: q, to: p }
+    }
 }
 
 fn collect_edge_intersection(
@@ -741,256 +834,257 @@ fn deduplicate_points(points: &mut Vec<Point2>) {
 }
 
 fn stitch_contours(
-    segments: &[Segment2],
+    segments: &[Directed],
     diagnostics: &mut SliceDiagnostics,
-    watertight: bool,
+    close_gaps: f64,
 ) -> Result<Vec<Contour>, SliceError> {
     if segments.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut adjacency = BTreeMap::<Point2, Vec<usize>>::new();
-    for (segment_index, segment) in segments.iter().enumerate() {
-        adjacency
-            .entry(segment.a())
-            .or_default()
-            .push(segment_index);
-        adjacency
-            .entry(segment.b())
-            .or_default()
-            .push(segment_index);
+    let mut outgoing = BTreeMap::<Point2, Vec<usize>>::new();
+    let mut incoming_count = BTreeMap::<Point2, usize>::new();
+    for (index, segment) in segments.iter().enumerate() {
+        outgoing.entry(segment.from).or_default().push(index);
+        *incoming_count.entry(segment.to).or_default() += 1;
     }
 
-    let mut branching = false;
-    for (point, incident) in &adjacency {
-        match incident.len() {
-            2 => {}
-            1 if !watertight => return Err(SliceError::OpenContour { endpoint: *point }),
-            degree => {
-                branching = true;
-                if degree > 2 {
-                    diagnostics.branch_points += 1;
-                }
-            }
+    let mut used = vec![false; segments.len()];
+    for (point, indices) in &outgoing {
+        let arrivals = incoming_count.get(point).copied().unwrap_or(0);
+        if arrivals + indices.len() > 2 {
+            diagnostics.branch_points += 1;
         }
     }
-
-    if !branching {
-        return stitch_closed(segments, &adjacency);
-    }
-
-    // A point where three segments meet, or where only one does, cannot be one
-    // closed outline: the surface touches itself or carries a crack. The
-    // reference slicers resolve both with a boolean union of the outlines.
-    // Without one, every dangling end is pruned first - a chain of segments
-    // that hangs off the outline is a fragment of that union, not an outline -
-    // and what is left is walked as trails, each continuing along the
-    // straightest edge. The alternative, which this replaced, was emptying the
-    // whole layer and telling the user a layer was missing.
-    let mut degree: BTreeMap<Point2, usize> = adjacency
-        .iter()
-        .map(|(point, list)| (*point, list.len()))
+    let mut open_started: Vec<Point2> = outgoing
+        .keys()
+        .copied()
+        .filter(|point| incoming_count.get(point).copied().unwrap_or(0) == 0)
         .collect();
-    let mut dropped = vec![false; segments.len()];
-    loop {
-        let dangling = degree
-            .iter()
-            .find(|(_, count)| **count == 1)
-            .map(|(point, _)| *point);
-        let Some(end) = dangling else {
-            break;
-        };
-        let incident = adjacency
-            .get(&end)
-            .into_iter()
-            .flatten()
-            .find(|&&index| !dropped[index])
-            .copied();
-        let Some(index) = incident else {
-            break;
-        };
-        dropped[index] = true;
-        let other = segments[index].other_endpoint(end);
-        *degree.get_mut(&end).expect("a counted point") -= 1;
-        if let Some(other) = other {
-            let count = degree.get_mut(&other).expect("a counted point");
-            *count -= 1;
-            if *count >= 2 {
-                diagnostics.contours_dropped += 1;
+    open_started.sort();
+
+    let mut trails: Vec<(Vec<Point2>, bool)> = Vec::new();
+    for start in open_started {
+        if let Some(trail) = walk(start, segments, &outgoing, &mut used) {
+            trails.push(trail);
+        }
+    }
+    for indices in outgoing.values() {
+        for &index in indices {
+            if used[index] {
+                continue;
+            }
+            if let Some(trail) = walk(segments[index].from, segments, &outgoing, &mut used) {
+                trails.push(trail);
             }
         }
     }
 
-    let mut visited = dropped;
-    let mut contours = Vec::new();
-    for first_edge in 0..segments.len() {
-        if visited[first_edge] {
-            continue;
-        }
-        let start = segments[first_edge].a();
-        let mut current = start;
-        let mut incoming: Option<V2ish> = None;
-        let mut points = vec![start];
-        let mut closed = false;
-        let mut steps = 0_usize;
-        while let Some(next_edge) =
-            best_continuation(segments, &adjacency, &visited, current, incoming)
-        {
-            visited[next_edge] = true;
-            let next = segments[next_edge]
-                .other_endpoint(current)
-                .expect("an incident segment ends where it was found");
-            incoming = Some(V2ish {
-                x: (next.x() - current.x()) as f64,
-                y: (next.y() - current.y()) as f64,
-            });
-            if next == start {
-                closed = true;
-                break;
-            }
-            points.push(next);
-            current = next;
-            steps += 1;
-            if steps > segments.len() {
-                break;
-            }
-        }
-        if closed && points.len() >= 3 {
-            contours.push(Contour::new(points).map_err(SliceError::InvalidContour)?);
+    let mut contours: Vec<Contour> = Vec::new();
+    let mut open: Vec<Vec<Point2>> = Vec::new();
+    let mut hangs: Vec<bool> = Vec::new();
+    for (trail, chose_at_junction) in trails {
+        if trail.len() >= 4 && trail.first() == trail.last() {
+            contours.push(Contour::new(trail).map_err(SliceError::InvalidContour)?);
         } else {
-            diagnostics.contours_dropped += 1;
+            let start_junction = outgoing
+                .get(&trail[0])
+                .is_some_and(|indices| indices.len() > 1);
+            hangs.push(chose_at_junction || start_junction);
+            open.push(trail);
         }
     }
-    Ok(contours)
-}
 
-#[derive(Clone, Copy)]
-struct V2ish {
-    x: f64,
-    y: f64,
-}
+    let limit = close_gaps.clamp(0.0, MAX_CLOSE_GAPS);
+    let mut stages: Vec<f64> = GAP_LADDER
+        .iter()
+        .copied()
+        .filter(|stage| *stage <= limit)
+        .collect();
+    if stages.last().is_none_or(|last| *last < limit) {
+        stages.push(limit);
+    }
 
-/// The unused segment at `at` that continues the trail with the least turning.
-fn best_continuation(
-    segments: &[Segment2],
-    adjacency: &BTreeMap<Point2, Vec<usize>>,
-    visited: &[bool],
-    at: Point2,
-    incoming: Option<V2ish>,
-) -> Option<usize> {
-    let candidates = adjacency.get(&at)?;
-    let mut best: Option<(usize, f64)> = None;
-    for &index in candidates {
-        if visited[index] {
-            continue;
-        }
-        let other = segments[index].other_endpoint(at)?;
-        let step = V2ish {
-            x: (other.x() - at.x()) as f64,
-            y: (other.y() - at.y()) as f64,
-        };
-        let score = match incoming {
-            Some(dir) => {
-                let (na, nb) = (
-                    (dir.x * dir.x + dir.y * dir.y).sqrt(),
-                    (step.x * step.x + step.y * step.y).sqrt(),
-                );
-                if na == 0.0 || nb == 0.0 {
-                    -1.0
+    let mut closed: Vec<bool> = vec![false; open.len()];
+    let mut dropped: Vec<bool> = vec![false; open.len()];
+    loop {
+        for stage in &stages {
+            let budget = mm_to_coord(*stage)?;
+            let budget_squared = (budget as i128) * (budget as i128);
+            loop {
+                let mut best: Option<(i128, Point2, Point2, usize, usize)> = None;
+                for i in 0..open.len() {
+                    if closed[i] {
+                        continue;
+                    }
+                    let end = *open[i].last().expect("a trail has a point");
+                    for j in 0..open.len() {
+                        if closed[j] {
+                            continue;
+                        }
+                        let start = open[j][0];
+                        let distance = gap_squared(end, start);
+                        if distance > budget_squared {
+                            continue;
+                        }
+                        let candidate = (distance, end, start, i, j);
+                        if best.is_none_or(|current| candidate < current) {
+                            best = Some(candidate);
+                        }
+                    }
+                }
+                let Some((distance, _, _, i, j)) = best else {
+                    break;
+                };
+                if i == j {
+                    closed[i] = true;
                 } else {
-                    (dir.x * step.x + dir.y * step.y) / (na * nb)
+                    let tail = std::mem::take(&mut open[j]);
+                    open[i].extend(tail.into_iter().skip(1));
+                    hangs[i] |= hangs[j];
+                    closed[j] = true;
+                }
+                if distance > 0 {
+                    diagnostics.gaps_closed += 1;
+                    diagnostics.gap_closed_nm = diagnostics.gap_closed_nm.max(budget);
                 }
             }
-            None => 0.0,
-        };
-        if best.is_none_or(|(_, best_score)| score > best_score) {
-            best = Some((index, score));
-        }
-    }
-    best.map(|(index, _)| index)
-}
-
-fn stitch_closed(
-    segments: &[Segment2],
-    adjacency: &BTreeMap<Point2, Vec<usize>>,
-) -> Result<Vec<Contour>, SliceError> {
-    let mut visited = vec![false; segments.len()];
-    let mut contours = Vec::new();
-
-    for first_edge in 0..segments.len() {
-        if visited[first_edge] {
-            continue;
-        }
-
-        let start = segments[first_edge].a();
-        let mut current = start;
-        let mut edge_index = first_edge;
-        let mut points = vec![start];
-        let mut steps = 0_usize;
-
-        loop {
-            if visited[edge_index] {
-                return Err(SliceError::TraversalDidNotClose);
-            }
-            visited[edge_index] = true;
-
-            let next = segments[edge_index]
-                .other_endpoint(current)
-                .ok_or(SliceError::TraversalDidNotClose)?;
-
-            if next == start {
+            if closed.iter().all(|done| *done) {
                 break;
             }
-
-            points.push(next);
-
-            let incident = adjacency
-                .get(&next)
-                .ok_or(SliceError::TraversalDidNotClose)?;
-            let next_edge = if incident[0] == edge_index {
-                incident[1]
-            } else {
-                incident[0]
-            };
-
-            current = next;
-            edge_index = next_edge;
-            steps += 1;
-
-            if steps > segments.len() {
-                return Err(SliceError::TraversalDidNotClose);
-            }
         }
+        if closed.iter().all(|done| *done) {
+            break;
+        }
+        let fragment = (0..open.len()).find(|index| !closed[*index] && hangs[*index]);
+        let Some(index) = fragment else {
+            diagnostics.contours_dropped += 1;
+            let index = (0..open.len())
+                .find(|index| !closed[*index])
+                .expect("a trail is still open");
+            return Err(SliceError::OpenContour {
+                endpoint: *open[index].last().expect("a trail has a point"),
+            });
+        };
+        closed[index] = true;
+        dropped[index] = true;
+        diagnostics.contours_dropped += 1;
+    }
 
-        let contour = Contour::new(points).map_err(SliceError::InvalidContour)?;
-        contours.push(contour);
+    for (index, trail) in open.into_iter().enumerate() {
+        if dropped[index] || trail.len() < 3 {
+            continue;
+        }
+        contours.push(Contour::new(trail).map_err(SliceError::InvalidContour)?);
     }
 
     Ok(contours)
 }
 
-fn normalize_by_nesting(contours: &mut [Contour]) {
-    let areas: Vec<i128> = contours
-        .iter()
-        .map(|contour| contour.signed_area2().abs())
-        .collect();
-    let sample_points: Vec<Point2> = contours.iter().map(|contour| contour.points()[0]).collect();
-
-    for index in 0..contours.len() {
-        let depth = contours
-            .iter()
-            .enumerate()
-            .filter(|(other_index, other)| {
-                *other_index != index
-                    && areas[*other_index] > areas[index]
-                    && other.locate(sample_points[index]) == PointLocation::Inside
-            })
-            .count();
-
-        contours[index].normalize_winding(depth % 2 == 0);
-    }
+/// Squared distance between two lattice points, without overflowing `i64`.
+fn gap_squared(a: Point2, b: Point2) -> i128 {
+    let dx = b.x() as i128 - a.x() as i128;
+    let dy = b.y() as i128 - a.y() as i128;
+    dx * dx + dy * dy
 }
 
+/// How a branch is ranked: it continues somewhere, it turns least, it comes first.
+type Choice = (bool, i128, std::cmp::Reverse<usize>);
+
+/// Follows unused segments from `start`, keeping the straightest way at a branch.
+///
+/// The flag is true when the walk had to choose between two unused segments, so
+/// the trail it produced is decided by a heuristic and cannot be trusted as part
+/// of a gap that is later closed.
+fn walk(
+    start: Point2,
+    segments: &[Directed],
+    outgoing: &BTreeMap<Point2, Vec<usize>>,
+    used: &mut [bool],
+) -> Option<(Vec<Point2>, bool)> {
+    if used.iter().all(|done| *done) {
+        return None;
+    }
+    let mut points = vec![start];
+    let mut current = start;
+    let mut direction: Option<(i128, i128)> = None;
+    let mut chose = false;
+    while let Some(indices) = outgoing.get(&current) {
+        let mut best: Option<(Choice, usize)> = None;
+        let mut seen = 0_usize;
+        let mut only = 0_usize;
+        for &index in indices {
+            if used[index] {
+                continue;
+            }
+            seen += 1;
+            only = index;
+            if seen > 1 {
+                break;
+            }
+        }
+        if seen == 0 {
+            break;
+        }
+        if seen == 1 {
+            let to = segments[only].to;
+            used[only] = true;
+            direction = Some((
+                to.x() as i128 - current.x() as i128,
+                to.y() as i128 - current.y() as i128,
+            ));
+            points.push(to);
+            if to == start {
+                break;
+            }
+            current = to;
+            if points.len() > segments.len() + 1 {
+                break;
+            }
+            continue;
+        }
+        chose = true;
+        for &index in indices {
+            if used[index] {
+                continue;
+            }
+            let to = segments[index].to;
+            let step = (
+                to.x() as i128 - current.x() as i128,
+                to.y() as i128 - current.y() as i128,
+            );
+            let score = match direction {
+                Some(dir) => dir.0 * step.0 + dir.1 * step.1,
+                None => 0,
+            };
+            let continues = outgoing
+                .get(&to)
+                .is_some_and(|next| next.iter().any(|other| !used[*other]));
+            let key = (continues, score, std::cmp::Reverse(index));
+            if best.is_none_or(|(current_key, _)| key > current_key) {
+                best = Some((key, index));
+            }
+        }
+        let Some((_, index)) = best else {
+            break;
+        };
+        used[index] = true;
+        let to = segments[index].to;
+        direction = Some((
+            to.x() as i128 - current.x() as i128,
+            to.y() as i128 - current.y() as i128,
+        ));
+        points.push(to);
+        if to == start {
+            break;
+        }
+        current = to;
+        if points.len() > segments.len() + 1 {
+            break;
+        }
+    }
+    Some((points, chose))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1198,19 +1292,25 @@ mod tests {
         assert!((layer.contours.iter().map(Contour::area_mm2).sum::<f64>() - 200.0).abs() < 1e-9);
     }
 
+    fn chord(x1: i64, y1: i64, x2: i64, y2: i64) -> Directed {
+        Directed {
+            from: Point2::new(x1 * 1_000_000, y1 * 1_000_000).expect("point"),
+            to: Point2::new(x2 * 1_000_000, y2 * 1_000_000).expect("point"),
+        }
+    }
+
     #[test]
     fn a_self_touching_outline_keeps_its_closed_part() {
-        let point = |x: i64, y: i64| Point2::new(x * 1_000_000, y * 1_000_000).expect("point");
         let segments = vec![
-            Segment2::new(point(0, 0), point(10, 0)).expect("segment"),
-            Segment2::new(point(10, 0), point(10, 10)).expect("segment"),
-            Segment2::new(point(10, 10), point(0, 10)).expect("segment"),
-            Segment2::new(point(0, 10), point(0, 0)).expect("segment"),
-            Segment2::new(point(10, 0), point(20, 0)).expect("segment"),
+            chord(0, 0, 10, 0),
+            chord(10, 0, 10, 10),
+            chord(10, 10, 0, 10),
+            chord(0, 10, 0, 0),
+            chord(10, 0, 20, 0),
         ];
         let mut diagnostics = SliceDiagnostics::default();
         let contours =
-            stitch_contours(&segments, &mut diagnostics, true).expect("a closed mesh is walked");
+            stitch_contours(&segments, &mut diagnostics, 2.0).expect("a closed mesh is walked");
 
         assert_eq!(diagnostics.branch_points, 1);
         assert_eq!(contours.len(), 1);
@@ -1219,24 +1319,48 @@ mod tests {
     }
 
     #[test]
-    fn an_open_outline_stays_an_error_on_a_mesh_with_a_hole() {
-        let point = |x: i64, y: i64| Point2::new(x * 1_000_000, y * 1_000_000).expect("point");
+    fn an_open_outline_is_an_error_until_the_gap_limit_reaches_it() {
         let segments = vec![
-            Segment2::new(point(0, 0), point(10, 0)).expect("segment"),
-            Segment2::new(point(10, 0), point(10, 10)).expect("segment"),
-            Segment2::new(point(10, 10), point(0, 10)).expect("segment"),
-            Segment2::new(point(0, 10), point(0, 0)).expect("segment"),
-            Segment2::new(point(10, 0), point(20, 0)).expect("segment"),
+            chord(0, 0, 10, 0),
+            chord(10, 0, 10, 10),
+            chord(10, 10, 0, 10),
         ];
         let mut diagnostics = SliceDiagnostics::default();
-        let error = stitch_contours(&segments, &mut diagnostics, false)
-            .expect_err("a mesh with a hole must not be guessed");
-
+        let error = stitch_contours(&segments, &mut diagnostics, 2.0)
+            .expect_err("a 10 mm gap is not guessed away");
         assert!(matches!(error, SliceError::OpenContour { .. }), "{error}");
+
+        let mut diagnostics = SliceDiagnostics::default();
+        let contours = stitch_contours(&segments, &mut diagnostics, 10.0)
+            .expect("a limit of 10 mm bridges a 10 mm gap");
+        assert_eq!(contours.len(), 1);
+        assert!((contours[0].area_mm2() - 100.0).abs() < 1e-6);
+        assert_eq!(diagnostics.gaps_closed, 1);
+        assert_eq!(diagnostics.gap_closed_nm, 10_000_000);
     }
 
     #[test]
-    fn nested_contours_are_classified_as_outer_and_hole() {
+    fn a_hairline_gap_closes_at_the_first_stage() {
+        let segments = vec![
+            chord(0, 0, 10, 0),
+            chord(10, 0, 10, 10),
+            chord(10, 10, 0, 10),
+            Directed {
+                from: Point2::new(0, 10_000_000).expect("point"),
+                to: Point2::new(0, 1_000).expect("point"),
+            },
+        ];
+        let mut diagnostics = SliceDiagnostics::default();
+        let contours = stitch_contours(&segments, &mut diagnostics, 2.0)
+            .expect("a one micrometre gap is closed");
+        assert_eq!(contours.len(), 1);
+        assert_eq!(diagnostics.gaps_closed, 1);
+        assert_eq!(diagnostics.gap_closed_nm, 1_000);
+        assert!((contours[0].area_mm2() - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn nested_contours_keep_the_winding_the_mesh_gave_them() {
         let mesh = combine_boxes(&[
             (0.0, 0.0, 0.0, 30.0, 30.0, 10.0),
             (10.0, 10.0, 0.0, 10.0, 10.0, 10.0),
@@ -1245,14 +1369,9 @@ mod tests {
             slice_mesh(&mesh, SlicePlane::from_mm(5.0).expect("plane")).expect("nested contours");
 
         assert_eq!(layer.contours.len(), 2);
-        assert!(layer.contours[0].is_ccw());
-        assert!(!layer.contours[1].is_ccw());
-        let net_area = layer
-            .contours
-            .iter()
-            .map(Contour::signed_area_mm2)
-            .sum::<f64>();
-        assert!((net_area - 800.0).abs() < 1e-9);
+        assert!(layer.contours.iter().all(Contour::is_ccw));
+        assert!((layer.contours[0].area_mm2() - 900.0).abs() < 1e-9);
+        assert!((layer.contours[1].area_mm2() - 100.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1304,7 +1423,7 @@ mod tests {
         let svg = layer.to_svg(1.0).expect("SVG");
         assert!(svg.contains("width=\"22.000000mm\""));
         assert!(svg.contains("height=\"12.000000mm\""));
-        assert!(svg.contains("fill-rule=\"evenodd\""));
+        assert!(svg.contains("fill-rule=\"nonzero\""));
         assert!(svg.contains('Z'));
     }
 

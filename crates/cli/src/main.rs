@@ -107,6 +107,7 @@ Infill:
   --skin-top <n>              Solid layers under a top surface (default 5).
   --skin-bottom <n>           Solid layers above a bottom surface (default 4).
   --closing-radius <mm>       Fill cracks narrower than twice this while slicing
+  --close-gaps <mm>           Bridge outline gaps up to this wide (default 2, max 10)
                               (default 0.049, 0 disables).
   --resolution <mm>           Drop slice detail below this deviation; 0 keeps
                               every vertex (default 0).
@@ -201,6 +202,7 @@ struct Options {
     elephant_foot: Option<f64>,
     xy_size: Option<f64>,
     closing_radius: Option<f64>,
+    close_gaps: Option<f64>,
     resolution: Option<f64>,
     max_bridge_length: Option<f64>,
     cross_hatch: Option<bool>,
@@ -256,6 +258,7 @@ impl Options {
             elephant_foot: None,
             xy_size: None,
             closing_radius: None,
+            close_gaps: None,
             resolution: None,
             max_bridge_length: None,
             cross_hatch: None,
@@ -308,6 +311,9 @@ impl Options {
         }
         if let Some(v) = self.closing_radius {
             self.settings.closing_radius = v;
+        }
+        if let Some(v) = self.close_gaps {
+            self.settings.close_gaps = v.clamp(0.0, hfw_engine::MAX_CLOSE_GAPS);
         }
         if let Some(v) = self.resolution {
             self.settings.resolution = v;
@@ -751,6 +757,12 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.closing_radius = Some(number(
                     &next_value(&mut arguments, "--closing-radius")?,
                     "--closing-radius",
+                )?)
+            }
+            "--close-gaps" => {
+                o.close_gaps = Some(number(
+                    &next_value(&mut arguments, "--close-gaps")?,
+                    "--close-gaps",
                 )?)
             }
             "--resolution" => {
@@ -1714,6 +1726,7 @@ fn plate_job(
 
     let mut job = Job {
         mesh_diagnostics: diagnostics,
+        repair: hfw_engine::MeshRepairReport::default(),
         layers: Vec::new(),
         metrics: Vec::new(),
         volume: (0.0, 0.0),

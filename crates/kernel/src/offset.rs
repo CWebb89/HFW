@@ -125,8 +125,8 @@ fn operated(a: &[Vec<V2>], b: &[Vec<V2>], rule: OverlayRule) -> Vec<Vec<V2>> {
         };
     }
     let origin = origin_of(&[a, b]);
-    let subj = snap(a, origin);
-    let clip = snap(b, origin);
+    let subj = snap_shapes(a, origin);
+    let clip = snap_shapes(b, origin);
     unsnap(subj.overlay(&clip, rule, FillRule::Positive), origin)
 }
 
@@ -180,28 +180,101 @@ fn origin_of(sets: &[&[Vec<V2>]]) -> V2 {
     (low + high) * 0.5
 }
 
-/// Snaps rings onto the lattice and drops what the snap made degenerate.
+/// Snaps rings onto the lattice, nesting them into shapes the integer engine
+/// reads as filled sets.
+///
+/// Snaps rings onto the lattice, one shape per ring.
+///
+/// This is what the offset engine wants: it takes each shape with its own
+/// winding and resolves the displacement by the winding number of the whole
+/// soup, so a hole is a clockwise ring beside its outline, not a contour of it.
 fn snap(rings: &[Vec<V2>], origin: V2) -> IntShapes<i32> {
     let mut shapes = IntShapes::new();
     for ring in rings {
-        let mut contour: IntContour<i32> = IntContour::new();
-        for p in ring {
-            let q = IntPoint::new(
-                ((p.x - origin.x) * UNITS_PER_MM).round() as i32,
-                ((p.y - origin.y) * UNITS_PER_MM).round() as i32,
-            );
-            if contour.last() != Some(&q) {
-                contour.push(q);
-            }
-        }
-        if contour.len() > 1 && contour.first() == contour.last() {
-            contour.pop();
-        }
-        if contour.len() >= 3 {
-            shapes.push(vec![contour]);
+        match snapped(ring, origin) {
+            Some(contour) => shapes.push(vec![contour]),
+            None => continue,
         }
     }
     shapes
+}
+
+/// One ring snapped to the lattice, or `None` when the snap left it degenerate.
+fn snapped(ring: &[V2], origin: V2) -> Option<IntContour<i32>> {
+    let mut contour: IntContour<i32> = IntContour::new();
+    for p in ring {
+        let q = IntPoint::new(
+            ((p.x - origin.x) * UNITS_PER_MM).round() as i32,
+            ((p.y - origin.y) * UNITS_PER_MM).round() as i32,
+        );
+        if contour.last() != Some(&q) {
+            contour.push(q);
+        }
+    }
+    if contour.len() > 1 && contour.first() == contour.last() {
+        contour.pop();
+    }
+    (contour.len() >= 3).then_some(contour)
+}
+
+/// Snaps rings onto the lattice, nesting them into shapes a Boolean reads as a
+/// filled set.
+///
+/// A ring's depth decides whether it adds material or removes it: an even depth
+/// is an outline, an odd depth a hole. Orienting them that way before the
+/// overlay is what makes the operations independent of which way a caller wound
+/// its input, and putting each hole inside its own outline's shape is what the
+/// integer fill rule requires — a lone clockwise contour is a negative area, not
+/// a hole in anything.
+fn snap_shapes(rings: &[Vec<V2>], origin: V2) -> IntShapes<i32> {
+    let mut kept: Vec<Vec<V2>> = Vec::with_capacity(rings.len());
+    let mut contours: Vec<IntContour<i32>> = Vec::with_capacity(rings.len());
+    for ring in rings {
+        if let Some(contour) = snapped(ring, origin) {
+            kept.push(ring.clone());
+            contours.push(contour);
+        }
+    }
+
+    let depths: Vec<usize> = (0..kept.len())
+        .map(|i| {
+            (0..kept.len())
+                .filter(|&j| j != i && crate::geom::ring_contains(&kept[j], kept[i][0]))
+                .count()
+        })
+        .collect();
+
+    let mut shapes = IntShapes::new();
+    for (index, contour) in contours.iter().enumerate() {
+        if depths[index] % 2 != 0 {
+            continue;
+        }
+        let mut shape: Vec<IntContour<i32>> = vec![oriented(contour, true)];
+        for (other, candidate) in contours.iter().enumerate() {
+            if depths[other] == depths[index] + 1
+                && crate::geom::ring_contains(&kept[index], kept[other][0])
+            {
+                shape.push(oriented(candidate, false));
+            }
+        }
+        shapes.push(shape);
+    }
+    shapes
+}
+
+/// Returns the contour wound the way its role asks, reversing if needed.
+fn oriented(contour: &IntContour<i32>, counter_clockwise: bool) -> IntContour<i32> {
+    let mut area = 0_i128;
+    for index in 0..contour.len() {
+        let a = contour[index];
+        let b = contour[(index + 1) % contour.len()];
+        area += (a.x as i128) * (b.y as i128) - (b.x as i128) * (a.y as i128);
+    }
+    let mut out = contour.clone();
+    if (area > 0) != counter_clockwise {
+        out.reverse();
+    }
+    out
 }
 
 /// Area below which a ring is lattice debris rather than geometry.

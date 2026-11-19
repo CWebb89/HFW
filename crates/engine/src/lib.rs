@@ -12,7 +12,7 @@
 
 use hfw_geometry::Contour;
 use hfw_infill::{infill_layer as generate_infill, Combine};
-use hfw_kernel::{Region, V2};
+use hfw_kernel::Region;
 use hfw_slicing::{LayerSchedule, SliceError, SliceLayer};
 use hfw_support::SupportParams;
 use hfw_toolpath::{evaluate, evaluate_full, extruded_volume, PlannedLayer};
@@ -27,7 +27,9 @@ pub use hfw_mesh::{
     load_3mf_objects, three_mf_metadata, Mesh, MeshDiagnostics, MeshError, MeshRepairReport,
     MeshTransform, ModelObject,
 };
-pub use hfw_slicing::{slice_mesh, SliceError as SlicingError, SliceLayer as Slice};
+pub use hfw_slicing::{
+    slice_mesh, SliceError as SlicingError, SliceLayer as Slice, MAX_CLOSE_GAPS,
+};
 pub use hfw_support::{
     Style as SupportStyle, SupportParams as SupportSettings, SupportPattern as SupportFill,
 };
@@ -84,6 +86,15 @@ pub struct Settings {
     /// of the mesh, not a feature, and a crack that wide prints as a seam rather
     /// than a wall.
     pub closing_radius: f64,
+    /// Largest gap between two outline endpoints that slice-time closing may
+    /// bridge, in millimetres.
+    ///
+    /// Slice assembly joins the nearest open endpoints in stages — a nanometre,
+    /// a micrometre, a tenth of a millimetre, a millimetre, then this value —
+    /// so a mesh whose facets almost meet is closed at the smallest gap that
+    /// works. Anything still open at this limit is reported per layer, and is
+    /// fatal under [`Settings::strict_slices`].
+    pub close_gaps: f64,
     /// Maximum deviation allowed when simplifying a sliced cross-section, in
     /// millimetres. Zero keeps every vertex the slice produced.
     pub resolution: f64,
@@ -163,6 +174,7 @@ impl Settings {
             elephant_foot: 0.0,
             xy_size: 0.0,
             closing_radius: 0.049,
+            close_gaps: 2.0,
             resolution: 0.0,
             brim_side: BrimSide::Outer,
             measure_overhang: false,
@@ -188,6 +200,8 @@ impl Default for Settings {
 pub enum EngineError {
     /// Slicing failed: bad layer height, open cross-section, or bad input range.
     Slice(SliceError),
+    /// The always-on mesh preparation could not rebuild the mesh.
+    Mesh(MeshError),
     /// Spiral vase and support were asked for at once.
     ///
     /// A vase is one wall that climbs continuously; a support pillar is a solid
@@ -202,10 +216,17 @@ impl From<SliceError> for EngineError {
     }
 }
 
+impl From<MeshError> for EngineError {
+    fn from(error: MeshError) -> Self {
+        EngineError::Mesh(error)
+    }
+}
+
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EngineError::Slice(e) => write!(f, "slicing failed: {e}"),
+            EngineError::Mesh(e) => write!(f, "mesh preparation failed: {e}"),
             EngineError::VaseWithSupport => write!(
                 f,
                 "spiral vase mode cannot carry support; clear one of the two"
@@ -221,19 +242,56 @@ impl std::error::Error for EngineError {}
 /// This is the only place where the exact integer pipeline hands over to the
 /// numerical one. Coordinates divide exactly by 1 000 000, so no rounding is
 /// introduced beyond the float conversion itself.
+///
+/// Windings are material semantics, not nesting guesses: every counter-clockwise
+/// contour adds material and every clockwise one removes it. Two shells that
+/// overlap therefore print their union, and a shell drawn inside another with
+/// the same winding is still material rather than a hole.
 pub fn region_from_contours(contours: &[Contour]) -> Region {
-    Region::new(
-        contours
+    if contours.is_empty() {
+        return Region::default();
+    }
+    let mm_ring = |c: &Contour| -> Vec<hfw_kernel::V2> {
+        c.points()
             .iter()
-            .map(|c| {
-                c.points()
-                    .iter()
-                    .map(|p| p.to_mm())
-                    .map(|xy| V2::new(xy[0], xy[1]))
-                    .collect()
-            })
-            .collect(),
-    )
+            .map(|p| p.to_mm())
+            .map(|xy| hfw_kernel::V2::new(xy[0], xy[1]))
+            .collect()
+    };
+    let mut solid: Vec<Vec<hfw_kernel::V2>> = Vec::new();
+    let mut holes: Vec<Vec<hfw_kernel::V2>> = Vec::new();
+    for contour in contours {
+        if contour.is_ccw() {
+            solid.push(mm_ring(contour));
+        } else {
+            holes.push(mm_ring(contour));
+        }
+    }
+    let mut merged: Vec<Vec<hfw_kernel::V2>> = Vec::new();
+    for ring in solid {
+        merged = if merged.is_empty() {
+            vec![ring]
+        } else {
+            hfw_kernel::union_rings(&merged, std::slice::from_ref(&ring))
+        };
+    }
+    let mut cut: Vec<Vec<hfw_kernel::V2>> = Vec::new();
+    for ring in holes {
+        cut = if cut.is_empty() {
+            vec![ring]
+        } else {
+            hfw_kernel::union_rings(&cut, std::slice::from_ref(&ring))
+        };
+    }
+    let mut rings = merged;
+    for hole in cut {
+        rings = hfw_kernel::difference_rings(&rings, std::slice::from_ref(&hole));
+    }
+    if rings.is_empty() {
+        Region::default()
+    } else {
+        Region::new(rings)
+    }
 }
 
 /// Timing and size counters for one job.
@@ -280,6 +338,8 @@ struct WallPass {
 pub struct Job {
     /// Mesh diagnostics of the mesh that was actually sliced.
     pub mesh_diagnostics: MeshDiagnostics,
+    /// What the always-on mesh preparation changed, if anything.
+    pub repair: MeshRepairReport,
     /// Layers in print order.
     pub layers: Vec<PlannedLayer>,
     /// Per-layer coverage metrics, when requested.
@@ -318,6 +378,8 @@ pub fn run(
     if settings.spiral_vase && settings.support.is_some() {
         return Err(EngineError::VaseWithSupport);
     }
+    let (prepared, repair) = mesh.repair_basic()?;
+    let mesh = &prepared;
     let t_slice = std::time::Instant::now();
     let (schedule, slices) = slice_stack(mesh, first_layer_height, layer_height, settings)?;
     let ms_slice = t_slice.elapsed().as_secs_f64() * 1e3;
@@ -681,6 +743,7 @@ pub fn run(
 
     Ok(Job {
         mesh_diagnostics: mesh.diagnostics(),
+        repair,
         layers,
         metrics,
         volume,
@@ -882,7 +945,13 @@ fn slice_stack(
         settings.min_layer_height,
         settings.max_layer_height,
     )?;
-    let slices = hfw_slicing::slice_mesh_layers_lenient(mesh, &schedule);
+    let slices = hfw_slicing::slice_mesh_layers_with(
+        mesh,
+        &schedule,
+        hfw_slicing::SliceOptions {
+            close_gaps: settings.close_gaps,
+        },
+    );
     Ok((schedule, slices))
 }
 
@@ -1136,7 +1205,7 @@ mod tests {
     }
 
     #[test]
-    fn the_bridge_normalises_hole_winding() {
+    fn the_bridge_subtracts_a_clockwise_contour_as_a_hole() {
         let outer = square_contour(20.0);
         let mut hole = Contour::new(vec![
             Point2::from_mm(5.0, 5.0).unwrap(),
@@ -1145,10 +1214,10 @@ mod tests {
             Point2::from_mm(10.0, 5.0).unwrap(),
         ])
         .unwrap();
-        hole.normalize_winding(true);
+        hole.normalize_winding(false);
         let region = region_from_contours(&[outer, hole]);
         assert_eq!(region.rings.len(), 2);
-        assert!((region.area() - (400.0 - 25.0)).abs() < 1e-9);
+        assert!((region.area() - (400.0 - 25.0)).abs() < 1e-6);
         assert_eq!(
             region
                 .rings
@@ -1157,6 +1226,35 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_counter_clockwise_shell_inside_another_stays_material() {
+        let outer = square_contour(20.0);
+        let mut inner = square_contour(5.0);
+        inner.normalize_winding(true);
+        let region = region_from_contours(&[outer, inner]);
+        assert_eq!(region.rings.len(), 1);
+        assert!((region.area() - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn two_overlapping_shells_are_united() {
+        let a = square_contour(20.0);
+        let mut b = square_contour(20.0);
+        b.normalize_winding(true);
+        let shifted: Vec<Point2> = b
+            .points()
+            .iter()
+            .map(|p| {
+                let mm = p.to_mm();
+                Point2::from_mm(mm[0] + 8.0, mm[1] + 6.0).expect("shifted point")
+            })
+            .collect();
+        let b = Contour::new(shifted).expect("shifted square");
+        let region = region_from_contours(&[a, b]);
+        assert_eq!(region.rings.len(), 1, "the shells merge into one outline");
+        assert!((region.area() - 632.0).abs() < 1e-6);
     }
 
     fn cracked_plates() -> Mesh {
