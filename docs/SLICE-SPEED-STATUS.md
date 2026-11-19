@@ -1,8 +1,50 @@
 # Slice speed and parity: where HFW stands, 2026-11-19
 
 Supersedes the plan and status sections of `docs/SLICE-SPEED-BRIEF.md` and closes
-`docs/OFFSET-BRIEF.md`. Every number here was measured on this machine today, in a
-release build, with the commands given.
+`docs/OFFSET-BRIEF.md`. Every number here was measured on this machine, in a release
+build, with the commands given.
+
+## Where the clock stands after the fifth pass, 2026-11-19
+
+All of the figures below this section that say 10.8 s for the plate were measured
+before 33b9eb9 replaced the offset ladder with a rasterised distance field. That change
+made walls area-proportional and the plate slower; this pass reversed it and took the
+two phases that then dominated. Measured again on the current build:
+
+| phase, Revolver plate, 16 threads | ms |
+|---|---:|
+| slicing | 642 |
+| compensating | 814 |
+| walls | 2,736 of work in 172 of wall clock |
+| infill | 2,289 |
+| G-code render, write and verify (29 MB) | ~8,800 |
+| **total, wall clock** | **15,758** |
+
+```
+target/release/hfw-cli "Revolver All Parts.3mf" --profile profiles/voron_klipper.cfg \
+    --gcode plate.gcode --out-dir plate
+```
+
+G-code rendering is the phase left above a second, and it is single-threaded. On the
+150-layer stress gear at one thread, where the same work is 3.4 MB, the whole run is
+2.75 s:
+
+```
+python3 scripts/make_stress_part.py 30 /tmp/g30.stl
+HFW_THREADS=1 target/release/hfw-cli /tmp/g30.stl --profile profiles/voron_klipper.cfg \
+    --gcode /tmp/g30.gcode --out-dir /tmp/g30
+```
+
+| 150-layer gear, one thread | before this pass | after |
+|---|---:|---:|
+| walls ms | 2,247 | 127 |
+| infill ms | 6,089 | 744 |
+| G-code generate ms | 4,517 | 1,249 |
+| total s | 13.88 | 2.75 |
+
+`scripts/wallbench.fish` reproduces the whole table, and `scripts/wallcov.py` the
+coverage it was bought with: 4.39% of the wall band uncovered and a 0.5 mm rib missing
+before, 0.38% and the rib covered after.
 
 ## The three slicers on the Revolver plate
 
@@ -14,8 +56,8 @@ authored — see the placement note below).
 |---|---:|---:|---:|
 | PrusaSlicer 2.9.7, Voron 2.4 350 profile | 9.4 s | 34368 mm | 82665 mm³ |
 | OrcaSlicer 2.4.2, Voron 2.4 350 machine | 14.4 s | 33048 mm | 79490 mm³ |
-| **HFW, 2 loops (the shipped profile)** | **10.8 s** | 28789 mm | 69245 mm³ |
-| **HFW, 3 loops (matched to the two runs above)** | **11.6 s** | 31053 mm | 74691 mm³ |
+| **HFW, 2 loops (the shipped profile)** | **10.8 s** (before 33b9eb9; 15.8 s now) | 28789 mm | 69245 mm³ |
+| **HFW, 3 loops (matched to the two runs above)** | **11.6 s** (before 33b9eb9) | 31053 mm | 74691 mm³ |
 
 Layer height, 0.4 mm lines, 5 top and 4 bottom solid layers and 15% rectilinear
 infill are equal across all three; the perimeter count is not, and that is a

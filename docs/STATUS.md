@@ -3,8 +3,8 @@
 Written to be read in two minutes, by someone who does not work on this code.
 Every number here is measured, and the command that measures it is named.
 
-Updated 2026-11-19 (fourth pass: walls as section beads, seam placement, the gate
-re-baselined).
+Updated 2026-11-19 (fifth pass: walls back to polygon offsets, the gap pass and the
+infill scanline measured and made cheaper, the G-code router de-quadraticked).
 
 ## In one paragraph
 
@@ -32,15 +32,15 @@ deciding whether to swap.
 Two more that matter when deciding whether to trust the output:
 
 - **Against two independent slicers**, deposited plastic at 15% infill, re-measured
-  2026-11-19: cube −1.1%, torus −4.2% and cone −9.9% inside the 10% gate, the sphere at
-  −10.2% just outside it — the one row out — and `taper_wall` −23.1% with
-  `thin_wall` −24.3% under the 25% tolerances those two carry on purpose: a wall
-  narrower than a bead prints at its measured width here and at a substituted 0.4 mm by
-  both references. On the 18-part Revolver plate this engine sliced in 11.4 s against
-  PrusaSlicer's 9.4 and OrcaSlicer's 14.4 (measured 2026-11-19, before the wall stage).
-  The Orca half of that comparison cannot be re-run on the installed OrcaSlicer 2.5.1,
-  which rejects the standalone preset files the script loads; a fresh run compares
-  against PrusaSlicer alone and says so with `reference spread 0.0%` (`ORACLE.md`).
+  2026-11-19 on the current build: cube −1.0%, torus −2.6%, sphere −9.6% and cone −9.4%
+  all inside the 10% gate, and `taper_wall` −10.5% with `thin_wall` −24.3% under the
+  25% tolerances those two carry on purpose: a wall narrower than a bead prints at its
+  measured width here and at a substituted 0.4 mm by both references. On the 18-part
+  Revolver plate this engine takes **15.8 s** against PrusaSlicer's 9.4 and
+  OrcaSlicer's 14.4 (16 threads, `SLICE-SPEED-STATUS.md` has the breakdown). The Orca
+  half of the comparison runs again: `scripts/oracle.py` now loads its presets the way
+  OrcaSlicer 2.5.1 insists on, by copying the vendor tree into a datadir instead of
+  handing it standalone JSON files.
 - **Next-layer would show 175 of its 352 setting controls** with HFW as the
   engine, because the rest are settings we cannot honour. That gap is measured by
   next-layer's own gate, not by us.
@@ -49,13 +49,13 @@ Two more that matter when deciding whether to trust the output:
 
 - Parsing and slicing: STL and 3MF, exact integer geometry, plates of several
   objects, per-object overrides from a 3MF, deterministic output.
-- Walls: beads divided from each layer's measured section, so a feature narrower than
-  the perimeters it asked for is filled by its own beads rather than by a strand beside
-  them; per-feature bead widths (`outer_wall_width`, `wall_distribution_count`), the
-  profile's `resolution` as the simplification tolerance, thin walls, corner recovery,
-  size compensation, elephant-foot compensation. A classic offset ladder is kept for
-  comparison (`--mode classic`), and the gap pass survives as the fallback for a section
-  whose middle bead is a ridge rather than a level set.
+- Walls: a ladder of polygon offsets of the layer, one loop at `Params::loop_offset(i)`
+  with a miter join, and a gap pass over the strip the beads leave behind so a feature
+  narrower than its walls is printed by a strand of its measured width. Beads divided
+  from each layer's measured section are kept as `--mode field`, and a plain ladder with
+  no gap pass as `--mode classic`. Per-feature bead widths (`outer_wall_width`,
+  `wall_distribution_count`), the profile's `resolution` as the simplification tolerance,
+  thin walls, corner recovery, size compensation, elephant-foot compensation.
 - Infill: twelve patterns, per-island solid threshold, ironing, bridging, the
   two-line anchor that joins fill lines along the wall.
 - Supports: normal and tree bodies, interface layers, build-plate-only mode.
@@ -74,6 +74,32 @@ Two more that matter when deciding whether to trust the output:
 | Per-object regions and layer-height profiles | a week | next-layer's per-object UI offers settings we cannot scope to a region or a height range |
 
 ## What changed in this pass
+
+Walls went back to the polygon offset ladder, the two phases that dominated the clock
+were measured and made cheaper, and nothing about the deposited geometry moved by more
+than a per-cent:
+
+- **Walls are offsets again, and the section generator is `--mode field`.** The default
+  had been a rasterised distance field since 33b9eb9: cost proportional to the area
+  under the layer, a 0.2 mm grid resolving a 0.4 mm bead, a 0.07 mm simplification floor
+  that beveled every sharp corner, and a 0.5 mm rib that vanished because the level set
+  through its medial axis has no sign change. Loop `i` is now the layer offset inward by
+  `Params::loop_offset(i)` — the code `poly` already had — followed by the gap pass over
+  what the beads leave. On the stress gear that is 0.38% of the wall band uncovered
+  against 4.39%, a 0.266 mm maximum distance from the surface to a bead centreline
+  against 8.331, the rib covered, and 127 ms of wall work for 150 layers against 2,247.
+- **The infill scanline no longer samples the wall band.** It cut its spans on the
+  layer boundary and then asked a segment index 5.1 million times whether each 0.1 mm
+  sample was inside the wall. The spans are cut on the inset region instead, so the
+  question is answered by construction: infill on the gear fell from 6,089 ms to 746 ms.
+- **The travel router was quadratic in the layer and unbounded in the search.** Each of
+  the gear's 4,629 travels re-measured every wall loop on its layer, and a travel that
+  had no route inside its 2 mm budget exhausted the visibility graph before saying so.
+  The loops are measured once and the search is A* bounded by the budget: writing the
+  gear's G-code fell from 4,517 ms to 1,249 ms, byte-identical output.
+
+The section-bead pass that came before this one, kept because its reasoning still holds
+for `--mode field`:
 
 Walls are beads divided from each layer's measured section instead of a ladder of
 offsets, and the defects that showed up on the plate once they were are closed:
@@ -155,8 +181,10 @@ Then the last of the intake work: a machine preset's templated start G-code.
 
 ## What is left, in the order it should be done
 
-Speed is no longer the problem: 10.8 s for the plate against 9.4 and 14.4. What is
-left is spread over four things, and two of them are bigger than they look.
+Speed is no longer the problem in slicing, and G-code emission is: 15.8 s for the plate
+at 16 threads, of which 3.9 s is the engine and 8.8 s is rendering and re-reading 29 MB
+of G-code single-threaded against PrusaSlicer's 9.4 and OrcaSlicer's 14.4. What is left
+is spread over four things, and two of them are bigger than they look.
 
 1. **The band's width policy** — two pieces, in this order:
    - **`bead_area` for a slotted strand.** A `Kind::Middle` gap strand fills a slot
@@ -175,10 +203,11 @@ left is spread over four things, and two of them are bigger than they look.
    are the same question asked twice.
 2. **Per-object regions and layer-height profiles** — the settings next-layer
    exposes per object that we can only apply plate-wide. A week.
-3. **The two measured performance items** (tasks #31, #32): infill still rasterises
-   at 3.75 s and G-code writing is 3.6 s of the 10.8. Neither is needed for parity
-   and both are rewrites; do them only when 10.8 s stops being fast enough, or when
-   a job profile makes them painful. The breakdown is in `SLICE-SPEED-STATUS.md`.
+3. **The two measured performance items** (tasks #31, #32): G-code rendering is now the
+   only phase left above a second on the plate — 8.8 s of the 15.8, single-threaded,
+  29 MB — and infill is 2.29 s across 16 threads. Neither is needed for parity and both
+   are rewrites; do them only when 15.8 s stops being fast enough, or when a job profile
+   makes them painful. The breakdown is in `SLICE-SPEED-STATUS.md`.
 4. **The ledger tail that is real work**: lightning infill, snug support, external
    travel routing, slicing fill modes. Then the tiled field and internal bridges.
 

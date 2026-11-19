@@ -69,6 +69,21 @@ sum are read.
 **Conclusion: geometry, wall placement and skin extent agree with both references
 to within 1.5% on flat and curved shapes alike.**
 
+## At 15% infill, 2026-11-19 (fifth pass: offset ladder and gap pass restored)
+
+| fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean | verdict |
+|---|---:|---:|---:|---:|:--|
+| cube | 3266.5 | 3293.2 | 3307.6 | −1.0% | pass |
+| sphere | 4462.5 | 4871.6 | 4990.3 | −9.5% | pass |
+| cone | 2937.0 | 3130.4 | 3353.1 | −9.4% | pass |
+| torus | 2230.6 | 2243.2 | 2328.1 | −2.4% | pass |
+| taper_wall | 522.8 | 571.7 | 596.3 | −10.5% | pass, expected |
+| thin_wall | 76.3 | 100.8 | 100.8 | −24.3% | pass, expected |
+
+OrcaSlicer's half of the comparison runs again: `scripts/oracle.py` loads the vendor
+tree into a temporary datadir, which is the only form OrcaSlicer 2.5.1 accepts a preset
+in, so the reference is a mean of two slicers rather than PrusaSlicer alone.
+
 ## At 15% infill, 2026-11-19 (after the section-bead wall stage)
 
 | fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean | verdict |
