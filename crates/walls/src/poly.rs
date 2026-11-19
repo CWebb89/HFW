@@ -208,6 +208,15 @@ type Claims = HashMap<(i64, i64), f64>;
 /// [`crate::beads`] has its own floor in beads.
 const MIN_STRAND: f64 = 3.0;
 
+/// Share of the narrowest bead a strand must reach to be worth laying.
+///
+/// The references' own rule for the same case is half the narrowest bead they will
+/// extrude, and it is the weaker of the two here: [`MIN_STRAND`] is three of the
+/// strand's own widths, which is 0.72 mm for a bead the floor would only ask to be
+/// 0.12 mm long. It is kept as the stated floor so that a wider narrowest bead, which
+/// a first layer asks for, still moves it.
+const MIN_STRAND_OF_FLOOR: f64 = 0.5;
+
 /// Fills the uncovered remainder of a layer where it is narrower than a bead.
 pub(crate) fn gap_fill(rest: &[Vec<V2>], p: &Params, out: &mut Vec<Line>, stats: &mut Stats) {
     if rest.is_empty() {
@@ -255,7 +264,8 @@ pub(crate) fn gap_fill(rest: &[Vec<V2>], p: &Params, out: &mut Vec<Line>, stats:
                 continue;
             }
             let widest_of = sw.iter().fold(0.0f64, |a, b| a.max(*b));
-            if length_of(&sp) < MIN_STRAND * widest_of {
+            let shortest = (MIN_STRAND_OF_FLOOR * p.w_min).max(MIN_STRAND * widest_of);
+            if length_of(&sp) < shortest {
                 continue;
             }
             stats.gaps += 1;

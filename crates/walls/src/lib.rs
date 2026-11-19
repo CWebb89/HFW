@@ -635,6 +635,30 @@ mod tests {
     }
 
     #[test]
+    fn a_remainder_shorter_than_three_of_its_own_widths_is_not_a_strand() {
+        let p = Params::new(0.4, 3);
+        let mut stub = Vec::new();
+        let mut stats = Stats::default();
+        poly::gap_fill(&[rect(0.0, 0.0, 1.0, 0.5)], &p, &mut stub, &mut stats);
+        assert!(
+            stub.is_empty(),
+            "a 1 x 0.5 mm patch is a dab on the layer, got {} strand(s)",
+            stub.len()
+        );
+
+        let mut strip = Vec::new();
+        poly::gap_fill(&[rect(0.0, 0.0, 30.0, 0.5)], &p, &mut strip, &mut stats);
+        assert_eq!(strip.len(), 1, "a 30 mm strip is a strand worth laying");
+        assert_eq!(strip[0].kind, Kind::Middle);
+        let run = strip[0].length();
+        let width = strip[0].mean_width();
+        assert!(
+            run >= 3.0 * width,
+            "the strand is {run:.2} mm of {width:.2} mm width"
+        );
+    }
+
+    #[test]
     fn a_feature_narrower_than_the_floor_prints_nothing() {
         let mut p = Params::new(0.4, 2);
         p.min_feature = 1.5;
