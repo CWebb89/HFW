@@ -10,11 +10,14 @@
 //! | shape | ladder | skeletal | ratio |
 //! |---|---|---|---|
 //! | 30 × 20 rectangle | 114.2 mm² | 102.7 mm² | 0.90 |
-//! | 40 × 1 thin wall | 39.9 mm² | 39.0 mm² | 0.98 |
+//! | 40 × 1 thin wall | 32.5 mm² | 39.0 mm² | 1.20 |
 //! | radius 15 ring, 1 mm wall | 72.9 mm² | 448.0 mm² | 6.15 |
 //! | radius 10 disc | 70.9 mm² | 1809.8 mm² | 25.5 |
 //!
-//! Straight-sided and thin shapes agree within 10%. Round ones overrun, and the
+//! Straight-sided and thin shapes agree within 25%. The 40 × 1 wall is the case the
+//! ladder cannot finish: 0.4 mm loops cover 0.8 of its 1.0 mm, and the 0.2 mm strip
+//! left over is below the printable floor, so the skeletal generator — which divides the
+//! section between two 0.5 mm beads — lays down a fifth more. Round ones overrun, and the
 //! reason is structural rather than a bug: a bead count cannot change along an edge
 //! yet, so where the medial arms of a disc converge the same wall is printed many
 //! times. Closing that is what the transition stage is for, and these tests are the
@@ -94,7 +97,7 @@ fn a_rectangle_walls_match_the_ladder() {
 
 #[test]
 fn a_thin_wall_matches_the_ladder() {
-    compare("40x1 wall", vec![rect(0.0, 0.0, 40.0, 1.0)], 0.8, 1.2);
+    compare("40x1 wall", vec![rect(0.0, 0.0, 40.0, 1.0)], 0.8, 1.3);
 }
 
 #[test]

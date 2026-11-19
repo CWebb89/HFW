@@ -92,7 +92,8 @@ Walls:
                               squashed lip a part gets at the bed (default 0).
   --xy-size <mm>              Grow (+) or shrink (-) every layer; negative opens
                               holes, positive closes them (default 0).
-  --mode hfw|classic          Variable-width field walls, or plain offsets.
+  --mode hfw|classic|field    Offset ladder with gap fill, plain offsets, or
+                              variable-width beads traced from a distance field.
   --no-reference              Omit the exact slice outline from the SVG.
 
 Infill:
@@ -800,7 +801,10 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.settings.mode = match value.as_str() {
                     "hfw" => Mode::Hfw,
                     "classic" => Mode::Classic,
-                    other => return Err(format!("--mode must be hfw or classic, got {other}")),
+                    "field" => Mode::Field,
+                    other => {
+                        return Err(format!("--mode must be hfw, classic or field, got {other}"))
+                    }
                 };
             }
             "--no-reference" => o.settings.keep_reference = false,

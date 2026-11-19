@@ -35,33 +35,68 @@ pub(crate) const ARC_TOL: f64 = 0.02;
 
 /// Generates walls for one layer as a ladder of offsets.
 pub(crate) fn generate(region: &Region, p: &Params) -> Output {
-    let t_all = std::time::Instant::now();
+    let all = std::time::Instant::now();
+    let (lines, _, mut stats) = ladder(region, p, false);
+    stats.ms_total = all.elapsed().as_secs_f64() * 1e3;
+    Output { lines, stats }
+}
+
+/// Generates the same ladder, then prints what it left uncovered.
+pub(crate) fn generate_with_gaps(region: &Region, p: &Params) -> Output {
+    let all = std::time::Instant::now();
+    let (mut lines, uncovered, mut stats) = ladder(region, p, true);
+    if p.gap_fill || lines.is_empty() {
+        let t = std::time::Instant::now();
+        gap_fill(&uncovered, p, &mut lines, &mut stats);
+        stats.ms_gap = t.elapsed().as_secs_f64() * 1e3;
+    }
+    stats.ms_total = all.elapsed().as_secs_f64() * 1e3;
+    Output { lines, stats }
+}
+
+/// The ladder itself: one offset ring per requested loop.
+///
+/// Also returns the remainder the beads leave behind, which is what the gap pass
+/// prints, when the caller asked for it: tracking costs two more offsets per
+/// loop, so the plain ladder does not pay for it.
+fn ladder(region: &Region, p: &Params, track: bool) -> (Vec<Line>, Vec<Vec<V2>>, Stats) {
     let mut stats = Stats::default();
     let mut lines: Vec<Line> = Vec::new();
     if region.is_empty() {
-        return Output { lines, stats };
+        return (lines, Vec::new(), stats);
     }
     let viable = printable(region, p);
-    if !viable.is_empty() {
-        for i in 0..p.walls {
-            let offset = p.loop_offset(i);
-            if offset <= 0.0 {
-                continue;
+    if viable.is_empty() {
+        return (lines, Vec::new(), stats);
+    }
+    let mut rest: Vec<Vec<V2>> = viable.rings.clone();
+    for i in 0..p.walls {
+        let offset = p.loop_offset(i);
+        if offset <= 0.0 {
+            continue;
+        }
+        let width = p.loop_width(i);
+        let t = std::time::Instant::now();
+        let path = offset_rings(&viable.rings, -offset, ARC_TOL, Join::Miter);
+        stats.ms_offset += t.elapsed().as_secs_f64() * 1e3;
+        if path.is_empty() {
+            continue;
+        }
+        stats.loops += 1;
+        stats.rings += path.len();
+        let first = lines.len();
+        push_loops(&path, width, Kind::Side(i as u8), p, &mut lines, &mut stats);
+        if track {
+            for line in &lines[first..] {
+                rest = without_bead(&rest, std::slice::from_ref(&line.pts), offset, 0.5 * width);
             }
-            let width = p.loop_width(i);
-            let t = std::time::Instant::now();
-            let path = offset_rings(&viable.rings, -offset, ARC_TOL, Join::Miter);
-            stats.ms_offset += t.elapsed().as_secs_f64() * 1e3;
-            if path.is_empty() {
-                continue;
-            }
-            stats.loops += 1;
-            stats.rings += path.len();
-            push_loops(&path, width, Kind::Side(i as u8), p, &mut lines, &mut stats);
         }
     }
-    stats.ms_total = t_all.elapsed().as_secs_f64() * 1e3;
-    Output { lines, stats }
+    if track {
+        (lines, rest, stats)
+    } else {
+        (lines, Vec::new(), stats)
+    }
 }
 
 /// The part of a layer wide enough to print at all.
@@ -164,6 +199,15 @@ struct Sample {
 /// are one step apart. Storing the arc position is what tells those apart.
 type Claims = HashMap<(i64, i64), f64>;
 
+/// Shortest strand this generator will lay, as a multiple of its own width.
+///
+/// A strand shorter than a few of its own widths is a dab on material the loops
+/// already cover, not a wall: a soft crease or a merged fillet leaves a spot where
+/// the remainder briefly deepens past a bead, and the walk closes a stub of a run
+/// around it. The references drop them the same way, and the same reasoning is why
+/// [`crate::beads`] has its own floor in beads.
+const MIN_STRAND: f64 = 3.0;
+
 /// Fills the uncovered remainder of a layer where it is narrower than a bead.
 pub(crate) fn gap_fill(rest: &[Vec<V2>], p: &Params, out: &mut Vec<Line>, stats: &mut Stats) {
     if rest.is_empty() {
@@ -174,7 +218,7 @@ pub(crate) fn gap_fill(rest: &[Vec<V2>], p: &Params, out: &mut Vec<Line>, stats:
         return;
     }
     let floor = 0.5 * p.w;
-    let narrowest = p.min_feature.max(floor);
+    let narrowest = p.min_feature.max(p.w_min).max(floor);
     let widest = p.w_max.max(p.w);
     let bounds = region.bounds().grown(widest + p.w);
     let index = SegIndex::new(region.segments(), bounds.grown(2.0 * widest), 2.0 * widest);
@@ -208,6 +252,10 @@ pub(crate) fn gap_fill(rest: &[Vec<V2>], p: &Params, out: &mut Vec<Line>, stats:
             }
             let (sp, sw) = simplify(&pts, &widths, p.simplify, 0.05 * p.w, false);
             if sp.len() < 2 {
+                continue;
+            }
+            let widest_of = sw.iter().fold(0.0f64, |a, b| a.max(*b));
+            if length_of(&sp) < MIN_STRAND * widest_of {
                 continue;
             }
             stats.gaps += 1;

@@ -179,7 +179,7 @@ pub(crate) fn generate(region: &Region, p: &Params) -> Output {
         }
         let mut emitted: Vec<(Vec<V2>, Vec<f64>, bool)> = Vec::new();
         for (pts, w, closed) in &rings {
-            let tol = p.simplify.max(0.35 * h);
+            let tol = p.simplify;
             let (pts, ww) = crate::simplify(pts, w, tol, 0.05 * p.w, *closed);
             if length(&pts, *closed) < MIN_BEAD * p.w {
                 continue;

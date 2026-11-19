@@ -48,7 +48,7 @@ fn walls(rings: Vec<Vec<V2>>) -> (Region, f64, f64, Vec<Line>) {
     let region = Region::new(rings);
     let p = WallParams::new(0.4, 3);
     let ladder = total(&generate(&region, &p, WallMode::Classic).lines);
-    let out = generate(&region, &p, WallMode::Hfw);
+    let out = generate(&region, &p, WallMode::Field);
     let covered = total(&out.lines);
     (region, ladder, covered, out.lines)
 }
@@ -126,8 +126,8 @@ fn a_profile_outer_width_widens_the_outer_bead_and_pushes_the_rest_in() {
     let plain = WallParams::new(0.4, 3);
     let mut wide = WallParams::new(0.4, 3);
     wide.w_outer = 0.62;
-    let narrow = generate(&region, &plain, WallMode::Hfw).lines;
-    let wide = generate(&region, &wide, WallMode::Hfw).lines;
+    let narrow = generate(&region, &plain, WallMode::Field).lines;
+    let wide = generate(&region, &wide, WallMode::Field).lines;
     let outer = |lines: &[Line]| {
         lines
             .iter()
@@ -202,7 +202,7 @@ fn no_bead_leaves_the_layer() {
     let index = hfw_kernel::SegIndex::new(region.segments(), region.bounds(), 2.0);
     let inside = RegionIndex::new(&region.rings);
     let p = WallParams::new(0.4, 3);
-    let out = generate(&region, &p, WallMode::Hfw);
+    let out = generate(&region, &p, WallMode::Field);
     assert!(!out.lines.is_empty());
     for line in &out.lines {
         for q in &line.pts {
@@ -282,8 +282,8 @@ fn two_runs_of_the_same_layer_agree() {
         circle(15.0, 10.0, 6.0, 64),
     ]);
     let p = WallParams::new(0.4, 3);
-    let a = generate(&region, &p, WallMode::Hfw);
-    let b = generate(&region, &p, WallMode::Hfw);
+    let a = generate(&region, &p, WallMode::Field);
+    let b = generate(&region, &p, WallMode::Field);
     assert_eq!(a.lines.len(), b.lines.len());
     for (x, y) in a.lines.iter().zip(&b.lines) {
         assert_eq!(x.pts, y.pts, "the same layer must trace the same walls");

@@ -84,11 +84,11 @@ for model in cube sphere torus
     set -l want
     switch $model
         case cube
-            set want 1.0062
+            set want 1.0070
         case sphere
-            set want 1.0014
+            set want 1.0082
         case torus
-            set want 1.0013
+            set want 1.0220
     end
     set -l delta (math "abs($got - $want)")
     test -n "$delta"; or fail "could not compute the deviation for $model"

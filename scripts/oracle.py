@@ -250,18 +250,31 @@ def slice_hfw(args, model, work, log):
 
 
 def slice_orca(args, model, work, log):
+    """OrcaSlicer reads a preset only if it sits inside the bundle it loaded.
+
+    OrcaSlicer 2.5 refuses a preset written to a temporary directory — it resolves
+    `--load-settings` against the presets of the datadir — so the system tree is
+    copied into the work directory and the process preset is edited in place. It
+    also refuses a preset that states `use_relative_e_distances` at all, so the key
+    is left out and the flow parser reads absolute E, which is what the preset
+    already defaults to.
+    """
     out = os.path.join(work, "orca")
     os.makedirs(out, exist_ok=True)
     if not ORCA_ROOT:
         print("missing OrcaSlicer Voron presets; looked in: "
               + ", ".join(r for r in ORCA_ROOTS if r), file=sys.stderr)
         return None
-    machine = json.load(open(ORCA_MACHINE))
+    data = os.path.join(work, "orca-datadir")
+    system = os.path.join(data, "system")
+    if not os.path.isdir(system):
+        shutil.copytree(ORCA_ROOT, system)
+    machine_path = os.path.join(system, os.path.relpath(ORCA_MACHINE, ORCA_ROOT))
+    process_path = os.path.join(system, os.path.relpath(ORCA_PROCESS, ORCA_ROOT))
+    machine = json.load(open(machine_path))
     machine["layer_gcode"] = "G92 E0"
-    process = json.load(open(ORCA_PROCESS))
+    process = json.load(open(process_path))
     process.update({
-        "name": "hfw-oracle",
-        "from": "User",
         "compatible_printers": [machine["name"]],
         "compatible_printers_condition": "",
         "layer_height": str(args.layer_height),
@@ -286,14 +299,11 @@ def slice_orca(args, model, work, log):
         "gcode_comments": "1",
         "exclude_object": "0",
         "seam_position": "nearest",
-        "use_relative_e_distances": "0",
     })
-    process.pop("setting_id", None)
-    machine_path = os.path.join(work, "orca_machine.json")
-    process_path = os.path.join(work, "orca_process.json")
     json.dump(machine, open(machine_path, "w"), indent=1)
     json.dump(process, open(process_path, "w"), indent=1)
     cmd = [args.orca, "--slice", "0", "--outputdir", out,
+           "--datadir", data,
            "--load-settings", f"{machine_path};{process_path}", model]
     if not run(cmd, log):
         return None

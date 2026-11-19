@@ -8,6 +8,13 @@ pub enum Mode {
     Hfw,
     /// Concentric loops only, with no gap pass.
     Classic,
+    /// Beads traced from a rasterised distance field.
+    ///
+    /// Kept for the cases the ladder cannot express — a section that divides
+    /// into beads of its own measured width — and for comparing against the
+    /// ladder on the same geometry. It costs time proportional to the area
+    /// under the layer rather than to its boundary, so it is not the default.
+    Field,
 }
 
 /// Nominal extrusion width in millimetres.
@@ -64,7 +71,7 @@ impl Params {
             min_feature: 0.25 * w,
             thin_walls: true,
             corner_deg: 12.0,
-            simplify: 0.002,
+            simplify: 0.012,
             gap_fill: true,
             distribution: 1,
         }

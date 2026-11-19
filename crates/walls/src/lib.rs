@@ -7,6 +7,11 @@
 //! width. Nothing is sampled on a grid, so the work follows the boundary and not the
 //! area. `poly` holds both passes; the rest of this module is the path type, the
 //! adhesion brim and the mesh utilities shared with the other stages.
+//!
+//! `beads` is the alternative that does sample: a section that divides into beads of
+//! its own measured width, traced from a rasterised distance field. It is reachable
+//! as [`Mode::Field`] and is not the default, because its cost follows the area under
+//! the layer rather than the length of its boundary.
 
 #![forbid(unsafe_code)]
 
@@ -153,8 +158,9 @@ pub struct Output {
 /// emits rather than for the empty area between its parts.
 pub fn generate(region: &Region, p: &Params, mode: Mode) -> Output {
     match mode {
-        Mode::Hfw => beads::generate(region, p),
+        Mode::Hfw => poly::generate_with_gaps(region, p),
         Mode::Classic => poly::generate(region, p),
+        Mode::Field => beads::generate(region, p),
     }
 }
 
@@ -583,10 +589,10 @@ mod tests {
     }
 
     #[test]
-    fn a_sheet_narrower_than_its_walls_is_filled_by_them_not_by_a_strand() {
+    fn a_field_mode_sheet_narrower_than_its_walls_is_filled_by_them() {
         let p = Params::new(0.4, 2);
         let region = sheet(30.0, 1.0);
-        let output = generate(&region, &p, Mode::Hfw);
+        let output = generate(&region, &p, Mode::Field);
         let area: f64 = output.lines.iter().map(Line::length).sum();
         assert!(area > 0.0, "the sheet is printable");
         assert!(
@@ -604,8 +610,8 @@ mod tests {
 
     #[test]
     fn turning_gap_fill_off_drops_the_strand_and_keeps_the_loop() {
-        let p = Params::new(0.4, 3);
-        let region = sheet(30.0, 1.4);
+        let p = Params::new(0.4, 2);
+        let region = sheet(30.0, 2.0);
         let on = generate(&region, &p, Mode::Hfw);
         let off = generate(
             &region,
@@ -615,7 +621,7 @@ mod tests {
             },
             Mode::Hfw,
         );
-        assert!(!gaps(&on.lines).is_empty(), "1.4 mm holds a middle strip");
+        assert!(!gaps(&on.lines).is_empty(), "2 mm holds a middle strip");
         assert!(gaps(&off.lines).is_empty(), "the switch did not take");
         assert_eq!(off.stats.loops, on.stats.loops, "the loops are untouched");
     }
@@ -642,7 +648,6 @@ mod tests {
         let kept = generate(&sheet(30.0, 1.0), &p, Mode::Hfw);
         assert!(!kept.lines.is_empty(), "and it comes back below the floor");
     }
-
     #[test]
     fn a_hole_is_walled_from_the_material_side() {
         let mut region = square(20.0);

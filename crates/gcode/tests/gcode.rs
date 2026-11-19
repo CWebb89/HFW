@@ -27,6 +27,7 @@ fn settings(cfg: &PrinterConfig) -> Settings {
     let mut s = Settings::new(cfg.line_width, cfg.walls);
     s.keep_reference = true;
     s.every = 1;
+    s.resolution = cfg.resolution;
     s.first_layer_width = cfg.first_layer_width;
     s.extra_perimeters = cfg.extra_perimeters;
     s.extra_perimeters_overhangs = cfg.extra_perimeters_on_overhangs;

@@ -173,6 +173,7 @@ fn mode_key(mode: Mode) -> &'static str {
     match mode {
         Mode::Hfw => "hfw",
         Mode::Classic => "classic",
+        Mode::Field => "field",
     }
 }
 
