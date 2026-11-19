@@ -2103,7 +2103,7 @@ struct Writer<'a> {
     ///
     /// Travel routing needs the loops as loops: a bead to go round is a polygon,
     /// and a bag of segments cannot be walked.
-    loops: Vec<Vec<V2>>,
+    loops: Vec<route::Obstacle>,
     /// Widest bead drawn so far on this layer, in millimetres.
     ///
     /// A route clears the widest bead it might pass, because a narrow wall is not
@@ -2500,14 +2500,18 @@ impl Writer<'_> {
             (to.y - from.y) / d.max(1e-9),
             0.0,
         ];
-        let curled_obstacles: Vec<Vec<V2>>;
-        let obstacles: &[Vec<V2>] =
+        let curled_obstacles: Vec<route::Obstacle>;
+        let obstacles: &[route::Obstacle] =
             if self.cfg.avoid_crossing_curled_overhangs && !self.curled.is_empty() {
                 curled_obstacles = self
                     .loops
                     .iter()
                     .cloned()
-                    .chain(self.curled.iter().cloned())
+                    .chain(
+                        self.curled
+                            .iter()
+                            .map(|ring| route::Obstacle::new(ring.clone())),
+                    )
                     .collect();
                 &curled_obstacles
             } else {
@@ -2794,7 +2798,7 @@ impl Writer<'_> {
                 self.drawn.push((pts[i], pts[(i + 1) % n]));
             }
             if closed && n >= 3 {
-                self.loops.push(pts.clone());
+                self.loops.push(route::Obstacle::new(pts.clone()));
             }
         }
         let area = self.cfg.filament_area();

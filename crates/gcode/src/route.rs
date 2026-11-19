@@ -55,7 +55,34 @@ pub struct Route {
 /// detour budget, when the graph is too big to be worth building, or when the
 /// route found cannot be proven clear. The caller then emits the straight move it
 /// would have emitted anyway, so a refusal is never worse than today's behaviour.
-pub fn detour(start: V2, end: V2, loops: &[Vec<V2>], bead: f64, max_detour: f64) -> Option<Route> {
+/// One loop a travel has to avoid, with its bounding box and its routing form
+/// measured once.
+///
+/// The router asks every loop on the layer whether it comes near the travel, and a
+/// loop's own point count is the layer's detail: measuring the box on every query
+/// makes each travel cost the whole layer. Reducing the loop to the handful of
+/// vertices the visibility graph can carry is the same story — the answer does not
+/// depend on the travel — so both are done where the loop is registered.
+#[derive(Clone)]
+pub struct Obstacle {
+    /// Smallest and largest X, then Y, of the loop as printed.
+    pub bounds: (f64, f64, f64, f64),
+    /// The loop reduced to [`MAX_VERTICES_PER_LOOP`] for the router.
+    pub pts: Vec<V2>,
+}
+
+impl Obstacle {
+    /// A loop, with its bounding box and routing form already measured.
+    pub fn new(pts: Vec<V2>) -> Obstacle {
+        let bounds = bbox(&pts);
+        Obstacle {
+            bounds,
+            pts: simplify(&pts, MAX_VERTICES_PER_LOOP),
+        }
+    }
+}
+
+pub fn detour(start: V2, end: V2, loops: &[Obstacle], bead: f64, max_detour: f64) -> Option<Route> {
     if loops.is_empty() || bead <= 0.0 || start.dist(end) < 1e-6 {
         return None;
     }
@@ -63,15 +90,16 @@ pub fn detour(start: V2, end: V2, loops: &[Vec<V2>], bead: f64, max_detour: f64)
     let reach = corridor(start, end, clearance * 2.0);
     let near: Vec<Vec<V2>> = loops
         .iter()
-        .filter(|loop_| boxes_meet(&bbox(loop_), &reach))
-        .map(|loop_| simplify(loop_, MAX_VERTICES_PER_LOOP))
+        .filter(|loop_| boxes_meet(&loop_.bounds, &reach))
+        .map(|loop_| loop_.pts.clone())
         .filter(|loop_| loop_.len() >= 3)
         .collect();
     if near.is_empty() {
         return None;
     }
     let walls = segments(&near);
-    if !touches(start, end, &walls) {
+    let hit = touches(start, end, &walls);
+    if !hit {
         return None;
     }
     let mut nodes = vec![start, end];
@@ -89,7 +117,12 @@ pub fn detour(start: V2, end: V2, loops: &[Vec<V2>], bead: f64, max_detour: f64)
         return None;
     }
     let near_walls: Vec<(V2, V2)> = near.iter().flat_map(|loop_| segments_1(loop_)).collect();
-    let via = shortest(&nodes, &rings, &near_walls, clearance)?;
+    let limit = if max_detour > 0.0 {
+        start.dist(end) + max_detour
+    } else {
+        f64::INFINITY
+    };
+    let via = shortest(&nodes, &rings, &near_walls, clearance, limit)?;
     let length = polyline_length(start, &via, end);
     let budget = if max_detour > 0.0 {
         max_detour
@@ -122,6 +155,7 @@ fn shortest(
     rings: &[(usize, usize)],
     walls: &[(V2, V2)],
     clearance: f64,
+    limit: f64,
 ) -> Option<Vec<V2>> {
     let total = nodes.len();
     let neighbours = ring_mates(rings, total);
@@ -129,16 +163,23 @@ fn shortest(
     let mut previous = vec![usize::MAX; total];
     let mut settled = vec![false; total];
     best[0] = 0.0;
+    let goal = nodes[1];
     loop {
         let mut current = usize::MAX;
+        let mut current_key = f64::INFINITY;
         let mut current_cost = f64::INFINITY;
         for i in 0..total {
-            if !settled[i] && best[i] < current_cost {
+            if settled[i] {
+                continue;
+            }
+            let key = best[i] + nodes[i].dist(goal);
+            if key < current_key {
                 current = i;
+                current_key = key;
                 current_cost = best[i];
             }
         }
-        if current == usize::MAX || current == 1 {
+        if current == usize::MAX || current == 1 || current_key > limit {
             break;
         }
         settled[current] = true;
@@ -149,13 +190,14 @@ fn shortest(
             let along_ring = neighbours
                 .get(current)
                 .is_some_and(|mates| mates.contains(&next));
-            let limit = clearance * 0.98;
-            if !along_ring && !leg_clear(nodes[current], nodes[next], walls, limit) {
+            let clear = clearance * 0.98;
+            if !along_ring && !leg_clear(nodes[current], nodes[next], walls, clear) {
                 continue;
             }
             let step = nodes[current].dist(nodes[next]);
-            if current_cost + step < best[next] {
-                best[next] = current_cost + step;
+            let cost = current_cost + step;
+            if cost <= limit && cost < best[next] {
+                best[next] = cost;
                 previous[next] = current;
             }
         }
@@ -387,14 +429,20 @@ mod tests {
             .collect()
     }
 
-    fn cuts(start: V2, via: &[V2], end: V2, loops: &[Vec<V2>]) -> bool {
-        let walls = segments(loops);
+    fn cuts(start: V2, via: &[V2], end: V2, loops: &[Obstacle]) -> bool {
+        let walls = segments(
+            loops
+                .iter()
+                .map(|l| l.pts.clone())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
         !clear_route(start, via, end, &walls)
     }
 
     #[test]
     fn a_travel_across_a_square_goes_round_it() {
-        let loop_ = vec![square(0.0, 10.0)];
+        let loop_ = vec![Obstacle::new(square(0.0, 10.0))];
         let start = V2::new(-5.0, 5.0);
         let end = V2::new(15.0, 5.0);
         let route = detour(start, end, &loop_, 0.4, 0.0).expect("a way round exists");
@@ -409,7 +457,7 @@ mod tests {
 
     #[test]
     fn a_travel_that_does_not_cross_is_left_alone() {
-        let loop_ = vec![square(0.0, 10.0)];
+        let loop_ = vec![Obstacle::new(square(0.0, 10.0))];
         let start = V2::new(-5.0, -5.0);
         let end = V2::new(-5.0, 15.0);
         assert!(detour(start, end, &loop_, 0.4, 0.0).is_none());
@@ -417,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_budget_below_the_needed_detour_refuses() {
-        let loop_ = vec![square(0.0, 10.0)];
+        let loop_ = vec![Obstacle::new(square(0.0, 10.0))];
         let start = V2::new(-5.0, 5.0);
         let end = V2::new(15.0, 5.0);
         assert!(detour(start, end, &loop_, 0.4, 0.0).is_some());
@@ -430,7 +478,7 @@ mod tests {
     #[test]
     fn a_route_never_enters_a_wall_on_any_of_forty_pairs() {
         let ring = circle(V2::new(0.0, 0.0), 20.0, 120);
-        let loops = vec![ring.clone()];
+        let loops = vec![Obstacle::new(ring.clone())];
         let mut routed = 0;
         for i in 0..40 {
             let a = i as f64 / 40.0 * std::f64::consts::TAU;
@@ -464,7 +512,7 @@ mod tests {
     fn an_annulus_route_stays_in_the_band() {
         let outer = circle(V2::new(0.0, 0.0), 17.0, 200);
         let inner = circle(V2::new(0.0, 0.0), 7.0, 100);
-        let loops = vec![outer, inner];
+        let loops = vec![Obstacle::new(outer), Obstacle::new(inner)];
         let start = V2::new(-12.0, 0.0);
         let end = V2::new(12.0, 0.0);
         let route = detour(start, end, &loops, 0.4, 0.0).expect("a way round the hole exists");
