@@ -259,6 +259,10 @@ impl Bundle {
     }
 
     /// Applies a three-part job to a fresh configuration, reporting every key.
+    ///
+    /// The configuration keeps the machine's name, not the last preset layered
+    /// over it: `name` is what the file's `; printer =` line and the profile name
+    /// in a log mean, and a process preset's name there names the wrong thing.
     pub fn load(
         &self,
         machine: &str,
@@ -267,6 +271,10 @@ impl Bundle {
     ) -> Result<Loaded, ConfigError> {
         let resolution = self.compose(machine, process, filament)?;
         let (config, report) = PrinterConfig::from_preset(resolution.preset());
+        let config = PrinterConfig {
+            name: machine.to_owned(),
+            ..config
+        };
         Ok(Loaded {
             config,
             report,

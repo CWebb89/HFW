@@ -1,0 +1,14 @@
+[package]
+name = "hfw-skeleton"
+description = "Skeletal trapezoidation of a sliced layer: the Voronoi graph the wall beading runs on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-kernel = { path = "../kernel" }
+boostvoronoi = "0.12.1"
+
+[lints]
+workspace = true

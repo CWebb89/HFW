@@ -1,29 +1,29 @@
-//! Variable-width wall generation from an exact distance field.
+//! Wall generation by polygon offset, with a gap pass over what the offsets leave.
 //!
-//! Classic concentric walls walk a fixed offset ladder `k * w` from the
-//! boundary. That leaves uncovered area wherever the local feature width is
-//! not a multiple of the extrusion width: the last loop either overlaps the
-//! previous one or leaves a gap. This crate instead measures each point's
-//! distance to the boundary and, where a medial axis is available, the local
-//! inscribed radius, then decomposes that radius into a whole number of beads.
-//! Bead counts blend along the medial axis and hysteresis keeps the choice
-//! stable, so a tapering feature gets a continuous, gapless bead ladder.
+//! A layer's walls are the boundary of the layer eroded by half a bead, so they are
+//! a ladder of polygon offsets of the layer itself. Where the ladder runs out — a
+//! feature narrower than the loops, or a width that is not a whole number of beads —
+//! the uncovered remainder is measured across and printed as one strand of that
+//! width. Nothing is sampled on a grid, so the work follows the boundary and not the
+//! area. `poly` holds both passes; the rest of this module is the path type, the
+//! adhesion brim and the mesh utilities shared with the other stages.
 
 #![forbid(unsafe_code)]
 
+mod beads;
 pub mod contour;
 pub mod field;
 pub mod offset;
 pub mod params;
+mod poly;
 pub mod repair;
-pub mod ridge;
 
 use hfw_kernel::{Region, SegIndex, V2};
 use params::{Mode, Params};
 
-pub use field::{Field, FieldError, Grid, MAX_FIELD_CELLS};
+pub use field::Grid;
 pub use offset::offset_region;
-pub use params::{Beading, Mode as WallMode, Params as WallParams};
+pub use params::{Mode as WallMode, Params as WallParams};
 pub use repair::{close_gaps, simplify_region};
 
 /// Semantic class of a generated path.
@@ -119,42 +119,21 @@ impl Line {
     }
 }
 
-/// One medial-axis branch, kept for diagnostic rendering.
-#[derive(Clone, Debug)]
-pub struct RidgeDebug {
-    /// Branch vertices.
-    pub pts: Vec<V2>,
-    /// Inscribed radius at each vertex.
-    pub r: Vec<f64>,
-    /// Bead count at each vertex.
-    pub n: Vec<u8>,
-    /// True when the branch is closed.
-    pub closed: bool,
-}
-
 /// Counters and timings for one wall generation.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
-    /// Number of distance-field cells.
-    pub nodes: usize,
-    /// Cells inside the wall band.
-    pub band_nodes: usize,
-    /// Cells matched to a thin-wall beading.
-    pub thin_nodes: usize,
-    /// Cells dropped as unprintable islands.
-    pub dropped_nodes: usize,
-    /// Medial-axis vertices.
-    pub ridge_vertices: usize,
-    /// Medial-axis branches.
-    pub ridge_branches: usize,
-    /// Milliseconds spent building the field.
-    pub ms_field: f64,
-    /// Milliseconds spent extracting the ridge.
-    pub ms_ridge: f64,
-    /// Milliseconds spent classifying cells.
-    pub ms_classify: f64,
-    /// Milliseconds spent tracing iso-lines.
-    pub ms_contour: f64,
+    /// Perimeter loops emitted.
+    pub loops: usize,
+    /// Closed rings those loops contain.
+    pub rings: usize,
+    /// Gap-fill strands emitted.
+    pub gaps: usize,
+    /// Path vertices emitted.
+    pub points: usize,
+    /// Milliseconds spent offsetting.
+    pub ms_offset: f64,
+    /// Milliseconds spent on the gap pass.
+    pub ms_gap: f64,
     /// Total milliseconds.
     pub ms_total: f64,
 }
@@ -163,79 +142,20 @@ pub struct Stats {
 pub struct Output {
     /// Generated paths.
     pub lines: Vec<Line>,
-    /// Medial axis, for diagnostics only.
-    pub ridge: Vec<RidgeDebug>,
     /// Counters and timings.
     pub stats: Stats,
 }
 
-/// Failure modes when generating walls.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WallsError {
-    /// The distance field would exceed the memory budget.
-    Field(field::FieldError),
-}
-
-impl From<field::FieldError> for WallsError {
-    fn from(error: field::FieldError) -> Self {
-        WallsError::Field(error)
+/// Generates walls for one slice region.
+///
+/// The whole layer is offset as one set, so parts that are close together erode
+/// into each other exactly as printed beads do, and a plate pays for the loops it
+/// emits rather than for the empty area between its parts.
+pub fn generate(region: &Region, p: &Params, mode: Mode) -> Output {
+    match mode {
+        Mode::Hfw => beads::generate(region, p),
+        Mode::Classic => poly::generate(region, p),
     }
-}
-
-impl std::fmt::Display for WallsError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WallsError::Field(e) => e.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for WallsError {}
-
-#[derive(Clone, Copy, PartialEq)]
-enum NodeKind {
-    Out,
-    Deep,
-    Thick,
-    Dropped,
-    Thin,
-}
-
-fn ray_hit(index: &SegIndex, p0: V2, u: V2, d0: f64, t_max: f64, h: f64) -> Option<f64> {
-    let eps = 1e-9;
-    let g = |t: f64| -> f64 {
-        let p = p0 + u * t;
-        match index.nearest(p, d0 + t + 1e-6) {
-            Some(hit) => hit.d - (d0 + t),
-            None => -1.0,
-        }
-    };
-    let mut lo = 0.0;
-    let mut step = h;
-    let hi;
-    loop {
-        let t = (lo + step).min(t_max);
-        if g(t) >= -eps {
-            if t >= t_max {
-                return None;
-            }
-            lo = t;
-            step *= 2.0;
-        } else {
-            hi = t;
-            break;
-        }
-    }
-    let (mut a, mut b) = (lo, hi);
-    for _ in 0..24 {
-        let m = 0.5 * (a + b);
-        if g(m) >= -eps {
-            a = m;
-        } else {
-            b = m;
-        }
-    }
-    Some(0.5 * (a + b))
 }
 
 fn corner(a: V2, na: V2, b: V2, nb: V2, h: f64) -> Option<V2> {
@@ -388,254 +308,6 @@ fn finish(raw: contour::RawLine, index: &SegIndex, p: &Params, kind: Kind) -> Op
     Some(line)
 }
 
-fn classify(
-    field: &field::Field,
-    index: &SegIndex,
-    ridge: Option<&ridge::Ridge>,
-    p: &Params,
-) -> (Vec<NodeKind>, Vec<u32>) {
-    let grid = &field.grid;
-    let n_nodes = grid.len();
-    let mut kind = vec![NodeKind::Out; n_nodes];
-    let mut qid = vec![field::NONE; n_nodes];
-    let thick_r = p.thick_radius();
-    let usable = ridge.filter(|r| !r.points.is_empty());
-    for id in 0..n_nodes {
-        if !field.inside[id] {
-            continue;
-        }
-        let d = field.d[id];
-        if !d.is_finite() {
-            kind[id] = NodeKind::Deep;
-            continue;
-        }
-        kind[id] = NodeKind::Thick;
-        let rg = match usable {
-            Some(r) => r,
-            None => continue,
-        };
-        let t_max = thick_r - d + p.h;
-        if t_max <= 0.0 || d < 1e-9 {
-            continue;
-        }
-        let pos = grid.pos_id(id);
-        let reach = p.ext * rg.rmax + 2.0 * p.h;
-        if rg.points.nearest(pos, t_max + reach).is_none() {
-            continue;
-        }
-        let u = (pos - field.foot[id]).norm();
-        if u == V2::ZERO {
-            continue;
-        }
-        if let Some(t) = ray_hit(index, pos, u, d, t_max, p.h) {
-            if d + t >= thick_r {
-                continue;
-            }
-            let c = pos + u * t;
-            if let Some((q, dist)) = rg.points.nearest(c, reach) {
-                let rq = rg.rs[q as usize];
-                if dist <= p.ext * rq + 2.0 * p.h && rq < thick_r && d + t <= rq * 1.05 + p.h {
-                    if rg.bd[q as usize].is_none() {
-                        kind[id] = NodeKind::Dropped;
-                    } else {
-                        kind[id] = NodeKind::Thin;
-                        qid[id] = q;
-                    }
-                }
-            }
-        }
-    }
-    (kind, qid)
-}
-
-fn middle_lines(rg: &ridge::Ridge, p: &Params) -> Vec<Line> {
-    let mut out = Vec::new();
-    let mid_w = |i: u32| -> Option<f64> {
-        let bd = rg.bd[i as usize]?;
-        if !bd.half {
-            return None;
-        }
-        let w = bd.middle_width(rg.rs[i as usize]);
-        if w >= p.taper_min {
-            Some(w)
-        } else {
-            None
-        }
-    };
-    for br in &rg.branches {
-        let mut ids: Vec<u32> = br.ids.clone();
-        let mut closed_all = false;
-        if br.closed {
-            match ids.iter().position(|&i| mid_w(i).is_none()) {
-                Some(k) => ids.rotate_left(k),
-                None => closed_all = true,
-            }
-        }
-        let mut runs: Vec<Vec<u32>> = Vec::new();
-        if closed_all {
-            runs.push(ids.clone());
-        } else {
-            let mut cur: Vec<u32> = Vec::new();
-            for &i in &ids {
-                if mid_w(i).is_some() {
-                    cur.push(i);
-                } else if !cur.is_empty() {
-                    runs.push(std::mem::take(&mut cur));
-                }
-            }
-            if !cur.is_empty() {
-                runs.push(cur);
-            }
-        }
-        for run in runs {
-            if run.len() == 1 && br.ids.len() == 1 {
-                let i = run[0];
-                let d = mid_w(i).unwrap();
-                let c = rg.graph.pos[i as usize];
-                let half = 0.5 * std::f64::consts::FRAC_PI_4 * d * 2.0;
-                out.push(Line {
-                    pts: vec![V2::new(c.x - half, c.y), V2::new(c.x + half, c.y)],
-                    width: vec![d, d],
-                    closed: false,
-                    kind: Kind::Middle,
-                    flow: 1.0,
-                    overhang: 0.0,
-                    object: 0,
-                });
-                continue;
-            }
-            if run.len() < 2 {
-                continue;
-            }
-            let pts: Vec<V2> = run.iter().map(|&i| rg.graph.pos[i as usize]).collect();
-            let w: Vec<f64> = run.iter().map(|&i| mid_w(i).unwrap()).collect();
-            let (sp, sw) = simplify(&pts, &w, p.simplify, 0.05 * p.w, closed_all);
-            let line = Line {
-                pts: sp,
-                width: sw,
-                closed: closed_all,
-                kind: Kind::Middle,
-                flow: 1.0,
-                overhang: 0.0,
-                object: 0,
-            };
-            if line.pts.len() >= 2 && line.length() >= 2.0 * p.h {
-                out.push(line);
-            }
-        }
-    }
-    out
-}
-
-/// Generates walls for one slice region.
-pub fn generate(region: &Region, p: &Params, mode: Mode) -> Result<Output, WallsError> {
-    let t_all = std::time::Instant::now();
-    let cap = p.cap();
-    let rb = region.bounds();
-    let index = SegIndex::new(
-        region.segments(),
-        rb.grown(cap + 6.0 * p.h + p.w),
-        6.0 * p.h,
-    );
-    let grid = Grid::covering(rb.grown(2.0 * p.h), p.h);
-    let t = std::time::Instant::now();
-    let field = field::Field::build(region, &index, grid, cap)?;
-    let ms_field = t.elapsed().as_secs_f64() * 1e3;
-    let t = std::time::Instant::now();
-    let ridge = if mode == Mode::Hfw {
-        Some(ridge::build(&field, &index, p))
-    } else {
-        None
-    };
-    let ms_ridge = t.elapsed().as_secs_f64() * 1e3;
-    let t = std::time::Instant::now();
-    let (kind, qid) = classify(&field, &index, ridge.as_ref(), p);
-    let ms_classify = t.elapsed().as_secs_f64() * 1e3;
-    let t = std::time::Instant::now();
-    let n_nodes = grid.len();
-    let mut lines: Vec<Line> = Vec::new();
-    let mut phi = vec![0.0f64; n_nodes];
-    let mut bw = vec![f64::NAN; n_nodes];
-    let mut lv = vec![f64::NAN; n_nodes];
-    for i in 0..p.walls {
-        for id in 0..n_nodes {
-            bw[id] = f64::NAN;
-            lv[id] = f64::NAN;
-            phi[id] = match kind[id] {
-                NodeKind::Out | NodeKind::Dropped => -p.w,
-                NodeKind::Deep => p.w,
-                NodeKind::Thick => {
-                    let l = p.loop_offset(i);
-                    bw[id] = p.loop_width(i);
-                    lv[id] = l;
-                    field.d[id] - l
-                }
-                NodeKind::Thin => match ridge.as_ref().and_then(|rg| rg.bd[qid[id] as usize]) {
-                    Some(bd) if i < bd.full_cells() => {
-                        let l = bd.center(i);
-                        bw[id] = bd.width(i);
-                        lv[id] = l;
-                        field.d[id] - l
-                    }
-                    _ => -p.w,
-                },
-            };
-        }
-        for raw in contour::trace(&grid, &phi, &bw, &lv) {
-            if let Some(l) = finish(raw, &index, p, Kind::Side(i as u8)) {
-                lines.push(l);
-            }
-        }
-    }
-    let ms_contour = t.elapsed().as_secs_f64() * 1e3;
-    let mut ridge_dbg = Vec::new();
-    let (mut rv, mut rb_n) = (0, 0);
-    if let Some(rg) = &ridge {
-        // A thin region is printed by its centreline or not at all, and a
-        // setting is not a reason to print nothing: gap fill decides when the
-        // centreline is added to geometry that already has walls, and an object
-        // with no walls at all gets it regardless.
-        if p.gap_fill || lines.is_empty() {
-            lines.extend(middle_lines(rg, p));
-        }
-        rv = rg.graph.pos.len();
-        rb_n = rg.branches.len();
-        for br in &rg.branches {
-            ridge_dbg.push(RidgeDebug {
-                pts: br.ids.iter().map(|&i| rg.graph.pos[i as usize]).collect(),
-                r: br.ids.iter().map(|&i| rg.rs[i as usize]).collect(),
-                n: br
-                    .ids
-                    .iter()
-                    .map(|&i| rg.bd[i as usize].map_or(0, |b| (2 * b.k - b.half as usize) as u8))
-                    .collect(),
-                closed: br.closed,
-            });
-        }
-    }
-    let stats = Stats {
-        nodes: n_nodes,
-        band_nodes: kind
-            .iter()
-            .filter(|k| matches!(k, NodeKind::Thick | NodeKind::Thin | NodeKind::Dropped))
-            .count(),
-        thin_nodes: kind.iter().filter(|&&k| k == NodeKind::Thin).count(),
-        dropped_nodes: kind.iter().filter(|&&k| k == NodeKind::Dropped).count(),
-        ridge_vertices: rv,
-        ridge_branches: rb_n,
-        ms_field,
-        ms_ridge,
-        ms_classify,
-        ms_contour,
-        ms_total: t_all.elapsed().as_secs_f64() * 1e3,
-    };
-    Ok(Output {
-        lines,
-        ridge: ridge_dbg,
-        stats,
-    })
-}
-
 /// Which side of the part outline an adhesion brim grows on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrimSide {
@@ -668,9 +340,9 @@ pub fn brim(
     gap: f64,
     separation: f64,
     side: BrimSide,
-) -> Result<Vec<Line>, WallsError> {
+) -> Vec<Line> {
     if loops == 0 || region.is_empty() || side == BrimSide::None {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let band = loops as f64 * p.w + (loops as f64 - 1.0) * separation.max(0.0);
     let reach = gap + band + p.w;
@@ -742,7 +414,7 @@ pub fn brim(
             }
         }
     }
-    Ok(out)
+    out
 }
 
 fn grid_id(grid: &Grid, p: V2) -> usize {
@@ -815,6 +487,19 @@ mod tests {
         ]])
     }
 
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<V2> {
+        vec![
+            V2::new(x0, y0),
+            V2::new(x1, y0),
+            V2::new(x1, y1),
+            V2::new(x0, y1),
+        ]
+    }
+
+    fn sheet(length: f64, width: f64) -> Region {
+        Region::new(vec![rect(0.0, 0.0, length, width)])
+    }
+
     fn mean_width_of(lines: &[Line], loop_index: u8) -> Option<f64> {
         let widths: Vec<f64> = lines
             .iter()
@@ -836,16 +521,20 @@ mod tests {
         Some(point.x.min(point.y).min(size - point.x).min(size - point.y))
     }
 
+    fn gaps(lines: &[Line]) -> Vec<&Line> {
+        lines.iter().filter(|l| l.kind == Kind::Middle).collect()
+    }
+
     #[test]
     fn a_configured_outer_width_reaches_the_outer_loop_only() {
         let region = square(20.0);
-        let plain = generate(&region, &Params::new(0.4, 3), Mode::Classic).expect("walls");
+        let plain = generate(&region, &Params::new(0.4, 3), Mode::Classic);
         assert!((mean_width_of(&plain.lines, 0).expect("outer") - 0.4).abs() < 0.05);
         assert!((mean_width_of(&plain.lines, 1).expect("inner") - 0.4).abs() < 0.05);
 
         let mut wide = Params::new(0.4, 3);
         wide.w_outer = 0.62;
-        let output = generate(&region, &wide, Mode::Classic).expect("walls");
+        let output = generate(&region, &wide, Mode::Classic);
         assert!(
             (mean_width_of(&output.lines, 0).expect("outer") - 0.62).abs() < 0.05,
             "the outer loop should carry the configured width"
@@ -861,7 +550,7 @@ mod tests {
         let region = square(20.0);
         let mut wide = Params::new(0.4, 3);
         wide.w_outer = 0.62;
-        let output = generate(&region, &wide, Mode::Classic).expect("walls");
+        let output = generate(&region, &wide, Mode::Classic);
 
         let first = inset_of(&output.lines, 0, 20.0).expect("outer");
         let second = inset_of(&output.lines, 1, 20.0).expect("middle");
@@ -881,10 +570,43 @@ mod tests {
     }
 
     #[test]
-    fn turning_gap_fill_off_drops_the_middle_beads_and_keeps_the_loops() {
+    fn a_straight_edge_becomes_four_vertices_and_not_a_staircase() {
         let region = square(20.0);
+        let output = generate(&region, &Params::new(0.4, 3), Mode::Classic);
+        for line in &output.lines {
+            assert!(
+                line.pts.len() <= 8,
+                "a square loop needs its corners and nothing else, got {} vertices",
+                line.pts.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_sheet_narrower_than_its_walls_is_filled_by_them_not_by_a_strand() {
         let p = Params::new(0.4, 2);
-        let on = generate(&region, &p, Mode::Hfw).expect("walls");
+        let region = sheet(30.0, 1.0);
+        let output = generate(&region, &p, Mode::Hfw);
+        let area: f64 = output.lines.iter().map(Line::length).sum();
+        assert!(area > 0.0, "the sheet is printable");
+        assert!(
+            gaps(&output.lines).is_empty(),
+            "a 1 mm sheet divides into two 0.5 mm beads, so nothing is left for a strand"
+        );
+        assert!(
+            output
+                .lines
+                .iter()
+                .all(|l| l.width.iter().all(|w| *w > 0.24 - 1e-9)),
+            "neither bead is below the printable floor"
+        );
+    }
+
+    #[test]
+    fn turning_gap_fill_off_drops_the_strand_and_keeps_the_loop() {
+        let p = Params::new(0.4, 3);
+        let region = sheet(30.0, 1.4);
+        let on = generate(&region, &p, Mode::Hfw);
         let off = generate(
             &region,
             &Params {
@@ -892,15 +614,81 @@ mod tests {
                 ..p
             },
             Mode::Hfw,
-        )
-        .expect("walls");
-        let sides = |o: &Output, i: u8| o.lines.iter().filter(|l| l.kind == Kind::Side(i)).count();
-        assert_eq!(sides(&on, 0), sides(&off, 0));
-        assert_eq!(sides(&on, 1), sides(&off, 1));
-        assert!(
-            off.lines.iter().all(|l| l.kind != Kind::Middle),
-            "a gap-fill bead survived the switch"
         );
+        assert!(!gaps(&on.lines).is_empty(), "1.4 mm holds a middle strip");
+        assert!(gaps(&off.lines).is_empty(), "the switch did not take");
+        assert_eq!(off.stats.loops, on.stats.loops, "the loops are untouched");
+    }
+
+    #[test]
+    fn classic_mode_prints_no_gap_strand_at_all() {
+        let p = Params::new(0.4, 2);
+        let output = generate(&sheet(30.0, 1.0), &p, Mode::Classic);
+        assert!(gaps(&output.lines).is_empty());
+        assert!(!output.lines.is_empty(), "the loop is still there");
+    }
+
+    #[test]
+    fn a_feature_narrower_than_the_floor_prints_nothing() {
+        let mut p = Params::new(0.4, 2);
+        p.min_feature = 1.5;
+        let output = generate(&sheet(30.0, 1.0), &p, Mode::Hfw);
+        assert!(
+            output.lines.is_empty(),
+            "a 1 mm sheet is under a 1.5 mm floor, got {} paths",
+            output.lines.len()
+        );
+        p.min_feature = 0.1;
+        let kept = generate(&sheet(30.0, 1.0), &p, Mode::Hfw);
+        assert!(!kept.lines.is_empty(), "and it comes back below the floor");
+    }
+
+    #[test]
+    fn a_hole_is_walled_from_the_material_side() {
+        let mut region = square(20.0);
+        let mut hole = rect(8.0, 8.0, 12.0, 12.0);
+        hole.reverse();
+        region.rings.push(hole);
+        let region = Region::new(region.rings);
+        let output = generate(&region, &Params::new(0.4, 2), Mode::Classic);
+        let outer = output
+            .lines
+            .iter()
+            .filter(|l| l.kind == Kind::Side(0))
+            .count();
+        assert_eq!(outer, 2, "the outer wall and the hole wall, one each");
+        let hole_ring = output
+            .lines
+            .iter()
+            .filter(|l| l.kind == Kind::Side(0))
+            .find(|l| {
+                l.pts
+                    .iter()
+                    .all(|q| q.x > 1.0 && q.x < 19.0 && q.y > 1.0 && q.y < 19.0)
+            })
+            .expect("a loop inside the part");
+        assert!(
+            hole_ring
+                .pts
+                .iter()
+                .all(|q| q.x < 7.9 || q.x > 12.1 || q.y < 7.9 || q.y > 12.1),
+            "the hole loop stands off the hole by half a bead"
+        );
+    }
+
+    #[test]
+    fn two_parts_on_one_layer_each_get_their_loops() {
+        let region = Region::new(vec![
+            rect(0.0, 0.0, 10.0, 10.0),
+            rect(20.0, 0.0, 30.0, 10.0),
+        ]);
+        let output = generate(&region, &Params::new(0.4, 2), Mode::Classic);
+        let first = output
+            .lines
+            .iter()
+            .filter(|l| l.kind == Kind::Side(0))
+            .count();
+        assert_eq!(first, 2, "one loop per part");
     }
 
     #[test]
@@ -908,8 +696,8 @@ mod tests {
         let region = square(20.0);
         let p = Params::new(0.4, 2);
         let wide = p.scaled_to(0.6);
-        let base = generate(&region, &p, Mode::Classic).expect("walls");
-        let first = generate(&region, &wide, Mode::Classic).expect("walls");
+        let base = generate(&region, &p, Mode::Classic);
+        let first = generate(&region, &wide, Mode::Classic);
         let width = |o: &Output| mean_width_of(&o.lines, 1).expect("inner loop");
         assert!(
             width(&first) > width(&base) * 1.4,

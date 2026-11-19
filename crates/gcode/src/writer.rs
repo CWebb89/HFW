@@ -1,5 +1,6 @@
 //! Bead paths to machine commands.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use hfw_config::{Flavor, PrintSequence, PrinterConfig, Seam};
@@ -253,6 +254,26 @@ fn turn_sign(a: V2, b: V2, c: V2) -> f64 {
     (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
 }
 
+/// The angle a chord sweeps about `centre`, signed the way the arc turns.
+///
+/// A single step is always well under a full turn, so the wrap is unambiguous:
+/// clockwise steps come out negative and counter-clockwise ones positive.
+fn step_sweep(centre: V2, from: V2, to: V2, clockwise: bool) -> f64 {
+    let a0 = (from.y - centre.y).atan2(from.x - centre.x);
+    let a1 = (to.y - centre.y).atan2(to.x - centre.x);
+    let mut delta = a1 - a0;
+    if clockwise {
+        while delta >= 0.0 {
+            delta -= std::f64::consts::TAU;
+        }
+    } else {
+        while delta <= 0.0 {
+            delta += std::f64::consts::TAU;
+        }
+    }
+    delta
+}
+
 /// Splits a path into straight moves and arcs.
 ///
 /// A run replaces a straight line only when every vertex it covers lies within
@@ -270,6 +291,14 @@ fn fit_runs(pts: &[V2], closed: bool, tolerance: f64) -> Vec<Run> {
     }
     let last = if closed { n } else { n - 1 };
     let at = |i: usize| pts[i % n];
+    // A circle through three vertices that nearly coincide says nothing about the
+    // path, and the arc it describes is one the printer cannot draw: `I0 J0`. A
+    // radius at the scale of the tolerance is not worth an arc either — the line
+    // it replaces is already inside it.
+    let min_radius = (4.0 * tolerance).max(0.05);
+    // An arc of a full turn or more describes the same two endpoints twice, so the
+    // emitted `G2`/`G3` would sweep the short way and print a stub.
+    let max_sweep = std::f64::consts::TAU - 0.05;
     let mut runs = Vec::with_capacity(n);
     let mut start = 0usize;
     while start < last {
@@ -285,12 +314,14 @@ fn fit_runs(pts: &[V2], closed: bool, tolerance: f64) -> Vec<Run> {
             start += 1;
             continue;
         };
-        if turn.abs() < 1e-9 || radius > 1e4 {
+        if turn.abs() < 1e-9 || radius > 1e4 || radius < min_radius {
             runs.push(Run::Line { end: start + 1 });
             start += 1;
             continue;
         }
         let sign = turn.signum();
+        let clockwise = sign < 0.0;
+        let mut sweep = step_sweep(centre, a, b, clockwise) + step_sweep(centre, b, c, clockwise);
         let mut end = start + 2;
         let mut outer = end;
         while end < last {
@@ -301,6 +332,11 @@ fn fit_runs(pts: &[V2], closed: bool, tolerance: f64) -> Vec<Run> {
             if turn_sign(at(end - 1), at(end), p).signum() != sign {
                 break;
             }
+            let step = step_sweep(centre, at(end), p, clockwise);
+            if (sweep + step).abs() > max_sweep {
+                break;
+            }
+            sweep += step;
             end += 1;
             outer = end;
         }
@@ -309,22 +345,22 @@ fn fit_runs(pts: &[V2], closed: bool, tolerance: f64) -> Vec<Run> {
             start += 1;
             continue;
         }
-        let mut length = 0.0;
-        let mut previous = at(start);
-        for i in (start + 1)..=outer {
-            let p = at(i);
-            let chord = previous.dist(p);
-            let half = 0.5 * chord / radius;
-            let sweep = 2.0 * half.clamp(-1.0, 1.0).asin();
-            length += sweep * radius;
-            previous = p;
+        // A run that wanders — the path returns the way it came, or laps the
+        // centre — covers more angle than its two endpoints describe. The emitted
+        // arc would then be shorter than the moves it replaces, so the line keeps
+        // its material and the arc does not.
+        let direct = step_sweep(centre, a, at(outer), clockwise);
+        if (direct - sweep).abs() > 2.0 * tolerance.max(0.01) {
+            runs.push(Run::Line { end: start + 1 });
+            start += 1;
+            continue;
         }
         runs.push(Run::Arc {
             start,
             end: outer,
             centre,
-            clockwise: sign < 0.0,
-            length,
+            clockwise,
+            length: sweep.abs() * radius,
         });
         start = outer;
     }
@@ -582,22 +618,171 @@ fn scatter_index(pts: &[V2]) -> usize {
     (h >> 7) as usize % pts.len()
 }
 
+/// How far below the rearmost vertex another vertex may sit and still count as
+/// level with it when the seam is chosen, in millimetres.
+const SEAM_BAND: f64 = 0.2;
+/// Where one closed loop started on a layer, and enough of the loop itself to find it
+/// again on the layer above.
+#[derive(Clone, Debug)]
+struct SeamMark {
+    /// Points of the loop, thinned, in the order the loop runs.
+    samples: Vec<V2>,
+    /// The vertex the loop started at.
+    at: V2,
+}
+
+/// How close two points of a loop and the loop below must be to count as the same
+/// loop, in millimetres.
+const SEAM_MATCH: f64 = 0.35;
+/// Samples kept per loop when matching it against the layer below.
+const SEAM_SAMPLES: usize = 48;
+
+/// Holds each object's seams where they were on the layer below.
+///
+/// A seam chosen from the cross-section alone follows the cross-section, and a
+/// cross-section can offer two rear candidates whose heights swap from one layer to
+/// the next — the rear edge of a part that tapers alternately left and right does
+/// exactly that. The seam then crosses the whole rear face, which is the diagonal
+/// streak a printed wall shows. Each loop is paired with the loop it grew out of and
+/// starts at the vertex nearest that loop's seam. Where nothing was printed below,
+/// the fresh choice from [`seam_index`] stands.
+///
+/// The pairing is the part that has to be right. Comparing loop centres looks cheap
+/// and fails on a part whose loops are long and thin: an arc's centre can sit nearer
+/// the wrong loop than its own, and two loops of equal area swap on a rounding error,
+/// which moves both seams to the far side of the part. Points cannot: a loop is matched
+/// to the loop below it that it actually lies on, by counting how many of its own
+/// sampled points land within [`SEAM_MATCH`] of that loop's.
+fn align_seams(paths: &mut [Path], prev: &mut HashMap<(u16, u8), Vec<SeamMark>>) {
+    let mut groups: HashMap<(u16, u8), Vec<usize>> = HashMap::new();
+    for (i, p) in paths.iter().enumerate() {
+        if p.pts.len() >= 3 && is_perimeter(p.feature) {
+            groups
+                .entry((p.object, p.feature as u8))
+                .or_default()
+                .push(i);
+        }
+    }
+    let mut now: HashMap<(u16, u8), Vec<SeamMark>> = HashMap::new();
+    for (key, idxs) in groups {
+        let before = prev.remove(&key).unwrap_or_default();
+        let mut grid: HashMap<(i64, i64), Vec<(usize, V2)>> = HashMap::new();
+        for (a, m) in before.iter().enumerate() {
+            for q in &m.samples {
+                grid.entry(cell_of(*q, SEAM_MATCH))
+                    .or_default()
+                    .push((a, *q));
+            }
+        }
+        let mut pairs: Vec<(usize, usize, usize, f64)> = Vec::new();
+        for (n, &i) in idxs.iter().enumerate() {
+            let sample = thin(&paths[i].pts, SEAM_SAMPLES);
+            let mut hits = vec![0usize; before.len()];
+            for q in &sample {
+                let (kx, ky) = cell_of(*q, SEAM_MATCH);
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let Some(list) = grid.get(&(kx + dx, ky + dy)) else {
+                            continue;
+                        };
+                        for (a, r) in list {
+                            if r.dist(*q) <= SEAM_MATCH {
+                                hits[*a] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            for (a, count) in hits.iter().enumerate() {
+                if count * 2 < sample.len() {
+                    continue;
+                }
+                pairs.push((n, a, *count, before[a].at.dist(paths[i].pts[0])));
+            }
+        }
+        pairs.sort_by(|x, y| y.2.cmp(&x.2).then(x.3.total_cmp(&y.3)));
+        let mut from = vec![usize::MAX; idxs.len()];
+        let mut used = vec![false; before.len()];
+        for (n, a, _, _) in pairs {
+            if from[n] != usize::MAX || used[a] {
+                continue;
+            }
+            from[n] = a;
+            used[a] = true;
+        }
+        for (n, &i) in idxs.iter().enumerate() {
+            let p = &mut paths[i];
+            if from[n] != usize::MAX {
+                let aim = before[from[n]].at;
+                let mut at = 0;
+                let mut best = f64::INFINITY;
+                for (k, q) in p.pts.iter().enumerate() {
+                    let d = q.dist(aim);
+                    if d < best {
+                        best = d;
+                        at = k;
+                    }
+                }
+                if at > 0 && best <= 2.0 * SEAM_MATCH {
+                    p.pts.rotate_left(at);
+                    p.width.rotate_left(at);
+                }
+            }
+            let m = SeamMark {
+                samples: thin(&p.pts, SEAM_SAMPLES),
+                at: p.pts[0],
+            };
+            now.entry(key).or_default().push(m);
+        }
+    }
+    *prev = now;
+}
+
+/// The grid cell a point falls in, at the given cell size.
+fn cell_of(p: V2, cell: f64) -> (i64, i64) {
+    ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64)
+}
+
+/// At most `keep` points of a loop, evenly spaced along it.
+fn thin(pts: &[V2], keep: usize) -> Vec<V2> {
+    if pts.len() <= keep {
+        return pts.to_vec();
+    }
+    let stride = pts.len() / keep;
+    pts.iter().step_by(stride.max(1)).copied().collect()
+}
+
+/// The loop vertex at the rear of its own cross-section, on the bed's +Y side.
+///
+/// The rear-most vertex wins; vertices within [`SEAM_BAND`] of it count as level
+/// and the one nearest the cross-section's centre line takes the seam. Ranking by
+/// direction from the centre instead — the angle to +Y — misreads a wide, flat
+/// cross-section: its two rear corners sit 33.0 and 34.9 degrees off the axis, so
+/// the pick flips between them on a rounding error, and a point 7.7 mm lower wins
+/// for being more nearly overhead. Both appear on the wall as a seam that jumps
+/// instead of running straight, so the comparison here is between coordinates of
+/// one loop, where tessellation only moves a vertex along the level it already
+/// sits on.
 fn seam_index(pts: &[V2]) -> usize {
-    let n = pts.len();
+    let mut rearmost = f64::NEG_INFINITY;
+    let mut left = f64::INFINITY;
+    let mut right = f64::NEG_INFINITY;
+    for p in pts {
+        rearmost = rearmost.max(p.y);
+        left = left.min(p.x);
+        right = right.max(p.x);
+    }
+    let centre = 0.5 * (left + right);
     let mut best = 0;
-    let mut best_key = (-1i32, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for i in 0..n {
-        let a = pts[(i + n - 1) % n];
-        let b = pts[i];
-        let c = pts[(i + 1) % n];
-        let u = (b - a).norm();
-        let v = (c - b).norm();
-        let turn = u.dot(v).clamp(-1.0, 1.0).acos();
-        let key = ((turn > 0.4) as i32, (b.y * 1e6).round() / 1e6, -b.x);
-        if key.0 > best_key.0
-            || (key.0 == best_key.0
-                && (key.1 > best_key.1 || (key.1 == best_key.1 && key.2 > best_key.2)))
-        {
+    let mut best_key = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for (i, p) in pts.iter().enumerate() {
+        let level = if p.y >= rearmost - SEAM_BAND {
+            0.0
+        } else {
+            -1.0
+        };
+        let key = (level, -(p.x - centre).abs());
+        if key > best_key {
             best_key = key;
             best = i;
         }
@@ -1228,6 +1413,31 @@ fn print_accel(cfg: &PrinterConfig) -> f64 {
     base_accel(Feature::Skirt, cfg, false)
 }
 
+/// True when the profile states an acceleration anywhere, so this file may set one.
+///
+/// A file that names no limit of its own leaves the machine's alone: it has nothing to
+/// hand back, and a single feature figure — a bridge's 3000 — would otherwise outlive the
+/// bridge. A profile that states any figure is asking the file to manage acceleration,
+/// and `default_accel` is how it says what to go back to between features.
+fn manages_accel(cfg: &PrinterConfig) -> bool {
+    [
+        cfg.default_accel,
+        cfg.perimeter_accel,
+        cfg.outer_wall_accel,
+        cfg.inner_wall_accel,
+        cfg.solid_accel,
+        cfg.top_solid_accel,
+        cfg.infill_accel,
+        cfg.support_accel,
+        cfg.support_interface_accel,
+        cfg.initial_layer_accel,
+        cfg.travel_acceleration,
+        cfg.bridge_acceleration,
+    ]
+    .iter()
+    .any(|a| *a > 0.0)
+}
+
 /// The lower of two axis ceilings, with 0 meaning unset.
 fn xy_ceiling(x: f64, y: f64) -> f64 {
     match (x, y) {
@@ -1744,6 +1954,9 @@ fn skirt_margin(cfg: &PrinterConfig) -> f64 {
 }
 
 fn placement(extent: ModelExtent, cfg: &PrinterConfig) -> (f64, f64) {
+    if cfg.keep_position {
+        return (0.0, 0.0);
+    }
     let target = if cfg.origin_center {
         (0.0, 0.0)
     } else if cfg.bed_shape.len() >= 3 {
@@ -1879,6 +2092,8 @@ struct Writer<'a> {
     last_dir: V2,
     no_hop: bool,
     drawn: Vec<(V2, V2)>,
+    /// The same walls on the grid the file is printed on, for counting crossings.
+    drawn_printed: Vec<(V2, V2)>,
     /// Footprint rings of this layer's overhanging beads, which curl as they cool.
     curled: Vec<Vec<V2>>,
     /// Volumetric rate of the last bead written, carried across layers so the
@@ -1916,6 +2131,8 @@ struct Writer<'a> {
     prev_bridges: Vec<(V2, V2)>,
     /// Bridges of the layer being written, moved into `prev_bridges` at its end.
     layer_bridges: Vec<(V2, V2)>,
+    /// Seam of every closed loop written on the layer below, by object and feature.
+    seam_prev: HashMap<(u16, u8), Vec<SeamMark>>,
 }
 
 /// A wall that climbs while it prints.
@@ -2003,17 +2220,9 @@ impl Writer<'_> {
 
     fn restore_accel(&mut self) {
         let base = print_accel(self.cfg);
-        if self.accel > 0.0 && base > 0.0 {
-            match self.cfg.flavor {
-                Flavor::Klipper => {
-                    let _ = writeln!(self.out, "SET_VELOCITY_LIMIT ACCEL={base:.0}");
-                }
-                Flavor::Marlin => {
-                    let _ = writeln!(self.out, "M204 S{base:.0}");
-                }
-            }
+        if base > 0.0 && self.accel > 0.0 {
+            self.set_accel(base);
         }
-        self.accel = 0.0;
     }
 
     fn restore_limits(&mut self) {
@@ -2024,7 +2233,34 @@ impl Writer<'_> {
     /// Switches the machine to `accel` mm/s^2, or leaves it alone at 0.
     ///
     /// Each flavour states the same change its own way: Klipper takes
-    /// `SET_VELOCITY_LIMIT ACCEL=`, Marlin takes `M204 S`.
+    /// `SET_VELOCITY_LIMIT ACCEL=`, Marlin takes `M204 S`. A profile that states no
+    /// acceleration at all gets no commands, per [`manages_accel`].
+    fn apply_accel(&mut self, accel: f64) {
+        if accel <= 0.0 || !manages_accel(self.cfg) {
+            return;
+        }
+        self.set_accel(accel);
+    }
+
+    /// Tells the machine its acceleration, once, when the figure changes.
+    ///
+    /// `self.accel` is what the machine was last told, so a restore to the figure the
+    /// file already set on the previous feature writes nothing.
+    fn set_accel(&mut self, accel: f64) {
+        if (accel - self.accel).abs() < 1.0 {
+            return;
+        }
+        match self.cfg.flavor {
+            Flavor::Klipper => {
+                let _ = writeln!(self.out, "SET_VELOCITY_LIMIT ACCEL={accel:.0}");
+            }
+            Flavor::Marlin => {
+                let _ = writeln!(self.out, "M204 S{accel:.0}");
+            }
+        }
+        self.accel = accel;
+    }
+
     /// Sends one move to the time planner and mirrors its running total.
     fn timed_move(&mut self, m: TimedMove) {
         self.time.push(m);
@@ -2043,22 +2279,20 @@ impl Writer<'_> {
         self.stats.est_seconds = self.time.seconds();
     }
 
-    fn apply_accel(&mut self, accel: f64) {
-        if accel <= 0.0 || (accel - self.accel).abs() < 1.0 {
-            return;
-        }
-        match self.cfg.flavor {
-            Flavor::Klipper => {
-                let _ = writeln!(self.out, "SET_VELOCITY_LIMIT ACCEL={accel:.0}");
-            }
-            Flavor::Marlin => {
-                let _ = writeln!(self.out, "M204 S{accel:.0}");
-            }
-        }
-        self.accel = accel;
+    /// Rounds a coordinate to the profile's resolution grid.
+    /// A coordinate as the file carries it.
+    ///
+    /// `snap` quantises to the machine's resolution and the writer prints three
+    /// decimals of that, so anything which has to agree with a reader of the file --
+    /// the walls a travel is tested against, and the end points of that travel --
+    /// has to sit on the printed grid. Off it, a near-tangent crossing comes out
+    /// differently on the two sides of the same file.
+    fn printed(&self, v: f64) -> f64 {
+        format!("{:.3}", self.snap(v))
+            .parse()
+            .unwrap_or_else(|_| self.snap(v))
     }
 
-    /// Rounds a coordinate to the profile's resolution grid.
     fn snap(&self, v: f64) -> f64 {
         let res = self.cfg.gcode_resolution;
         if res <= 0.0 {
@@ -2212,6 +2446,15 @@ impl Writer<'_> {
             0.0 => self.cfg.travel_speed,
             ceiling => self.cfg.travel_speed.min(ceiling),
         };
+        let (from, arrived) = (
+            V2::new(self.snap(self.pos.x), self.snap(self.pos.y)),
+            V2::new(self.snap(to.x), self.snap(to.y)),
+        );
+        let head = V2::new(self.printed(from.x), self.printed(from.y));
+        let tail = V2::new(self.printed(arrived.x), self.printed(arrived.y));
+        if crosses(head, tail, &self.drawn_printed) {
+            self.stats.travel_crossings += 1;
+        }
         let _ = writeln!(
             self.out,
             "G1 X{:.3} Y{:.3} F{:.0}",
@@ -2293,10 +2536,19 @@ impl Writer<'_> {
             })
             .unwrap_or_default();
         let length = detour.as_ref().map_or(d, |route| route.length);
-        if detour.is_none() && crosses(from, to, &self.drawn) {
-            self.stats.travel_crossings += 1;
+        let arrived = V2::new(self.snap(to.x), self.snap(to.y));
+        let mut emitted: Vec<V2> = Vec::with_capacity(via.len() + 2);
+        emitted.push(from);
+        emitted.extend(via.iter().copied());
+        emitted.push(arrived);
+        for pair in emitted.windows(2) {
+            let head = V2::new(self.printed(pair[0].x), self.printed(pair[0].y));
+            let tail = V2::new(self.printed(pair[1].x), self.printed(pair[1].y));
+            if crosses(head, tail, &self.drawn_printed) {
+                self.stats.travel_crossings += 1;
+            }
         }
-        let crossed = crosses(from, to, &self.drawn);
+        let crossed = via.is_empty() && crosses(from, arrived, &self.drawn);
         let over_curl = self.cfg.travel_lift_before_obstacle
             && self.curled.iter().any(|ring| ring_crosses(from, to, ring));
         let long = length > threshold || over_curl;
@@ -2407,8 +2659,16 @@ impl Writer<'_> {
     }
 
     /// Moves a path's entry so the travel into it does not cut a printed perimeter.
+    ///
+    /// A closed loop is left alone unless the profile lets its start move: an aligned
+    /// or rear seam is the whole point of choosing one, and rotating the loop to save a
+    /// travel would put the seam back where it was before, one layer at a time. Travel
+    /// around a printed wall is routed instead, which costs distance and no seam.
     fn enter(&mut self, path: &mut Path, next: Option<V2>) {
         if !self.cfg.avoid_crossing_perimeters || self.drawn.is_empty() {
+            return;
+        }
+        if path.closed && self.cfg.seam != Seam::Nearest {
             return;
         }
         let cap = self.cfg.avoid_crossing_perimeters_max_detour;
@@ -2443,28 +2703,13 @@ impl Writer<'_> {
         } else {
             self.cfg.retract_min_travel
         };
-        self.travel(path.pts[0], threshold);
         if is_perimeter(path.feature) {
-            let n = path.pts.len();
-            let count = if path.closed { n } else { n.saturating_sub(1) };
-            let snapped: Vec<V2> = path
-                .pts
-                .iter()
-                .map(|q| V2::new(self.snap(q.x), self.snap(q.y)))
-                .collect();
-            for i in 0..count {
-                self.drawn.push((snapped[i], snapped[(i + 1) % n]));
-            }
-            if path.closed && n >= 3 {
-                if path.feature == Feature::Bridge {
-                    let n = path.pts.len();
-                    let segments = if path.closed { n } else { n.saturating_sub(1) };
-                    for i in 0..segments {
-                        self.layer_bridges
-                            .push((path.pts[i], path.pts[(i + 1) % n]));
-                    }
+            if path.closed && path.pts.len() >= 3 && path.feature == Feature::Bridge {
+                let n = path.pts.len();
+                for i in 0..n {
+                    self.layer_bridges
+                        .push((path.pts[i], path.pts[(i + 1) % n]));
                 }
-                self.loops.push(snapped);
             }
             for width in &path.width {
                 if *width > self.layer_bead {
@@ -2542,7 +2787,16 @@ impl Writer<'_> {
         if n < 2 {
             return;
         }
+        self.travel(pts[0], threshold);
         let segments = if closed { n } else { n - 1 };
+        if is_perimeter(path.feature) {
+            for i in 0..segments {
+                self.drawn.push((pts[i], pts[(i + 1) % n]));
+            }
+            if closed && n >= 3 {
+                self.loops.push(pts.clone());
+            }
+        }
         let area = self.cfg.filament_area();
         let arcs = self.cfg.arc_fitting
             && is_perimeter(path.feature)
@@ -2580,6 +2834,13 @@ impl Writer<'_> {
                 continue;
             }
             let b = pts[to % n];
+            if is_perimeter(path.feature) {
+                let head = V2::new(self.printed(pts[from % n].x), self.printed(pts[from % n].y));
+                let tail = V2::new(self.printed(b.x), self.printed(b.y));
+                if head.dist(tail) > 1e-6 {
+                    self.drawn_printed.push((head, tail));
+                }
+            }
             self.last_dir = (b - pts[(to - 1) % n]).norm();
             let width = match arc {
                 Some(_) => {
@@ -2782,6 +3043,7 @@ pub fn generate(
         last_dir: V2::ZERO,
         no_hop: false,
         drawn: Vec::new(),
+        drawn_printed: Vec::new(),
         curled: Vec::new(),
         last_rate: 0.0,
         loops: Vec::new(),
@@ -2796,6 +3058,7 @@ pub fn generate(
         over_raft: false,
         prev_bridges: Vec::new(),
         layer_bridges: Vec::new(),
+        seam_prev: HashMap::new(),
     };
     // The reference dialects hand a machine's start G-code where the part sits, so
     // its bed-mesh probe can be kept inside the plate the part leaves it.
@@ -2992,6 +3255,9 @@ pub fn generate(
             .filter_map(|l| path_from(l, tx, ty, cfg))
             .collect();
         mark_holes(&mut paths);
+        if cfg.seam == Seam::Aligned {
+            align_seams(&mut paths, &mut w.seam_prev);
+        }
         if paths.is_empty() && !first_layer {
             continue;
         }
@@ -3077,7 +3343,9 @@ pub fn generate(
                 } else {
                     let mut speed = path_speed(p.feature, cfg, first_layer, p.overhang);
                     if limit > 0.0 {
-                        speed = speed.min(limit / (section_area(p.feature, widest, height) * cfg.flow * p.flow));
+                        speed = speed.min(
+                            limit / (section_area(p.feature, widest, height) * cfg.flow * p.flow),
+                        );
                     }
                     let owned = filament_speed_limit(p.feature, cfg);
                     if owned > 0.0 {
@@ -3227,6 +3495,7 @@ pub fn generate(
         w.previous_feature = None;
         w.no_hop = true;
         w.drawn.clear();
+        w.drawn_printed.clear();
         w.loops.clear();
         w.curled = curled_obstacles(&ordered);
         w.layer_bead = 0.0;
@@ -3493,6 +3762,80 @@ mod tests {
         V2::new(0.0, 0.0)
     }
 
+    fn arc_points(start: f64, end: f64, radius: f64, steps: usize) -> Vec<(f64, f64)> {
+        (0..=steps)
+            .map(|i| {
+                let angle = start + (end - start) * i as f64 / steps as f64;
+                (radius * angle.cos(), radius * angle.sin())
+            })
+            .collect()
+    }
+
+    fn arcs(pts: &[(f64, f64)]) -> Vec<f64> {
+        fit_runs(
+            &pts.iter().map(|&(x, y)| V2::new(x, y)).collect::<Vec<_>>(),
+            false,
+            0.025,
+        )
+        .into_iter()
+        .filter_map(|run| match run {
+            Run::Arc { length, .. } => Some(length),
+            Run::Line { .. } => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_quarter_circle_becomes_one_arc_of_the_right_length() {
+        let pts = arc_points(0.0, std::f64::consts::FRAC_PI_2, 2.0, 40);
+        let found = arcs(&pts);
+        let length: f64 = found.iter().sum();
+        assert!(
+            (length - std::f64::consts::FRAC_PI_2 * 2.0).abs() < 0.02,
+            "a quarter circle of radius 2 is 3.14 mm, fitted {length:.3} mm in {} arc(s)",
+            found.len()
+        );
+    }
+
+    #[test]
+    fn a_path_that_laps_its_own_circle_is_not_one_arc() {
+        // The two ends of a lapping run sit close together, so a single G2 would
+        // sweep the short way and deposit a fraction of the planned plastic.
+        let mut pts = arc_points(0.0, 2.0 * std::f64::consts::TAU, 0.4, 60);
+        pts.pop();
+        pts.extend(
+            arc_points(0.0, 1.2 * std::f64::consts::TAU, 0.4, 40)
+                .into_iter()
+                .skip(1),
+        );
+        let found = arcs(&pts);
+        let planned: f64 = pts
+            .windows(2)
+            .map(|w| V2::new(w[0].0, w[0].1).dist(V2::new(w[1].0, w[1].1)))
+            .sum();
+        let fitted: f64 = found.iter().sum();
+        assert!(
+            fitted >= 0.8 * planned,
+            "the plan is {planned:.2} mm of path, the arcs claim {fitted:.2} mm in {} arc(s)",
+            found.len()
+        );
+    }
+
+    #[test]
+    fn vertices_that_nearly_coincide_do_not_become_an_arc_about_their_own_start() {
+        let pts = [
+            (0.0, 0.0),
+            (0.0002, 0.0),
+            (0.0004, 0.0),
+            (5.0, 0.0),
+            (10.0, 0.0),
+        ];
+        assert!(
+            arcs(&pts).is_empty(),
+            "a radius at the scale of the tolerance is not an arc the printer can draw"
+        );
+    }
+
     #[test]
     fn a_slope_limit_solves_the_cap_against_the_widest_section() {
         let cfg = PrinterConfig {
@@ -3565,6 +3908,54 @@ mod tests {
     }
 
     #[test]
+    fn the_aligned_seam_holds_still_when_the_tessellation_moves() {
+        let ring = |count: usize, phase: f64| -> Vec<V2> {
+            (0..count)
+                .map(|i| {
+                    let angle = phase + std::f64::consts::TAU * i as f64 / count as f64;
+                    V2::new(100.0 + 20.0 * angle.cos(), 50.0 + 20.0 * angle.sin())
+                })
+                .collect()
+        };
+        let coarse = ring(64, 0.0);
+        let shifted = ring(97, 0.31);
+        let a = coarse[seam_index(&coarse)];
+        let b = shifted[seam_index(&shifted)];
+        assert!(
+            a.dist(b) < 1.0,
+            "a re-tessellated cross-section moved the seam from {a:?} to {b:?}"
+        );
+        assert!(
+            a.y > 69.5 && b.y > 69.5,
+            "the seam belongs at the rear, on the bed's +Y side: {a:?} {b:?}"
+        );
+    }
+
+    #[test]
+    fn a_corner_away_from_the_rear_does_not_pull_the_seam_to_itself() {
+        let mut profile = vec![
+            V2::new(10.0, 10.0),
+            V2::new(11.0, 0.0),
+            V2::new(10.0, -10.0),
+            V2::new(-10.0, -10.0),
+            V2::new(-10.0, 10.0),
+        ];
+        let at = seam_index(&profile);
+        assert!(
+            profile[at].y > 5.0,
+            "the sharp corner at +X is not the rear; the seam was put at {:?}",
+            profile[at]
+        );
+        profile.rotate_left(2);
+        let rotated = seam_index(&profile);
+        assert!(
+            profile[rotated].y > 5.0,
+            "rotating the same loop must not move the seam: {:?}",
+            profile[rotated]
+        );
+    }
+
+    #[test]
     fn a_travel_that_only_touches_a_wall_is_not_a_crossing() {
         let seg = [(V2::new(5.0, -5.0), V2::new(5.0, 5.0))];
         assert!(crosses(origin(), V2::new(10.0, 0.0), &seg));
@@ -3609,6 +4000,55 @@ mod tests {
             "entering at (-6,0) is free on the way in but its exit runs straight \
              through the wall, so the far corner wins instead"
         );
+    }
+
+    #[test]
+    fn a_flat_rear_edge_takes_its_seam_from_the_centre_line() {
+        let pts = [
+            V2::new(-10.0, 0.0),
+            V2::new(-2.0, 5.0),
+            V2::new(3.0, 5.0),
+            V2::new(10.0, 0.0),
+            V2::new(0.0, -8.0),
+        ];
+        assert_eq!(
+            seam_index(&pts),
+            1,
+            "both rear corners are level, so the one nearer the centre line takes the seam"
+        );
+        let tilted = [
+            V2::new(-10.0, 0.0),
+            V2::new(-2.0, 5.0),
+            V2::new(3.0, 4.5),
+            V2::new(10.0, 0.0),
+            V2::new(0.0, -8.0),
+        ];
+        assert_eq!(
+            seam_index(&tilted),
+            1,
+            "the rearmost corner wins outright, centre line or not"
+        );
+    }
+
+    #[test]
+    fn a_seam_holds_the_vertex_the_layer_below_started_on() {
+        let flat = [(-10.0, -4.0), (10.0, -4.0), (10.0, 4.0), (-10.0, 4.0)];
+        let mut paths = vec![loop_of(&flat)];
+        let mut prev = HashMap::new();
+        prev.insert(
+            (0u16, Feature::Inner as u8),
+            vec![SeamMark {
+                samples: thin(&loop_of(&flat).pts, SEAM_SAMPLES),
+                at: V2::new(10.0, 4.0),
+            }],
+        );
+        align_seams(&mut paths, &mut prev);
+        assert_eq!(
+            paths[0].pts[0],
+            V2::new(10.0, 4.0),
+            "the layer below started here, so this one does too"
+        );
+        assert_eq!(paths[0].width[0], 0.4, "the width follows its vertex");
     }
 
     #[test]

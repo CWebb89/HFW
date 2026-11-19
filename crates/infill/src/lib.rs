@@ -323,6 +323,21 @@ impl InfillParams {
         p.thick_radius() + 0.5 * self.width - self.overlap
     }
 
+    /// Radius at which a solid skin line may begin.
+    ///
+    /// The ordinary inset keeps a bead's plastic clear of the shell, which is right
+    /// for sparse fill: a line that reached the wall would lay plastic over a bead
+    /// already printed there. A skin is the opposite case, because it has to meet
+    /// the wall it borders or the two leave a gap between them, so it is clipped
+    /// where the reference slicers clip their fill: at the shell's inner edge less
+    /// the overlap, one bead inside the innermost loop's path. Measured at the
+    /// ordinary inset instead, a top surface narrower than twice the inset has no
+    /// room for a line at all, which is what left the staircase annulus on a curved
+    /// part to the perimeters.
+    pub fn skin_offset(&self, p: &WallParams) -> f64 {
+        (p.thick_radius() - self.overlap).max(0.0)
+    }
+
     fn sparse_spacing(&self) -> f64 {
         let families = match self.pattern {
             Pattern::Grid | Pattern::CrossHatch => 2.0,
@@ -461,24 +476,46 @@ impl SkinGrid {
     }
 }
 
-/// Bounded cache of packed layer masks used for skin classification.
+/// Packed layer masks used for skin classification.
+///
+/// The masks are built when the cache is created, over a closed range of
+/// layers, and never change afterwards. That is what lets the caller classify
+/// several layers at once from different threads: reading a mask takes `&self`,
+/// so the same cache can be shared, where a lazily filled one could not.
+///
+/// The range has to cover every layer the reader asks about, which means the
+/// layers just below the first one read and just above the last, as far as the
+/// deepest skin window reaches.
 pub struct MaskCache<'a> {
     regions: &'a [Region],
     grid: SkinGrid,
-    capacity: usize,
-    masks: std::collections::HashMap<usize, Vec<u64>>,
+    lo: usize,
+    masks: Vec<Vec<u64>>,
 }
 
 impl<'a> MaskCache<'a> {
-    /// Creates a cache holding at most `capacity` masks; it must exceed the
-    /// largest `top_layers + bottom_layers + 1` in use.
+    /// Masks for every layer.
+    ///
+    /// `capacity` is kept for the callers that sized it, but nothing is evicted:
+    /// the whole stack has to be in hand for the layers to be classified in
+    /// parallel.
     pub fn new(regions: &'a [Region], res: f64, capacity: usize) -> MaskCache<'a> {
+        let hi = regions.len().saturating_sub(1);
+        let _ = capacity;
+        MaskCache::window(regions, res, 0, hi)
+    }
+
+    /// Masks for layers `lo..=hi`.
+    pub fn window(regions: &'a [Region], res: f64, lo: usize, hi: usize) -> MaskCache<'a> {
         let grid = SkinGrid::new(regions, res);
+        let hi = hi.min(regions.len().saturating_sub(1));
+        let lo = lo.min(hi);
+        let masks = (lo..=hi).map(|k| grid.packed(&regions[k])).collect();
         MaskCache {
             regions,
             grid,
-            capacity: capacity.max(1),
-            masks: std::collections::HashMap::new(),
+            lo,
+            masks,
         }
     }
 
@@ -492,8 +529,13 @@ impl<'a> MaskCache<'a> {
         self.grid.words
     }
 
+    /// First layer this cache holds a mask for.
+    pub fn first_layer(&self) -> usize {
+        self.lo
+    }
+
     /// Packed mask of layer `k` exactly as the slicer produced it.
-    pub fn own_bits(&mut self, k: usize) -> Vec<u64> {
+    pub fn own_bits(&self, k: usize) -> Vec<u64> {
         self.bits(k).to_vec()
     }
 
@@ -502,23 +544,21 @@ impl<'a> MaskCache<'a> {
         self.masks.len()
     }
 
-    fn bits(&mut self, k: usize) -> &[u64] {
-        if !self.masks.contains_key(&k) {
-            if self.masks.len() >= self.capacity {
-                let keep_from = k.saturating_sub(self.capacity - 1);
-                self.masks.retain(|layer, _| *layer >= keep_from);
+    fn bits(&self, k: usize) -> &[u64] {
+        match k.checked_sub(self.lo).and_then(|i| self.masks.get(i)) {
+            Some(bits) => bits,
+            None => {
+                debug_assert!(false, "layer {k} is outside the mask window");
+                &[]
             }
-            let packed = self.grid.packed(&self.regions[k]);
-            self.masks.insert(k, packed);
         }
-        self.masks.get(&k).map(Vec::as_slice).unwrap_or_default()
     }
 
     /// Bits of layer `k - 1`, empty on the first layer.
     ///
     /// This is the anchor mask: a bridge line is only a bridge when its ends
     /// land on material that the previous layer actually printed.
-    pub fn below_bits(&mut self, k: usize) -> Vec<u64> {
+    pub fn below_bits(&self, k: usize) -> Vec<u64> {
         if k == 0 {
             return vec![0u64; self.grid.words];
         }
@@ -529,7 +569,7 @@ impl<'a> MaskCache<'a> {
     ///
     /// These are the cells a bridge has to span. The first layer is exempt
     /// because the bed supports it.
-    pub fn air_below_bits(&mut self, k: usize) -> Vec<u64> {
+    pub fn air_below_bits(&self, k: usize) -> Vec<u64> {
         let own = self.bits(k).to_vec();
         if k == 0 {
             return vec![0u64; own.len()];
@@ -545,7 +585,7 @@ impl<'a> MaskCache<'a> {
     /// layers, so the answer has to be the same classification the fill itself
     /// uses; anything else and a combined layer would either print twice or
     /// leave a hole.
-    pub fn sparse_own_bits(&mut self, k: usize, top: usize, bottom: usize) -> Vec<u64> {
+    pub fn sparse_own_bits(&self, k: usize, top: usize, bottom: usize) -> Vec<u64> {
         let solid = self.solid_bits(k, top, bottom);
         let air = self.air_below_bits(k);
         let own = self.own_bits(k);
@@ -561,7 +601,7 @@ impl<'a> MaskCache<'a> {
     /// does not. That is stricter than the skin rule on purpose: skin is solid
     /// for several layers so the surface has something underneath, but only the
     /// outermost one is the surface a nozzle can actually flatten.
-    pub fn top_bits(&mut self, k: usize) -> Vec<u64> {
+    pub fn top_bits(&self, k: usize) -> Vec<u64> {
         let own = self.bits(k).to_vec();
         if k + 1 >= self.regions.len() {
             return own;
@@ -577,7 +617,7 @@ impl<'a> MaskCache<'a> {
     /// coverage test, with the bottom condition dropped. A line inside these
     /// cells is the face the print is judged on, so the writer gives it the
     /// top-surface speed and acceleration when a profile sets them.
-    pub fn top_skin_bits(&mut self, k: usize, top: usize) -> Vec<u64> {
+    pub fn top_skin_bits(&self, k: usize, top: usize) -> Vec<u64> {
         let words = self.grid.words;
         let real_top = top.min(self.regions.len() - 1 - k);
         let mut cov = vec![u64::MAX; words];
@@ -598,7 +638,7 @@ impl<'a> MaskCache<'a> {
     ///
     /// A cell stays sparse only while it remains covered `top` layers above and
     /// `bottom` layers below; anything else becomes solid.
-    pub fn solid_bits(&mut self, k: usize, top: usize, bottom: usize) -> Vec<u64> {
+    pub fn solid_bits(&self, k: usize, top: usize, bottom: usize) -> Vec<u64> {
         let words = self.grid.words;
         let real_top = top.min(self.regions.len() - 1 - k);
         let real_bottom = bottom.min(k);
@@ -629,12 +669,14 @@ impl<'a> MaskCache<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Ctx<'a> {
     region: &'a Region,
     index: &'a SegIndex,
     grid: &'a SkinGrid,
     mask: &'a [u64],
     thr: f64,
+    thr_solid: f64,
     ip: &'a InfillParams,
     all_solid: bool,
     width: f64,
@@ -658,6 +700,7 @@ fn family(cx: &Ctx, theta: f64, spacing: f64, want_solid: bool) -> Vec<Line> {
     let i0 = (cmin / spacing).ceil() as i64;
     let i1 = (cmax / spacing).floor() as i64;
     let min_len = cx.width;
+    let thr = if want_solid { cx.thr_solid } else { cx.thr };
     let kind = if want_solid {
         Kind::Solid
     } else {
@@ -683,7 +726,7 @@ fn family(cx: &Ctx, theta: f64, spacing: f64, want_solid: bool) -> Vec<Line> {
         ts.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let valid = |t: f64| -> bool {
             let p = n * c + u * t;
-            if cx.index.nearest(p, cx.thr).is_some() {
+            if cx.index.nearest(p, thr).is_some() {
                 return false;
             }
             if cx.all_solid {
@@ -969,23 +1012,33 @@ struct Walk {
 }
 
 fn anchor_walk(region: &Region, thr: f64, ip: &InfillParams) -> Option<Walk> {
-    if ip.anchor <= 0.0 || ip.anchor_max <= 0.0 || thr <= 0.0 {
-        return None;
-    }
-    let shrink = hfw_walls::offset_region(region, -thr, (0.25 * thr).max(0.05)).ok()?;
-    if shrink.rings.is_empty() {
+    if ip.anchor <= 0.0 || ip.anchor_max <= 0.0 || thr <= 0.0 || region.rings.is_empty() {
         return None;
     }
     let index = SegIndex::new(
-        shrink.segments(),
-        shrink.bounds().grown(2.0 * thr),
+        region.segments(),
+        region.bounds().grown(2.0 * thr),
         (0.5 * thr).max(0.3),
     );
     Some(Walk {
-        map: RingMap::new(&shrink.rings),
-        rings: shrink.rings,
+        map: RingMap::new(&region.rings),
+        rings: region.rings.clone(),
         index,
     })
+}
+
+/// The area inside the wall band: what the sparse fill is drawn on.
+///
+/// This is the region `solid_infill_below_area` is measured against. Upstream
+/// applies that threshold to its fill surfaces, which are the layer's area after
+/// the perimeters come off, not to the part outline: an arm 3 mm wide and 30 mm
+/// long is a 1500 mm² outline but a 36 mm² infill strip, and it is the strip that
+/// decides whether the interior is printed solid.
+fn inset_region(region: &Region, thr: f64) -> Region {
+    if thr <= 0.0 || region.is_empty() {
+        return region.clone();
+    }
+    hfw_walls::offset_region(region, -thr, (0.25 * thr).max(0.05))
 }
 
 /// The ring vertices from one foot to another, feet included, along the shorter way.
@@ -1119,8 +1172,34 @@ fn push_vertex(line: &mut Line, p: V2, w: f64) {
     line.width.push(w);
 }
 
-fn join_shell_ends(lines: &mut Vec<Line>, walk: &Walk, cap: f64, air: Option<(&[u64], &SkinGrid)>) {
-    if lines.len() < 2 || cap <= 0.0 {
+/// How much shell a layer's sparse fill may spend walking along the wall.
+///
+/// The walk exists to turn two fill lines into one continuous path, which saves a
+/// retraction and a travel. It costs a bead laid over the inner perimeter that is
+/// already printed there, so the material is spent twice on the same spot. That is
+/// worth it at the rate of one spacing of wall per pair of lines; it is not worth
+/// it on a closed shell, where every line end has a neighbour along the wall and a
+/// greedy walk chains the whole layer into one long bead around the part. The
+/// budget is the fraction of the fill's own path length a layer may spend that
+/// way, which scales with the fill being served instead of with the wall's size.
+const WALK_SHARE: f64 = 1.0;
+
+/// Total printed length of a run of lines, in millimetres.
+fn total_length(lines: &[Line]) -> f64 {
+    lines
+        .iter()
+        .map(|line| line.pts.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>())
+        .sum()
+}
+
+fn join_shell_ends(
+    lines: &mut Vec<Line>,
+    walk: &Walk,
+    cap: f64,
+    budget: f64,
+    air: Option<(&[u64], &SkinGrid)>,
+) {
+    if lines.len() < 2 || cap <= 0.0 || budget <= 0.0 {
         return;
     }
     let supported = |p: V2| match air {
@@ -1131,6 +1210,7 @@ fn join_shell_ends(lines: &mut Vec<Line>, walk: &Walk, cap: f64, air: Option<(&[
     let reach = 2.0 * lines[0].width[0] + 2e-3;
     let mut out: Vec<Line> = Vec::with_capacity(lines.len());
     let mut current = lines[0].clone();
+    let mut spent = 0.0;
     for line in lines.iter().skip(1) {
         let last = *current.pts.last().unwrap_or(&line.pts[0]);
         let from = index.nearest(last, reach);
@@ -1152,17 +1232,20 @@ fn join_shell_ends(lines: &mut Vec<Line>, walk: &Walk, cap: f64, air: Option<(&[
                     best = Some((len, near, walked));
                 }
             }
-            if let Some((_, near, walk)) = best {
-                let width = line.width[0];
-                for &p in walk.iter().skip(1) {
-                    push_vertex(&mut current, p, width);
+            if let Some((len, near, walk)) = best {
+                if spent + len <= budget {
+                    let width = line.width[0];
+                    for &p in walk.iter().skip(1) {
+                        push_vertex(&mut current, p, width);
+                    }
+                    let order = if near == 1 { [1usize, 0] } else { [0, 1] };
+                    for k in order {
+                        let w = line.width[k.min(line.width.len() - 1)];
+                        push_vertex(&mut current, line.pts[k], w);
+                    }
+                    spent += len;
+                    merged = true;
                 }
-                let order = if near == 1 { [1usize, 0] } else { [0, 1] };
-                for k in order {
-                    let w = line.width[k.min(line.width.len() - 1)];
-                    push_vertex(&mut current, line.pts[k], w);
-                }
-                merged = true;
             }
         }
         if !merged {
@@ -1209,7 +1292,7 @@ fn anchored_fraction(lines: &[Line], below: &[u64], grid: &SkinGrid, reach: f64)
 #[allow(clippy::too_many_arguments)]
 pub fn infill_layer(
     region: &Region,
-    cache: &mut MaskCache,
+    cache: &MaskCache,
     k: usize,
     z: f64,
     p: &WallParams,
@@ -1226,6 +1309,7 @@ pub fn infill_layer(
     let below = cache.below_bits(k);
     let grid = *cache.grid();
     let thr = ip.inner_offset(p);
+    let thr_solid = ip.skin_offset(p);
     let rb = region.bounds();
     let index = SegIndex::new(
         region.segments(),
@@ -1233,7 +1317,8 @@ pub fn infill_layer(
         (0.5 * thr).max(0.3),
     );
     let all_solid = ip.density >= 0.999;
-    let inner = anchor_walk(region, thr, ip);
+    let inset = inset_region(region, thr);
+    let inner = anchor_walk(&inset, thr, ip);
     let mut covered = solid.clone();
     for (c, a) in covered.iter_mut().zip(&air) {
         *c &= !*a;
@@ -1256,7 +1341,7 @@ pub fn infill_layer(
         *c &= !*t;
     }
     let small = if !all_solid && ip.density > 0.0 && ip.solid_below_area > 0.0 {
-        small_island_bits(region, &grid, ip.solid_below_area)
+        small_island_bits(&inset, &grid, ip.solid_below_area)
     } else {
         None
     };
@@ -1294,6 +1379,7 @@ pub fn infill_layer(
         grid: &grid,
         mask: &covered,
         thr,
+        thr_solid,
         ip,
         all_solid,
         width: ip.width,
@@ -1393,6 +1479,7 @@ pub fn infill_layer(
             grid: &grid,
             mask: &air,
             thr,
+            thr_solid,
             ip,
             all_solid: false,
             width: ip.bridge.width,
@@ -1490,7 +1577,8 @@ pub fn infill_layer(
             } else {
                 let mut runs = family(&cx_sparse, angle.to_radians(), spacing, false);
                 if let Some(inner) = &inner {
-                    join_shell_ends(&mut runs, inner, ip.anchor_max, Some((&air, &grid)));
+                    let budget = WALK_SHARE * total_length(&runs);
+                    join_shell_ends(&mut runs, inner, ip.anchor_max, budget, Some((&air, &grid)));
                 }
                 runs
             };
@@ -1510,10 +1598,12 @@ pub fn infill_layer(
             for angle in ip.sparse_angles(k) {
                 let mut combined_lines = family(&cx_combined, angle.to_radians(), spacing, false);
                 if let Some(inner) = &inner {
+                    let budget = WALK_SHARE * total_length(&combined_lines);
                     join_shell_ends(
                         &mut combined_lines,
                         inner,
                         ip.anchor_max,
+                        budget,
                         Some((&air, &grid)),
                     );
                 }
@@ -1734,7 +1824,7 @@ fn curve_skin(grid: &SkinGrid, mask: &[u64], pattern: SkinPattern, width: f64) -
 /// as the outermost side loop so the writer gives it the outer-wall speed.
 pub fn overhang_perimeter(
     region: &Region,
-    cache: &mut MaskCache,
+    cache: &MaskCache,
     k: usize,
     p: &WallParams,
     ip: &InfillParams,
@@ -2000,7 +2090,7 @@ pub enum IroningTarget {
 /// means; the other two targets differ in which layer the caller runs this on.
 pub fn ironing_layer(
     region: &Region,
-    cache: &mut MaskCache,
+    cache: &MaskCache,
     k: usize,
     ip: &InfillParams,
     spacing: f64,
@@ -2209,13 +2299,13 @@ mod tests {
 
     fn new_pattern_layer(pattern: Pattern, k: usize) -> Vec<Line> {
         let regions = stack(k + 6);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let p = WallParams::new(0.4, 2);
         let mut ip = InfillParams::new(0.4);
         ip.pattern = pattern;
         ip.density = 0.15;
         ip.anchor = 0.0;
-        infill_layer(&regions[k], &mut cache, k, 0.1 * k as f64, &p, &ip, None)
+        infill_layer(&regions[k], &cache, k, 0.1 * k as f64, &p, &ip, None)
             .into_iter()
             .filter(|line| line.kind == Kind::Infill)
             .collect()
@@ -2324,11 +2414,11 @@ mod tests {
     #[test]
     fn infill_stays_inside_the_region() {
         let regions = stack(1);
-        let mut cache = MaskCache::new(&regions, 0.1, 1);
+        let cache = MaskCache::new(&regions, 0.1, 1);
         let p = WallParams::new(0.4, 3);
         let mut ip = InfillParams::new(0.4);
         ip.density = 0.5;
-        let lines = infill_layer(&regions[0], &mut cache, 0, 0.0, &p, &ip, None);
+        let lines = infill_layer(&regions[0], &cache, 0, 0.0, &p, &ip, None);
         assert!(!lines.is_empty());
         for l in &lines {
             for pt in &l.pts {
@@ -2357,12 +2447,12 @@ mod tests {
     #[test]
     fn sparse_infill_never_prints_over_air() {
         let regions = spanned_plate(5, 6);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let p = WallParams::new(0.4, 2);
         let mut ip = InfillParams::new(0.4);
         ip.density = 0.5;
         let k = 5;
-        let lines = infill_layer(&regions[k], &mut cache, k, 0.0, &p, &ip, None);
+        let lines = infill_layer(&regions[k], &cache, k, 0.0, &p, &ip, None);
 
         let in_gap = |pt: V2| pt.x > 11.0 && pt.x < 29.0;
         let sparse: Vec<&Line> = lines.iter().filter(|l| l.kind == Kind::Infill).collect();
@@ -2385,16 +2475,16 @@ mod tests {
     #[test]
     fn the_anchor_caps_how_far_infill_reaches_into_the_shell() {
         let regions = spanned_plate(5, 6);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let p = WallParams::new(0.4, 2);
         let k = 5;
-        let mut span = |anchor: f64| -> f64 {
+        let span = |anchor: f64| -> f64 {
             let ip = InfillParams {
                 density: 0.5,
                 anchor,
                 ..InfillParams::new(0.4)
             };
-            let lines = infill_layer(&regions[k], &mut cache, k, 0.0, &p, &ip, None);
+            let lines = infill_layer(&regions[k], &cache, k, 0.0, &p, &ip, None);
             let mut lo = f64::INFINITY;
             let mut hi = f64::NEG_INFINITY;
             for line in lines.iter().filter(|l| l.kind == Kind::Infill) {
@@ -2441,12 +2531,12 @@ mod tests {
     #[test]
     fn cross_hatch_puts_crossing_strands_before_the_fill() {
         let regions = spanned_plate(5, 6);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let p = WallParams::new(0.4, 2);
         let mut ip = InfillParams::new(0.4);
         ip.bridge.cross_hatch = true;
         let k = 5;
-        let lines = infill_layer(&regions[k], &mut cache, k, 0.0, &p, &ip, None);
+        let lines = infill_layer(&regions[k], &cache, k, 0.0, &p, &ip, None);
         let anchors: Vec<&Line> = lines
             .iter()
             .filter(|l| l.kind == Kind::BridgeAnchor)
@@ -2471,9 +2561,39 @@ mod tests {
     }
 
     #[test]
+    fn a_sloping_stack_grows_its_shell_under_each_exposed_band() {
+        let regions: Vec<Region> = (0..40)
+            .map(|k| {
+                let r = 18.0 - 0.4 * k as f64;
+                let ring: Vec<V2> = (0..128)
+                    .map(|i| {
+                        let a = std::f64::consts::TAU * i as f64 / 128.0;
+                        V2::new(20.0 + r * a.cos(), 20.0 + r * a.sin())
+                    })
+                    .collect();
+                Region::new(vec![ring])
+            })
+            .collect();
+        let cache = MaskCache::new(&regions, 0.1, 12);
+        let ip = InfillParams::new(0.4);
+        let mut solid_layers = 0;
+        for k in 0..20 {
+            let solid = cache.solid_bits(k, ip.top_layers, ip.bottom_layers);
+            if cache.grid().is_set(&solid, V2::new(20.0 + 16.0, 20.0)) {
+                solid_layers += 1;
+            }
+        }
+        assert!(
+            solid_layers >= 5,
+            "a disc 16 mm out of a section that shrinks 0.4 mm a layer sits inside the \
+             shell under the exposed slope, so it is solid: {solid_layers} of 20 layers say so"
+        );
+    }
+
+    #[test]
     fn a_thin_part_is_solid_throughout() {
         let regions = stack(6);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let ip = InfillParams::new(0.4);
         let centre = V2::new(10.0, 10.0);
         for k in 0..6 {
@@ -2489,7 +2609,7 @@ mod tests {
     #[test]
     fn the_interior_of_a_tall_part_stays_sparse() {
         let regions = stack(30);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let ip = InfillParams::new(0.4);
         let centre = V2::new(10.0, 10.0);
         let middle = cache.solid_bits(15, ip.top_layers, ip.bottom_layers);
@@ -2512,7 +2632,7 @@ mod tests {
     #[test]
     fn solid_lines_on_the_top_skin_are_marked_as_top_surface() {
         let regions = stack(8);
-        let mut cache = MaskCache::new(&regions, 0.1, 8);
+        let cache = MaskCache::new(&regions, 0.1, 8);
         let p = WallParams::new(0.4, 3);
         let mut ip = InfillParams::new(0.4);
         ip.top_layers = 2;
@@ -2520,7 +2640,7 @@ mod tests {
         ip.density = 0.4;
         let (mut top, mut plain) = (0usize, 0usize);
         for (k, region) in regions.iter().enumerate() {
-            for line in infill_layer(region, &mut cache, k, 0.0, &p, &ip, None) {
+            for line in infill_layer(region, &cache, k, 0.0, &p, &ip, None) {
                 match line.kind {
                     Kind::TopSolid => top += 1,
                     Kind::Solid => plain += 1,
@@ -2535,8 +2655,8 @@ mod tests {
     #[test]
     fn mask_cache_reuses_slots_without_losing_answers() {
         let regions = stack(20);
-        let mut small = MaskCache::new(&regions, 0.1, 3);
-        let mut large = MaskCache::new(&regions, 0.1, 40);
+        let small = MaskCache::new(&regions, 0.1, 3);
+        let large = MaskCache::new(&regions, 0.1, 40);
         for k in 0..20 {
             assert_eq!(
                 small.solid_bits(k, 2, 2),
@@ -2548,12 +2668,12 @@ mod tests {
 
     fn curve_layer(pattern: Pattern, k: usize, z: f64) -> Vec<Line> {
         let regions = stack(k + 6);
-        let mut cache = MaskCache::new(&regions, 0.1, 3);
+        let cache = MaskCache::new(&regions, 0.1, 3);
         let p = WallParams::new(0.4, 2);
         let mut ip = InfillParams::new(0.4);
         ip.pattern = pattern;
         ip.density = 0.15;
-        infill_layer(&regions[0], &mut cache, k, z, &p, &ip, None)
+        infill_layer(&regions[0], &cache, k, z, &p, &ip, None)
             .into_iter()
             .filter(|l| l.kind == Kind::Infill)
             .collect()
@@ -2709,9 +2829,9 @@ mod tests {
     }
 
     fn skin_lines(ip: &InfillParams, regions: &[Region], k: usize) -> Vec<Line> {
-        let mut cache = MaskCache::new(regions, 0.1, 12);
+        let cache = MaskCache::new(regions, 0.1, 12);
         let p = WallParams::new(0.4, 2);
-        infill_layer(&regions[k], &mut cache, k, 0.0, &p, ip, None)
+        infill_layer(&regions[k], &cache, k, 0.0, &p, ip, None)
             .into_iter()
             .filter(|l| matches!(l.kind, Kind::Solid | Kind::TopSolid))
             .collect()
@@ -2896,7 +3016,7 @@ mod tests {
         );
         let everything = infill_layer(
             &regions[3],
-            &mut MaskCache::new(&regions, 0.1, 12),
+            &MaskCache::new(&regions, 0.1, 12),
             3,
             0.0,
             &WallParams::new(0.4, 2),
@@ -2911,10 +3031,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_area_threshold_is_measured_inside_the_wall_band() {
+        let body = vec![
+            V2::new(0.0, 0.0),
+            V2::new(30.0, 0.0),
+            V2::new(30.0, 30.0),
+            V2::new(0.0, 30.0),
+        ];
+        let arm = vec![
+            V2::new(50.0, 13.4),
+            V2::new(100.0, 13.4),
+            V2::new(100.0, 16.6),
+            V2::new(50.0, 16.6),
+        ];
+        let regions = vec![Region::new(vec![body, arm]); 6];
+        let mut ip = InfillParams::new(0.4);
+        ip.density = 0.15;
+        ip.top_layers = 1;
+        ip.bottom_layers = 1;
+        ip.solid_below_area = 70.0;
+        ip.anchor = 0.0;
+        ip.anchor_max = 0.0;
+        let solid = skin_lines(&ip, &regions, 3);
+        let in_arm = |line: &Line| line.pts.iter().all(|p| p.x > 51.0);
+        assert!(
+            solid.iter().any(in_arm),
+            "the arm's 50 by 3.2 mm outline is 160 mm^2, but the strip left between two wall \
+             bands is 1.3 by 50 mm and has to print solid"
+        );
+        assert!(
+            !solid.iter().all(in_arm),
+            "the 900 mm^2 body is over the threshold and stays sparse"
+        );
+        let sparse = sparse_layer(&ip, &regions, 3);
+        assert!(
+            sparse
+                .iter()
+                .any(|line| line.pts.iter().any(|p| p.x < 29.0)),
+            "the body still gets sparse fill"
+        );
+    }
+
     fn sparse_layer(ip: &InfillParams, regions: &[Region], k: usize) -> Vec<Line> {
         infill_layer(
             &regions[k],
-            &mut MaskCache::new(regions, 0.1, 12),
+            &MaskCache::new(regions, 0.1, 12),
             k,
             0.0,
             &WallParams::new(0.4, 3),
@@ -2988,7 +3150,7 @@ mod tests {
         }
     }
 
-    fn combine_cells(cache: &mut MaskCache, k: usize, top: usize, bottom: usize) -> Vec<u64> {
+    fn combine_cells(cache: &MaskCache, k: usize, top: usize, bottom: usize) -> Vec<u64> {
         cache.sparse_own_bits(k, top, bottom)
     }
 
@@ -3001,18 +3163,18 @@ mod tests {
         ip.top_layers = 1;
         ip.bottom_layers = 1;
         let plain = {
-            let mut cache = MaskCache::new(&regions, 0.1, 12);
+            let cache = MaskCache::new(&regions, 0.1, 12);
             (0..6)
                 .map(|k| {
-                    infill_layer(&regions[k], &mut cache, k, 0.0, &p, &ip, None)
+                    infill_layer(&regions[k], &cache, k, 0.0, &p, &ip, None)
                         .iter()
                         .map(|l| l.length() * l.width[0] * l.flow)
                         .sum::<f64>()
                 })
                 .collect::<Vec<f64>>()
         };
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
-        let shared = combine_cells(&mut cache, 4, 1, 1);
+        let cache = MaskCache::new(&regions, 0.1, 12);
+        let shared = combine_cells(&cache, 4, 1, 1);
         assert!(
             shared.iter().any(|w| *w != 0),
             "a solid cube has free cells to combine"
@@ -3022,7 +3184,7 @@ mod tests {
             extra: &shared,
             layers: 3,
         };
-        let lines = infill_layer(&regions[4], &mut cache, 4, 0.0, &p, &ip, Some(&combine));
+        let lines = infill_layer(&regions[4], &cache, 4, 0.0, &p, &ip, Some(&combine));
         let volume: f64 = lines.iter().map(|l| l.length() * l.width[0] * l.flow).sum();
         let plain_volume: f64 = plain[4] * 3.0;
         assert!(
@@ -3041,14 +3203,14 @@ mod tests {
         ip.density = 0.2;
         ip.top_layers = 1;
         ip.bottom_layers = 1;
-        let mut cache = MaskCache::new(&regions, 0.1, 8);
-        let shared = combine_cells(&mut cache, 4, 1, 1);
+        let cache = MaskCache::new(&regions, 0.1, 8);
+        let shared = combine_cells(&cache, 4, 1, 1);
         let strip = Combine {
             strip: &shared,
             extra: &[],
             layers: 3,
         };
-        let lines = infill_layer(&regions[4], &mut cache, 4, 0.0, &p, &ip, Some(&strip));
+        let lines = infill_layer(&regions[4], &cache, 4, 0.0, &p, &ip, Some(&strip));
         let inside = lines.iter().filter(|l| l.kind == Kind::Infill).count();
         assert_eq!(inside, 0, "the strip left sparse fill behind");
     }
@@ -3081,17 +3243,17 @@ mod tests {
     fn an_overhang_gets_a_loop_that_a_flat_layer_does_not() {
         let mut regions = stack(6);
         regions[4] = square(0.0, 0.0, 26.0, 20.0);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let p = WallParams::new(0.4, 2);
         let ip = InfillParams::new(0.4);
-        let overhang = crate::overhang_perimeter(&regions[4], &mut cache, 4, &p, &ip);
+        let overhang = crate::overhang_perimeter(&regions[4], &cache, 4, &p, &ip);
         assert!(!overhang.is_empty(), "the 6 mm lip produced no loop");
         assert!(
             overhang.iter().all(|l| l.kind == Kind::Side(0)),
             "the loop is not reported as the outer wall"
         );
-        let mut flat = MaskCache::new(&regions, 0.1, 12);
-        let none = crate::overhang_perimeter(&regions[3], &mut flat, 3, &p, &ip);
+        let flat = MaskCache::new(&regions, 0.1, 12);
+        let none = crate::overhang_perimeter(&regions[3], &flat, 3, &p, &ip);
         assert!(
             none.is_empty(),
             "a layer over its own footprint needs no loop"

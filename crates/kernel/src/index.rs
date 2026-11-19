@@ -92,6 +92,15 @@ impl SegIndex {
         if cx < 0 || cy < 0 || cx >= self.nx as i64 || cy >= self.ny as i64 {
             return;
         }
+        if best.d.is_finite() {
+            let x0 = self.origin.x + cx as f64 * self.cs;
+            let y0 = self.origin.y + cy as f64 * self.cs;
+            let dx = (x0 - p.x).max(0.0).max(p.x - (x0 + self.cs));
+            let dy = (y0 - p.y).max(0.0).max(p.y - (y0 + self.cs));
+            if (dx * dx + dy * dy).sqrt() > best.d {
+                return;
+            }
+        }
         for &s in &self.cells[cy as usize * self.nx + cx as usize] {
             let (a, b) = self.segs[s as usize];
             let (d, f) = seg_closest(p, a, b);
@@ -103,15 +112,37 @@ impl SegIndex {
 
     /// Nearest segment within `max_d`, or `None` when nothing is that close.
     pub fn nearest(&self, p: V2, max_d: f64) -> Option<Hit> {
+        self.nearest_from(p, max_d, None)
+    }
+
+    /// The same query, started from a distance already known to hold.
+    ///
+    /// Adjacent cells of a distance field almost always share the segment that
+    /// is nearest to them, so a bound carried over from the last cell lets the
+    /// ring search discard cells that could not improve on it. The answer is
+    /// unchanged: a search only stops early once no unscanned cell can be
+    /// closer than the best it has.
+    pub fn nearest_from(&self, p: V2, max_d: f64, seed: Option<Hit>) -> Option<Hit> {
         if self.segs.is_empty() {
             return None;
         }
         let (cx, cy) = self.cell_of(p);
         let kmax = (max_d / self.cs).ceil() as i64 + 1;
-        let mut best = Hit {
-            d: f64::INFINITY,
-            seg: u32::MAX,
-            foot: V2::ZERO,
+        let mut best = match seed {
+            Some(hit) if hit.seg != u32::MAX => {
+                let (a, b) = self.segs[hit.seg as usize];
+                let (d, foot) = seg_closest(p, a, b);
+                Hit {
+                    d,
+                    seg: hit.seg,
+                    foot,
+                }
+            }
+            _ => Hit {
+                d: f64::INFINITY,
+                seg: u32::MAX,
+                foot: V2::ZERO,
+            },
         };
         let mut k = 0i64;
         loop {
@@ -224,6 +255,97 @@ impl PointIndex {
     }
 }
 
+/// Banded crossing index over a region's rings, for repeated inside tests.
+///
+/// Deciding whether a point is inside costs one pass over the rings, and a stage
+/// that asks the question for every sample along every edge cannot afford that:
+/// the medial axis of a 20,000-vertex layer has hundreds of thousands of samples.
+/// The segments are therefore bucketed by the horizontal band they cross, and a
+/// query only looks at the band its own `y` falls in.
+///
+/// The answer is the even-odd rule over every ring, which is the same rule
+/// [`super::Region::contains`] applies. A point exactly on the boundary is not
+/// guaranteed either answer; callers that care about boundary points test the
+/// distance to the rings as well, which is what a wall stage does anyway.
+pub struct RegionIndex {
+    bands: Vec<Vec<(V2, V2)>>,
+    y0: f64,
+    h: f64,
+}
+
+impl RegionIndex {
+    /// Builds an index over a set of closed rings.
+    ///
+    /// The band height follows the extent, so a shape with a thousand vertices and
+    /// one with a hundred thousand both end up with a small number of candidates
+    /// per query.
+    pub fn new(rings: &[Vec<V2>]) -> RegionIndex {
+        let mut bounds = Bounds::empty();
+        for ring in rings {
+            for p in ring {
+                bounds.add(*p);
+            }
+        }
+        if bounds.is_empty() {
+            return RegionIndex {
+                bands: Vec::new(),
+                y0: 0.0,
+                h: 1.0,
+            };
+        }
+        let h = (bounds.height() / 256.0).max(0.25);
+        let n = ((bounds.height() / h).ceil() as usize).max(1) + 1;
+        let mut bands: Vec<Vec<(V2, V2)>> = vec![Vec::new(); n];
+        for ring in rings {
+            let k = ring.len();
+            for i in 0..k {
+                let a = ring[i];
+                let b = ring[(i + 1) % k];
+                if a == b {
+                    continue;
+                }
+                let first = band_of(a.y.min(b.y), bounds.min.y, h, n);
+                let last = band_of(a.y.max(b.y), bounds.min.y, h, n);
+                for band in &mut bands[first..=last] {
+                    band.push((a, b));
+                }
+            }
+        }
+        RegionIndex {
+            bands,
+            y0: bounds.min.y,
+            h,
+        }
+    }
+
+    /// True when the point is inside an odd number of rings.
+    pub fn contains(&self, p: V2) -> bool {
+        if self.bands.is_empty() {
+            return false;
+        }
+        let band = band_of(p.y, self.y0, self.h, self.bands.len());
+        let mut crossings = 0usize;
+        for &(a, b) in &self.bands[band] {
+            if (a.y > p.y) == (b.y > p.y) {
+                continue;
+            }
+            let t = (p.y - a.y) / (b.y - a.y);
+            if a.x + (b.x - a.x) * t > p.x {
+                crossings += 1;
+            }
+        }
+        crossings % 2 == 1
+    }
+}
+
+fn band_of(y: f64, y0: f64, h: f64, n: usize) -> usize {
+    let raw = ((y - y0) / h).floor();
+    if raw.is_nan() || raw < 0.0 {
+        return 0;
+    }
+    (raw as usize).min(n - 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +383,41 @@ mod tests {
         assert_eq!(id, 1);
         assert!((d - std::f64::consts::SQRT_2).abs() < 1e-9);
         assert!(index.nearest(V2::new(5.0, 5.0), 1.0).is_none());
+    }
+
+    #[test]
+    fn region_index_agrees_with_the_region_on_every_grid_point() {
+        let rings = vec![
+            vec![
+                V2::new(0.0, 0.0),
+                V2::new(40.0, 0.0),
+                V2::new(40.0, 30.0),
+                V2::new(0.0, 30.0),
+            ],
+            vec![
+                V2::new(10.0, 10.0),
+                V2::new(10.0, 20.0),
+                V2::new(30.0, 20.0),
+                V2::new(30.0, 10.0),
+            ],
+        ];
+        let region = super::super::Region::new(rings.clone());
+        let index = RegionIndex::new(&region.rings);
+        for i in 0..=200 {
+            for j in 0..=150 {
+                let p = V2::new(i as f64 * 0.2, j as f64 * 0.2);
+                assert_eq!(
+                    index.contains(p),
+                    region.contains(p),
+                    "disagreement at {p:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn region_index_reports_nothing_for_empty_rings() {
+        assert!(!RegionIndex::new(&[]).contains(V2::ZERO));
     }
 
     #[test]

@@ -1,16 +1,10 @@
-//! Exact signed distance to the region boundary on a uniform grid.
+//! A uniform sampling grid and the inside test the brim and the infill masks need.
+//!
+//! Walls no longer sample distance on a grid: they offset polygons. What is left
+//! here is the raster the adhesion brim and the infill mask cache still lay down,
+//! which needs only a grid and a row-scan of the region's edges.
 
-use hfw_kernel::{Bounds, Region, SegIndex, V2};
-
-/// Sentinel for "no segment index recorded".
-pub const NONE: u32 = u32::MAX;
-
-/// Memory budget for one distance field.
-///
-/// The field stores four parallel arrays per cell. A part large enough to
-/// exceed this budget at the requested resolution is rejected with a clear
-/// error rather than exhausting memory.
-pub const MAX_FIELD_CELLS: usize = 32_000_000;
+use hfw_kernel::{Bounds, Region, V2};
 
 /// A uniform sampling grid in millimetres.
 #[derive(Clone, Copy, Debug)]
@@ -67,37 +61,6 @@ impl Grid {
     }
 }
 
-/// Failure modes when building a distance field.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FieldError {
-    /// The requested resolution needs more cells than the field budget allows.
-    TooLarge {
-        /// Cell count required.
-        cells: usize,
-        /// Cell count permitted.
-        limit: usize,
-    },
-    /// The requested cell size is not a positive finite number.
-    InvalidResolution,
-}
-
-impl std::fmt::Display for FieldError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FieldError::TooLarge { cells, limit } => write!(
-                f,
-                "distance field needs {cells} cells but the limit is {limit}; \
-                 raise --width for a coarser field or slice the model in pieces"
-            ),
-            FieldError::InvalidResolution => {
-                f.write_str("distance field resolution must be a positive finite number")
-            }
-        }
-    }
-}
-
-impl std::error::Error for FieldError {}
-
 /// Marks cells whose centre lies inside the region.
 ///
 /// Rows are scanned with a small deterministic jitter so that grid lines which
@@ -150,65 +113,6 @@ pub fn scan_inside(region: &Region, g: &Grid) -> Vec<bool> {
     mask
 }
 
-/// Signed distance field sampling of one region.
-pub struct Field {
-    /// Sampling grid.
-    pub grid: Grid,
-    /// Inside/outside flag per cell.
-    pub inside: Vec<bool>,
-    /// Distance to the nearest boundary segment; infinite when beyond `cap`.
-    pub d: Vec<f64>,
-    /// Index of the nearest boundary segment.
-    pub seg: Vec<u32>,
-    /// Closest point on that segment.
-    pub foot: Vec<V2>,
-}
-
-impl Field {
-    /// Samples the distance field of `region`, truncated at `cap`.
-    pub fn build(
-        region: &Region,
-        index: &SegIndex,
-        grid: Grid,
-        cap: f64,
-    ) -> Result<Field, FieldError> {
-        if !(grid.h.is_finite() && grid.h > 0.0) {
-            return Err(FieldError::InvalidResolution);
-        }
-        if grid.len() > MAX_FIELD_CELLS {
-            return Err(FieldError::TooLarge {
-                cells: grid.len(),
-                limit: MAX_FIELD_CELLS,
-            });
-        }
-        let inside = scan_inside(region, &grid);
-        let n = grid.len();
-        let mut d = vec![0.0; n];
-        let mut seg = vec![NONE; n];
-        let mut foot = vec![V2::ZERO; n];
-        for (id, flag) in inside.iter().enumerate() {
-            if !*flag {
-                continue;
-            }
-            match index.nearest(grid.pos_id(id), cap) {
-                Some(hit) => {
-                    d[id] = hit.d;
-                    seg[id] = hit.seg;
-                    foot[id] = hit.foot;
-                }
-                None => d[id] = f64::INFINITY,
-            }
-        }
-        Ok(Field {
-            grid,
-            inside,
-            d,
-            seg,
-            foot,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,43 +137,5 @@ mod tests {
             "the far corner must be outside"
         );
         assert!(!mask[g.id(g.nx - 1, 10)], "the far X edge must be outside");
-    }
-
-    #[test]
-    fn field_reports_distance_to_the_nearest_edge() {
-        let r = square(0.0, 0.0, 10.0, 10.0);
-        let idx = SegIndex::new(r.segments(), r.bounds().grown(5.0), 1.0);
-        let g = Grid::covering(r.bounds(), 0.25);
-        let f = Field::build(&r, &idx, g, 6.0).expect("field");
-        let id = g.id(20, 20);
-        assert!((f.d[id] - 5.0).abs() < 0.5);
-        assert!(f.d[id].is_finite());
-    }
-
-    #[test]
-    fn oversized_grids_are_rejected_before_allocating() {
-        let r = square(0.0, 0.0, 10.0, 10.0);
-        let idx = SegIndex::new(r.segments(), r.bounds().grown(5.0), 1.0);
-        let mut big = Bounds::empty();
-        big.add(V2::new(-1000.0, -1000.0));
-        big.add(V2::new(1000.0, 1000.0));
-        let g = Grid::covering(big, 0.001);
-        assert!(matches!(
-            Field::build(&r, &idx, g, 5.0),
-            Err(FieldError::TooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn non_positive_resolution_is_rejected() {
-        let r = square(0.0, 0.0, 10.0, 10.0);
-        let idx = SegIndex::new(r.segments(), r.bounds().grown(5.0), 1.0);
-        let g = Grid::covering(r.bounds(), 1.0);
-        let mut bad = g;
-        bad.h = 0.0;
-        assert!(matches!(
-            Field::build(&r, &idx, bad, 5.0),
-            Err(FieldError::InvalidResolution)
-        ));
     }
 }

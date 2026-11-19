@@ -233,7 +233,7 @@ impl Supports {
     /// Supports for every layer, or none when disabled.
     pub fn build(
         regions: &[Region],
-        cache: &mut MaskCache,
+        cache: &MaskCache,
         p: &SupportParams,
         heights: &[f64],
     ) -> Supports {
@@ -275,7 +275,7 @@ impl Supports {
 /// Overhang seeds, shifted `z_gap` below the surface they hold up.
 fn seed_masks(
     regions: &[Region],
-    cache: &mut MaskCache,
+    cache: &MaskCache,
     p: &SupportParams,
     heights: &[f64],
 ) -> Vec<Vec<u64>> {
@@ -326,7 +326,7 @@ fn seed_masks(
 /// Straight-down columns with dense interface layers.
 fn columns(
     regions: &[Region],
-    cache: &mut MaskCache,
+    cache: &MaskCache,
     p: &SupportParams,
     seeds: &[Vec<u64>],
     heights: &[f64],
@@ -512,7 +512,7 @@ fn fill_columns(
 /// `height * tan(branch_angle)` sideways, so a branch is always printable
 /// without support under itself. Contacts are sampled from the z-shifted seeds,
 /// so a tree grows in the same clearance envelope a column does.
-fn build_tree(cache: &mut MaskCache, p: &SupportParams, height: f64, seeds: &[Vec<u64>]) -> Tree {
+fn build_tree(cache: &MaskCache, p: &SupportParams, height: f64, seeds: &[Vec<u64>]) -> Tree {
     let grid = *cache.grid();
     let g = grid.grid;
     let words = cache.words();
@@ -1224,16 +1224,16 @@ mod tests {
         }
         let p = SupportParams::new(0.4);
         let tight = {
-            let mut cache = MaskCache::new(&regions, 0.2, 12);
-            Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2))
+            let cache = MaskCache::new(&regions, 0.2, 12);
+            Supports::build(&regions, &cache, &p, &flat(&regions, 0.2))
         };
         let gapped = {
-            let mut cache = MaskCache::new(&regions, 0.2, 12);
+            let cache = MaskCache::new(&regions, 0.2, 12);
             let lifted = SupportParams {
                 bottom_contact_distance: 0.6,
                 ..p
             };
-            Supports::build(&regions, &mut cache, &lifted, &flat(&regions, 0.2))
+            Supports::build(&regions, &cache, &lifted, &flat(&regions, 0.2))
         };
         let (a, _) = columns(&tight);
         let (b, _) = columns(&gapped);
@@ -1291,9 +1291,9 @@ mod tests {
     #[test]
     fn a_cantilever_seeds_support_under_its_overhang_only() {
         let regions = post_and_table(20, 10, 4.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         let overhang = 20;
         assert!(
@@ -1313,9 +1313,9 @@ mod tests {
     #[test]
     fn support_keeps_its_distance_from_the_part() {
         let regions = post_and_table(20, 10, 8.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         for k in 0..m.layers() {
             assert!(
@@ -1328,9 +1328,9 @@ mod tests {
     #[test]
     fn the_contact_layer_is_left_empty_by_the_z_gap() {
         let regions = post_and_table(20, 10, 4.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         let overhang = 20;
         assert!(
@@ -1352,9 +1352,9 @@ mod tests {
             })
             .collect();
         regions.push(square(0.0, 0.0, 30.0, 20.0));
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         for k in 10..30 {
             assert!(
@@ -1367,9 +1367,9 @@ mod tests {
     #[test]
     fn a_fine_grid_coupon_still_seeds_support() {
         let regions = post_and_table(12, 4, 8.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.1, 12);
+        let cache = MaskCache::new(&regions, 0.1, 12);
         let p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         assert!(
             cell(&columns(&m).0[10], &grid, 20.0, 10.0),
@@ -1384,10 +1384,10 @@ mod tests {
     #[test]
     fn a_tree_merges_its_tips_into_a_trunk_toward_the_bed() {
         let regions = post_and_table(60, 10, 8.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let t = tree(&m);
         let tips = t.layers[57].len();
         let trunk = t.layers[0].len();
@@ -1406,10 +1406,10 @@ mod tests {
     #[test]
     fn a_tree_never_grows_through_the_part() {
         let regions = post_and_table(20, 10, 8.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         let t = tree(&m);
         for (k, nodes) in t.layers.iter().enumerate() {
@@ -1428,11 +1428,11 @@ mod tests {
     #[test]
     fn a_tree_leans_no_further_than_the_branch_angle_allows() {
         let regions = post_and_table(20, 10, 8.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
         p.branch_distance = 5.0;
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let t = tree(&m);
         let step = 0.2 * p.branch_angle.to_radians().tan();
         for k in 1..t.layers.len() {
@@ -1455,10 +1455,10 @@ mod tests {
     #[test]
     fn a_tree_tip_prints_dense_over_a_sparse_trunk() {
         let regions = post_and_table(20, 10, 8.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let tip = m.fill(17, &p);
         assert!(!tip.is_empty(), "the contact layer printed nothing");
         assert!(
@@ -1479,10 +1479,10 @@ mod tests {
     #[test]
     fn tree_supports_stay_under_the_plate() {
         let regions = post_and_table(20, 10, 4.0, 30.0);
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
         p.style = Style::Tree;
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let t = tree(&m);
         for nodes in &t.layers {
             for node in nodes {
@@ -1501,9 +1501,9 @@ mod tests {
         let mut regions: Vec<Region> = (0..10).map(|_| square(0.0, 0.0, 30.0, 20.0)).collect();
         regions.extend((0..10).map(|_| square(0.0, 0.0, 8.0, 20.0)));
         regions.extend((0..10).map(|_| square(0.0, 0.0, 30.0, 20.0)));
-        let mut cache = MaskCache::new(&regions, 0.2, 12);
+        let cache = MaskCache::new(&regions, 0.2, 12);
         let mut p = SupportParams::new(0.4);
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         let grid = *cache.grid();
         assert!(
             cell(&columns(&m).0[15], &grid, 20.0, 10.0),
@@ -1514,7 +1514,7 @@ mod tests {
             "the column stops at the block below it"
         );
         p.on_build_plate_only = true;
-        let m = Supports::build(&regions, &mut cache, &p, &flat(&regions, 0.2));
+        let m = Supports::build(&regions, &cache, &p, &flat(&regions, 0.2));
         assert!(
             !cell(&columns(&m).0[15], &grid, 20.0, 10.0),
             "a bed-only column cannot float over the part"

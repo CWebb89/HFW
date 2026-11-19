@@ -67,14 +67,19 @@ lists the names it does hold; a *parent* the bundle does not hold is a warning,
 because an exported preset routinely inherits from a system preset that lives
 inside the slicer rather than next to the file.
 
-**What is still missing here is the placeholder vocabulary.** A machine preset's
-`machine_start_gcode` is a template: `[bed_temperature_initial_layer_single]`,
+**The placeholder vocabulary is in.** A machine preset's `machine_start_gcode` is a
+template: `[bed_temperature_initial_layer_single]`,
 `{during_print_exhaust_fan_speed_num[current_extruder]}`, `[first_layer_print_min[0]]`.
-This engine substitutes its own small set and leaves the rest as literal text,
-which the verifier then rejects as unreadable — correct, since the file must not be
-printed, but late. Intake now counts those placeholders and names them, so a bundle
-job fails in the report instead of in the file. **This is the next piece of work on
-this list.**
+A placeholder naming a setting is substituted at intake, from the preset first and
+the engine's configuration second; one whose value belongs to the slice (the part's
+extent, the layer number, the layer count) is left for the writer, which fills it
+at emission; and one nothing can fill is named in the intake report and fails the
+verifier with the file's line number. `--intake-json` writes that report for a
+bundle job, so a caller can prove no setting vanished.
+
+The machine's own geometry is read under both spellings: `bed_shape` as
+PrusaSlicer writes it and `printable_area` / `printable_height` as Orca writes
+them, from the rename table next-layer's importer keeps.
 
 **What next-layer feeds it.** A resolved settings object per plate: the vendor
 bundle the engine resolves as a package, plus per-object overrides. Every key

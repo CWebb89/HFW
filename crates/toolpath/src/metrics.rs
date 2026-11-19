@@ -62,7 +62,11 @@ fn coverage(region: &Region, lines: &[&Line], p: &WallParams, res: f64, full: bo
         grid.origin.y + std::f64::consts::FRAC_1_SQRT_2 * res,
     );
     let inside = scan_inside(region, &grid);
-    let index = SegIndex::new(region.segments(), rb.grown(p.cap() + p.w), 8.0 * res);
+    let index = SegIndex::new(
+        region.segments(),
+        rb.grown(p.thick_radius() + p.w),
+        8.0 * res,
+    );
     let n = grid.len();
     let thick_r = p.thick_radius();
     let mut target = vec![false; n];

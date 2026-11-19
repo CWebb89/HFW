@@ -25,59 +25,91 @@ filament. `flow` is forced to 1.0 in the hfw profile; the references run at
 their default 1.0. Machine is a Voron 2.4 350 in Orca, a Voron in PrusaSlicer,
 both sliced headless.
 
-## At 100% infill: all four shapes agree
+## The Orca column cannot be re-measured on OrcaSlicer 2.5.1, 2026-11-19
+
+The installed OrcaSlicer is 2.5.1, and it no longer loads the standalone preset files
+this comparison hands it: `--load-settings path;path` fails with `Preset was not found
+in the loaded bundle`. Three ways round it were tried and all fail the same way —
+`--datadir` with the two files in `user/default/machine` and `user/default/process`,
+the same with them loaded by name, and the unpacked presets at
+`~/.config/OrcaSlicer/system`. A fresh run therefore leaves the Orca column empty and
+prints `reference spread 0.0%`, which is the tell that the mean is PrusaSlicer alone;
+the script does not fail on it. Every table below was measured while 2.4.2 still
+loaded them, and stands as the last two-reference measurement. Restoring the column
+means writing the presets into 2.5.1's `.opc` bundle format, not changing this script.
+
+## At 100% infill: all four shapes agree, 2026-11-19
 
 Every cell is solid, so this isolates geometry, wall placement, skin extent and
 the extrusion model from infill-density policy.
 
 | fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean |
 |---|---:|---:|---:|---:|
-| cube | 7783.6 | 8001.6 | 8067.8 | −3.1% |
-| sphere | 13795.0 | 14130.3 | 14190.1 | −2.6% |
-| torus | 3722.0 | 3786.3 | 3864.5 | −2.7% |
-| cone | 7001.9 | 7056.7 | 7100.5 | −1.1% |
+| cube | 8059.7 | 8001.6 | 8067.8 | +0.3% |
+| sphere | 14205.5 | 14130.3 | 14190.1 | +0.3% |
+| torus | 3882.4 | 3786.3 | 3864.5 | +1.5% |
+| cone | 7073.4 | 7056.7 | 7100.5 | −0.1% |
 
-Both references sit 0.5–1.2% *above* the model's own volume; hfw sits 2–3% below
-it. The cube and sphere rows were re-measured on 2026-11-17 after the perimeter
-flow change described below; torus and cone were not re-run and are expected about
-3% lower now.
+Refresh with `scripts/oracle.py fixtures/{cube,sphere,torus,cone}.stl --density 1.0`.
+
+All three slicers now sit just above the model's own volume, because a wall bead
+overlaps the loop behind it by the configured amount and the skin overlaps the
+innermost loop; the earlier rows in this document had hfw 2-3% *below* the model,
+from the skin clip fixed on 2026-11-19 (`SLICE-SPEED-STATUS.md`, "The two defects
+of this section, both fixed").
 
 The independent verifier reproduces hfw's own G-code volume to within 0.3%, which
 is what the writer/verifier split is for.
 
 One class per figure is not comparable: PrusaSlicer reports its solid skin under
-`sparse` at 100% density, so the `skin`/`sparse` split below is an artefact of its
-naming and only the totals, the walls and the skin-plus-sparse sum are read.
+`sparse` at 100% density, so the `skin`/`sparse` split in the per-feature table is
+an artefact of its naming and only the totals, the walls and the skin-plus-sparse
+sum are read.
 
-**Conclusion: geometry and wall placement are correct to within about 1% on flat
-and curved shapes alike, and the perimeter flow matches the references' model.**
+**Conclusion: geometry, wall placement and skin extent agree with both references
+to within 1.5% on flat and curved shapes alike.**
 
-## At 15% infill: flat parts agree, curved parts do not
+## At 15% infill, 2026-11-19 (after the section-bead wall stage)
 
 | fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean | verdict |
 |---|---:|---:|---:|---:|:--|
-| cube | 3204.7 | 3284.4 | 3307.6 | −2.8% | pass |
-| taper_wall | 570.6 | 571.9 | 596.3 | −2.3% | pass |
-| sphere | 4352.7 | 4891.1 | 4990.3 | −11.9% | **fail** |
-| cone | 2771.3 | 3157.9 | 3353.1 | −14.9% | **fail** |
-| torus | 1924.5 | 2255.3 | 2328.1 | −16.0% | **fail** |
-| thin_wall | 88.7 | 100.8 | 100.8 | −11.9% | pass (expected) |
+| cube | 3260.4 | 3284.4 | 3307.6 | −1.1% | pass |
+| taper_wall | 449.2 | 571.9 | 596.3 | −23.1% | pass, expected |
+| thin_wall | 76.3 | 100.8 | 100.8 | −24.3% | pass, expected |
 
-The three failures are one finding, not three:
+The taper is the thinner wall the same policy reaches: it passes through widths below
+one bead, and the strand the gap pass lays there is as wide as the taper is. Both rows
+carry a 25% tolerance in `scripts/oracle.py` with that reason beside them, so a green
+run means "as close as the policy intends", not "within 10%".
 
-| fixture | wall | skin | sparse |
-|---|---:|---:|---:|
-| sphere | +6.3% | **−85.6%** | −12.7% |
-| cone | +6.1% | **−59.0%** | −10.1% |
-| torus | +6.4% | **−72.1%** | −24.5% |
+## At 15% infill, 2026-11-19 (ladder, kept for comparison)
 
-The entire total deficit lives in the skin class, and the class is nearly empty
-because the wall stage already consumed the surface. On a sloped face, the
-staircase annulus between layer *k* and *k+1* is thinner than the 1.2 mm wall
-band, so this engine covers it with wall beads and never emits solid infill;
-both references cover it with solid infill on top of their perimeters. The wall
-column is consistently +6%, which is the same band, counted as wall instead of
-skin.
+| fixture | hfw mm³ | Orca mm³ | Prusa mm³ | hfw vs mean | verdict |
+|---|---:|---:|---:|---:|:--|
+| cube | 3266.5 | 3284.4 | 3307.6 | −0.9% | pass |
+| torus | 2229.9 | 2255.3 | 2328.1 | −2.7% | pass |
+| taper_wall | 530.9 | 571.9 | 596.3 | −9.1% | pass |
+| sphere | 4459.8 | 4891.1 | 4990.3 | −9.7% | pass |
+| cone | 2937.2 | 3157.9 | 3353.1 | −9.8% | pass |
+| thin_wall | 76.3 | 100.8 | 100.8 | −24.3% | **fail, expected** |
+
+Five of six pass the 10% gate for the first time. The residual on the sphere and
+the cone is the band that curves: both references print about a loop's worth of
+solid infill around the perimeter of every layer whose surface slopes, tagged
+`Solid infill` — 193 fragments averaging 0.58 mm on sphere layer 10 — which is gap
+fill of the staircase annulus. This engine's offset ladder tiles that band and
+leaves nothing for a gap pass to fill, so it deposits the same material under the
+`wall` class instead. The two classes are not comparable; the totals are, and they
+are 9.7% and 9.8% short.
+
+`fixtures/thin_wall.stl` is a 0.3 mm rib and it is **red**: 76.3 mm³ against a
+model volume of 90.0 mm³ (84.7%), where both references deposit 100.8 mm³ (112%).
+It was 88.7 mm³ before the walk budget, i.e. the difference was the walked bead at
+the rib's ends. Both references over-deposit by substituting a 0.4 mm bead for a
+0.3 mm feature; this engine under-deposits, and the `Gap` class in the file says why
+— 71.24 mm³ where the rib's own volume is 90.0 mm³. Most of that is `bead_area`
+subtracting a free-standing bead's corner area from a strand that fills a slot and
+has no such corners. See `DESIGN.md`, *Walls*.
 
 At 100% infill the difference vanishes, which is the proof that this is a
 skin-versus-wall accounting policy and not a geometry error.
@@ -98,9 +130,10 @@ The torus was printed at 15% infill (job `0003EA`, 40 layers, 819.3 mm): no
 pinholes, no gaps between perimeter loops, no droop on the sloped outer surface.
 Measured 32.00 mm outer diameter and 8.000 mm tall, both nominal, and the G-code's
 wall centrelines span 31.59 mm plus half a bead each side — the file agrees with
-the part. Reading 2 is correct: the references over-fill sloped surfaces. The
-three failing fixtures stay red because the tolerance documents the difference,
-not because the output is wrong; the note beside each failure says so.
+the part. Reading 2 is correct: the references over-fill sloped surfaces. That is why the
+sphere and cone rows stayed red for so long; they are inside tolerance now that
+the skin clip is fixed, and the remaining 9.7% is the class-accounting difference
+described above.
 
 ## Wall flow follows the reference slicers, 2026-11-17
 
@@ -127,10 +160,10 @@ Feature classes are not comparable across slicers by design.
   lines per layer instead of 8, and about 770 mm of skin lines on the bottom
   layer instead of 900 mm, for identical line extents (18.0 mm in all three).
 - A sub-width wall is the case this engine exists for. `thin_wall.stl` is a
-  0.3 mm wall: hfw deposits 88.7 mm³ against a model volume of 90 mm³, while
-  both references deposit 100.8 mm³ because neither can make a 0.3 mm bead and
-  substitute a 0.4 mm one. The oracle records that fixture with a documented
-  20% tolerance rather than as a failure.
+  0.3 mm wall: hfw deposits 76.3 mm³ against a model volume of 90 mm³, while
+  both references deposit 100.8 mm³ because neither makes a 0.3 mm bead and both
+  substitute a 0.4 mm one. The oracle carries that fixture with a documented 20%
+  tolerance; at 24.3% it is over it, so the row is red on purpose.
 
 ## What this does not cover
 
@@ -138,6 +171,7 @@ Feature classes are not comparable across slicers by design.
 - Travel planning, acceleration, pressure advance: the estimates are kinematic
   only, so hfw's printer time is optimistic (14 min against PrusaSlicer's 40 min
   on the same cube) and is never comparable.
-- Multi-material, supports, bridging: not implemented.
+- Multi-material: not implemented, and not measurable until there is a second
+  extruder. Supports and bridging are implemented and not covered by the oracle.
 - One reference build on one machine. A change in either slicer's defaults
   invalidates the numbers; re-run before quoting them.

@@ -39,7 +39,8 @@ mod parse;
 pub use audit::{audit, Finding, Severity};
 pub use bundle::{Bundle, Kind, Loaded, Resolution};
 pub use dialect::{
-    object_overrides, Intake, IntakeReport, ObjectOverride, Preset, ProjectSettings,
+    object_overrides, writer_placeholders, Intake, IntakeReport, ObjectOverride, Preset,
+    ProjectSettings, LAYER_PLACEHOLDERS, START_PLACEHOLDERS,
 };
 pub use error::ConfigError;
 
@@ -55,7 +56,8 @@ pub enum Flavor {
 /// Where the seam of a closed loop is placed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Seam {
-    /// Rotate every loop to the same absolute direction from the centroid.
+    /// Start every loop at the rear of its own cross-section, on the vertex the loop
+    /// that grew into it started on.
     Aligned,
     /// Start each loop at the point nearest the previous end position.
     Nearest,
@@ -110,6 +112,10 @@ pub struct PrinterConfig {
     pub max_z: f64,
     /// True when the bed origin is at its centre rather than its front left.
     pub origin_center: bool,
+    /// True when the model already carries the coordinates it prints at, so the
+    /// writer must not move it. A file that places its own objects — a 3MF plate
+    /// — does, and its layout is a decision the author made in a slicer.
+    pub keep_position: bool,
     /// Target G-code dialect.
     pub flavor: Flavor,
     /// True to emit relative extruder moves (`M83`).
@@ -378,7 +384,11 @@ pub struct PrinterConfig {
     pub slice_closing_radius: f64,
     /// Maximum deviation allowed when simplifying a sliced cross-section.
     ///
-    /// Zero disables simplification and keeps every vertex the slice produced.
+    /// 0.012 mm is PrusaSlicer's default, and it is what keeps a curved surface
+    /// from arriving as a thousand vertices no bead can express: a 0.4 mm bead
+    /// cannot show a 12 µm step, and every later offset pays for the vertex that
+    /// describes it. Zero disables simplification and keeps every vertex the
+    /// slice produced.
     pub resolution: f64,
     /// Raft layers printed under the part before the first object layer.
     pub raft_layers: usize,
@@ -599,14 +609,15 @@ pub struct PrinterConfig {
     pub shrinkage_xy: f64,
     /// Shrinkage of the filament in Z, as a percentage.
     pub shrinkage_z: f64,
-    /// Perimeter generator: `arachne` for this engine's medial-axis beading,
-    /// `classic` for fixed-width offsets.
+    /// Perimeter generator: every value is printed as this engine's offset ladder
+    /// with a gap pass, except `classic`, which drops the gap pass.
     pub perimeter_generator: String,
-    /// Length over which a bead count change is blended, in millimetres.
+    /// Accepted and unused: this engine's loops do not blend a bead count, so
+    /// there is no transition length to set. Arachne profiles carry the key.
     pub wall_transition_length: f64,
-    /// Angle at which a wall transition happens, in degrees.
+    /// Opening angle below which a wall transition counts as a corner.
     pub wall_transition_angle: f64,
-    /// How far a transition may deviate before it is filtered, as a percentage.
+    /// Accepted and unused, for the same reason as the transition length.
     pub wall_transition_filter_deviation: f64,
     /// Detect overhangs and print them at the overhang speeds and fan.
     pub overhangs: bool,
@@ -975,6 +986,7 @@ impl Default for PrinterConfig {
             bed_shape: Vec::new(),
             max_z: 250.0,
             origin_center: false,
+            keep_position: false,
             flavor: Flavor::Marlin,
             relative_e: true,
             nozzle_diameter: 0.4,
@@ -986,10 +998,10 @@ impl Default for PrinterConfig {
             variable_layer_height: true,
             layer_height_profile: Vec::new(),
             spiral_vase: false,
-            avoid_crossing_perimeters: false,
+            avoid_crossing_perimeters: true,
             avoid_crossing_curled_overhangs: false,
             travel_lift_before_obstacle: false,
-            avoid_crossing_perimeters_max_detour: 0.0,
+            avoid_crossing_perimeters_max_detour: 2.0,
             thin_walls: true,
             min_feature_size: -1.0,
             infill_anchor: -1.0,
@@ -1083,7 +1095,7 @@ impl Default for PrinterConfig {
             elefant_foot_compensation: 0.0,
             xy_size_compensation: 0.0,
             slice_closing_radius: 0.049,
-            resolution: 0.0,
+            resolution: 0.012,
             raft_layers: 0,
             raft_first_layer_density: 0.9,
             raft_first_layer_expansion: 2.0,

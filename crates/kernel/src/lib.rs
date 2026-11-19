@@ -9,6 +9,8 @@
 
 pub mod geom;
 pub mod index;
+pub mod offset;
 
 pub use geom::{ring_contains, ring_signed_area, seg_closest, Bounds, Region, V2};
-pub use index::{Hit, PointIndex, SegIndex};
+pub use index::{Hit, PointIndex, RegionIndex, SegIndex};
+pub use offset::{closing, difference_rings, intersect_rings, offset_rings, union_rings, Join};

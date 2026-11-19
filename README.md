@@ -22,6 +22,7 @@ in this repository, not a reason to keep the C++ engine.
 | `docs/ENGINE-PARITY.md` → `docs/SETTINGS-LEDGER.md` | every setting, applied or not, generated from the reference dialect |
 | `docs/ORACLE.md` | measured agreement with OrcaSlicer and PrusaSlicer |
 | `docs/EXPLAINED.md` | how each stage works, for someone reading the code |
+| `docs/WALLS-SKELETON.md` | why the offset ladder leaves laps on rounded walls, and the bead generator that replaces it |
 
 ## Build and check
 
@@ -75,8 +76,10 @@ One extruder, one material, STL and 3MF, single and multi-object plates:
 
 - **Slicing** on exact integer nanometres; open or branching contours are
   reported, never invented.
-- **Walls** as variable-width beads from an exact distance field, plus thin-wall
-  centre beads, corner recovery and width-aware simplification.
+- **Walls** as beads divided from the layer's measured section, so a feature narrower
+  than the perimeters it asked for is filled by its own beads rather than by a strand
+  beside them; a classic offset ladder is kept for comparison, and a gap pass remains
+  as the fallback for a section whose middle bead is a ridge rather than a level set.
 - **Infill**: twelve patterns — rectilinear, line, grid, triangle, cubic, gyroid,
   3d honeycomb, concentric, zig-zag, cross-hatch, honeycomb, monotonic — a
   per-island solid threshold, ironing, and a two-line anchor that joins fill lines
@@ -98,12 +101,11 @@ setting truth, including what is missing and why.
 ## What it does not do
 
 Multi-material and toolchangers. OBJ/AMF/STEP. Support painting, per-object regions
-and layer-height profiles, and internal bridges. A 200 mm plate at fine resolution
-(the distance field is dense, and refuses rather than crushing the machine). A
-machine preset's templated start G-code: the reference placeholders
-(`[bed_temperature_initial_layer_single]` and the like) are named at intake and not
-yet substituted, so a bundle job from a real Orca machine currently stops at the
-verifier rather than printing.
+and layer-height profiles, and internal bridges. A machine preset's start G-code is
+templated with the reference placeholders (`[bed_temperature_initial_layer_single]`
+and the like); every one of them is substituted at intake or at emission, and a
+placeholder that nothing can fill now fails the verifier instead of reaching the
+printer as text.
 
 Each of those is on the parity list with a cost beside it, except multi-material,
 which waits for hardware.

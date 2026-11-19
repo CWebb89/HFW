@@ -360,7 +360,7 @@ falls to zero.
 | `travel_slope` | 1 | applied |  | double | 0. | ° | Print |
 | `wipe_tower_acceleration` | 1 | missing |  | double | 0. | mm/s² | Print |
 | `avoid_crossing_curled_overhangs` | 2 | applied |  | bool | false |  | Print |
-| `avoid_crossing_perimeters` | 2 | partial | avoid_crossing_perimeters — the emitter picks the loop entry point whose travel does not cut a perimeter on this layer, then routes the travel itself around the loops: the layer's perimeters are offset both ways by a bead of clearance, and a visibility graph over those offset rings yields a path that holds that clearance from every wall, emitted as one retracted chain of moves. Partial because supports and curled overhangs from earlier layers are not obstacles, and a travel whose start or end sits against several nested walls can find no route at all and falls back to the straight move | bool | false |  | Print |
+| `avoid_crossing_perimeters` | 2 | partial | avoid_crossing_perimeters — on by default: the emitter routes the travel itself around the loops — the layer's perimeters are offset both ways by a bead of clearance, and a visibility graph over those offset rings yields a path that holds that clearance from every wall, emitted as one retracted chain of moves. A closed loop keeps the seam the profile chose unless the seam is `nearest`, so routing costs distance and never the seam; only an open path has its entry point moved to save the crossing. Partial because supports and curled overhangs from earlier layers are not obstacles, and a travel whose start or end sits against several nested walls can find no route at all and falls back to the straight move | bool | false |  | Print |
 | `avoid_crossing_perimeters_max_detour` | 2 | applied | avoid_crossing_perimeters_max_detour — caps both the entry-point choice and the routed travel: a route longer than the straight move plus this budget is refused and the straight move is emitted instead. Zero means no limit, so the shipped profiles route without a ceiling | double | 0.0 | mm | Print |
 
 ### Print_MultiMaterial (27 settings, 23 missing)
@@ -502,7 +502,7 @@ falls to zero.
 | `scarf_seam_on_inner_perimeters` | 1 | applied |  | bool | false |  | Print |
 | `scarf_seam_start_height` | 1 | applied |  | Percentage | Percentage{0.} | % | Print |
 | `seam_gap_distance` | 1 | applied | seam_gap | FloatOrPercentage | FloatOrPercentage(Percentage{15.}) | mm | Print |
-| `seam_position` | 1 | applied | seam — all four; random scatters deterministically from the loop, and rear is the rearmost vertex instead of a direction from the centroid | EnumWrapper | SeamPosition::spAligned |  | Print |
+| `seam_position` | 1 | applied | seam — all four; random scatters deterministically from the loop, and aligned keeps each loop's seam where the loop below put it | EnumWrapper | SeamPosition::spAligned |  | Print |
 | `staggered_inner_seams` | 1 | applied |  | bool | false |  | Print |
 | `ensure_vertical_shell_thickness` | 2 | partial | ensure_vertical_shell_thickness — disabled narrows the solid window to the immediate neighbours; partial and enabled coincide, because the difference upstream is a void region a coverage grid cannot express | EnumWrapper | EnsureVerticalShellThickness::Enabled |  | Print |
 | `extra_perimeters` | 2 | applied |  | bool | true |  | Print |
@@ -607,7 +607,7 @@ falls to zero.
 | `overhang_speed_2` | 1 | applied |  | FloatOrPercentage | FloatOrPercentage{20.} |  | Print |
 | `overhang_speed_3` | 1 | applied |  | FloatOrPercentage | FloatOrPercentage{25.} |  | Print |
 | `pressure_advance` | 1 | applied |  | EnumWrapper | PressureAdvance::Disabled |  | ? |
-| `pressure_advance_value` | 1 | applied |  | double | 0. |  | ? |
+| `pressure_advance_value` | 1 | applied | pressure_advance — the figure the engine keeps apart from its on/off switch; this engine reads both spellings into one value | double | 0. |  | ? |
 | `raft_first_layer_density` | 1 | applied |  | Percentage | Percentage{90.} |  | ? |
 | `raft_first_layer_expansion` | 1 | applied |  | double | 3. | mm | ? |
 | `support_material` | 1 | applied | support | EnumWrapper | SupportMode::EnforcersOnly |  | ? |

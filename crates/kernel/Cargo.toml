@@ -8,3 +8,9 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+i_overlay = "9.2"
+
+[dev-dependencies]
+clipper2-rust = "1.2"

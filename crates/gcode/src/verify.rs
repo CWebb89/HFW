@@ -172,6 +172,47 @@ fn arc_length(x0: f64, y0: f64, x1: f64, y1: f64, i: f64, j: f64, clockwise: boo
     Some(sweep.abs() * start_r)
 }
 
+/// A placeholder a preset's G-code still carries, which no printer can execute.
+///
+/// A machine preset templates its start G-code with `[bed_temperature]` and
+/// `{first_layer_print_min[0]}`. Intake and the writer are supposed to have
+/// replaced every one of them, and a file that still holds one is the failure
+/// this whole check exists for: the printer would run the word instead of a
+/// number, or stop at an unknown command, with a full plate already down. Only a
+/// template-shaped token counts, so a comment or a display string may keep its
+/// brackets.
+fn unsubstituted(line: &str) -> Option<String> {
+    let code = line.split(';').next().unwrap_or("");
+    if takes_free_text(code) {
+        return None;
+    }
+    for (open, close) in [('{', '}'), ('[', ']')] {
+        let Some(at) = code.find(open) else { continue };
+        let after = &code[at + 1..];
+        let Some(end) = after.find(close) else {
+            continue;
+        };
+        let name = &after[..end];
+        let shaped = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '[' || c == ']');
+        if shaped {
+            return Some(code[at..=at + end + 1].to_owned());
+        }
+    }
+    None
+}
+
+/// True for the commands whose argument is display text rather than a number, so a
+/// bracket inside it is the user's own message and not a placeholder.
+fn takes_free_text(code: &str) -> bool {
+    matches!(
+        code.split_whitespace().next().unwrap_or(""),
+        "M117" | "M118" | "RESPOND" | "M23" | "M28" | "M30" | "M32"
+    )
+}
+
 /// Checks a G-code file against a printer profile.
 pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
     let mut r = VerifyReport::default();
@@ -221,6 +262,17 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
             } else if let Some(h) = tag.strip_prefix("HEIGHT:") {
                 height = h.trim().parse().unwrap_or(f64::NAN);
             }
+            continue;
+        }
+        if let Some(token) = unsubstituted(line) {
+            push(
+                &mut r,
+                max_errors,
+                format!(
+                    "line {number}: {token} is an unsubstituted placeholder; the printer \
+                     would receive it as literal text"
+                ),
+            );
             continue;
         }
         let Some(c) = parse_line(line) else { continue };

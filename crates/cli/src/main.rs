@@ -394,12 +394,6 @@ impl Options {
         };
         self.settings.measure_overhang =
             cfg.overhangs && (cfg.dynamic_overhang_speeds || cfg.dynamic_fan_speeds);
-        if cfg.wall_transition_length > 0.0 {
-            self.settings.wall.trans_len = cfg.wall_transition_length;
-        }
-        if cfg.wall_transition_filter_deviation > 0.0 {
-            self.settings.wall.hyst = 0.01 * cfg.wall_transition_filter_deviation;
-        }
         if cfg.wall_transition_angle > 0.0 {
             self.settings.wall.corner_deg = cfg.wall_transition_angle;
         }
@@ -952,14 +946,6 @@ fn run_cli() -> Result<(), String> {
     let Some(mut o) = parse_arguments()? else {
         return Ok(());
     };
-    if let Some(path) = o.intake_json.clone() {
-        let report = o
-            .preset_report
-            .as_ref()
-            .ok_or_else(|| "--intake-json needs --preset or --bundle".to_owned())?;
-        fs::write(&path, json::intake_document(report).to_json())
-            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
-    }
 
     if let Some(path) = o.check_gcode.clone() {
         return run_check(&o, &path);
@@ -969,6 +955,14 @@ fn run_cli() -> Result<(), String> {
         if o.list_bundle {
             return Ok(());
         }
+    }
+    if let Some(path) = o.intake_json.clone() {
+        let report = o
+            .preset_report
+            .as_ref()
+            .ok_or_else(|| "--intake-json needs --preset or --bundle".to_owned())?;
+        fs::write(&path, json::intake_document(report).to_json())
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
     }
     o.apply_project_settings()?;
     if let Some(config) = o.profile_config.clone() {
@@ -1198,6 +1192,7 @@ fn load_plate(o: &Options, factors: [f64; 3]) -> Result<Vec<PlatePart>, String> 
     }
     scale_plate(&mut parts, factors)?;
     arrange_plate(&mut parts, o)?;
+    seat_on_bed(&mut parts)?;
     for (index, part) in parts.iter().enumerate() {
         for other in &parts[index + 1..] {
             if boxes_overlap(part.bounds, other.bounds) {
@@ -1250,6 +1245,40 @@ fn scale_plate(parts: &mut [PlatePart], factors: [f64; 3]) -> Result<(), String>
             })
             .map_err(|error| error.to_string())?;
         part.refresh_bounds();
+    }
+    Ok(())
+}
+
+/// Lifts any object that hangs below the bed until it rests on it.
+///
+/// The bed is z=0, so an object placed partly underneath it cannot be printed as
+/// it stands. Lifting only the objects that need it keeps every other object
+/// where the file put it; lifting the plate by its lowest point instead would
+/// move objects that had nothing wrong with them, and would change the height
+/// relationship between parts that a plate's layout exists to fix.
+fn seat_on_bed(parts: &mut [PlatePart]) -> Result<(), String> {
+    for part in parts.iter_mut() {
+        let Some((z_min, _)) = part.mesh.z_bounds() else {
+            continue;
+        };
+        let below_nm = -z_min;
+        if below_nm <= 0 {
+            continue;
+        }
+        let lift = below_nm as f64 / 1_000_000.0;
+        part.mesh = part
+            .mesh
+            .transformed(MeshTransform {
+                translation_mm: [0.0, 0.0, lift],
+                ..MeshTransform::default()
+            })
+            .map_err(|error| error.to_string())?;
+        part.refresh_bounds();
+        outln!(
+            "warning: {} hangs {lift:.3} mm below the bed; lifted to sit on it, which \
+             moves it relative to the rest of the plate",
+            part.name
+        );
     }
     Ok(())
 }
@@ -1796,10 +1825,9 @@ fn add_stats(total: &mut hfw_engine::JobStats, extra: &hfw_engine::JobStats) {
     total.layers += extra.layers;
     total.processed_layers += extra.processed_layers;
     total.triangles_tested += extra.triangles_tested;
-    total.field_nodes += extra.field_nodes;
-    total.thin_nodes += extra.thin_nodes;
-    total.dropped_nodes += extra.dropped_nodes;
-    total.ridge_vertices += extra.ridge_vertices;
+    total.wall_loops += extra.wall_loops;
+    total.gap_strands += extra.gap_strands;
+    total.wall_points += extra.wall_points;
     total.ms_slice += extra.ms_slice;
     total.ms_walls += extra.ms_walls;
     total.ms_infill += extra.ms_infill;
@@ -1896,8 +1924,7 @@ fn run_single(
         .ok_or_else(|| "missing required --svg path".to_owned())?;
 
     let (slice, region) = slice_plane(mesh, z_mm).map_err(|error| error.to_string())?;
-    let walls = hfw_engine::generate_walls(&region, &o.settings.wall, o.settings.mode)
-        .map_err(|error| error.to_string())?;
+    let walls = hfw_engine::generate_walls(&region, &o.settings.wall, o.settings.mode);
     let mut planned = PlannedSlice {
         index: 0,
         bottom_z: z_mm,
@@ -1915,10 +1942,10 @@ fn run_single(
     };
     if let Some(ip) = o.settings.infill {
         let regions = vec![region.clone()];
-        let mut cache = MaskCache::new(&regions, ip.skin_res, ip.top_layers + ip.bottom_layers + 1);
+        let cache = MaskCache::new(&regions, ip.skin_res, ip.top_layers + ip.bottom_layers + 1);
         planned.paths.extend(hfw_engine::infill_layer(
             &region,
-            &mut cache,
+            &cache,
             0,
             0.0,
             &o.settings.wall,
@@ -1954,12 +1981,11 @@ fn run_single(
         planned.counts.infill
     );
     outln!(
-        "Field nodes {}, thin {}, dropped {}; ridge vertices {} on {} branches.",
-        walls.stats.nodes,
-        walls.stats.thin_nodes,
-        walls.stats.dropped_nodes,
-        walls.stats.ridge_vertices,
-        walls.stats.ridge_branches
+        "Wall loops {}, gap strands {}; {} vertices in {:.1} ms of offsetting.",
+        walls.stats.loops,
+        walls.stats.gaps,
+        walls.stats.points,
+        walls.stats.ms_offset
     );
     if let Some(res) = o.settings.metrics_res {
         let m = evaluate_perimeter(&region, &planned.paths, &o.settings.wall, res);
@@ -2151,8 +2177,9 @@ fn run_stack(
             "Mean perimeter coverage: under {mean_under:.4}, over {mean_over:.4}, width violation {mean_viol:.4}."
         );
     }
+    let positioned = plate.iter().any(|part| part.positioned);
     let written = match &o.gcode {
-        Some(path) => Some(write_gcode(o, &job, path)?),
+        Some(path) => Some(write_gcode(o, &job, path, positioned)?),
         None => {
             outln!("No printable G-code was generated (no --profile and --gcode).");
             None
@@ -2195,7 +2222,7 @@ struct Written {
     path: PathBuf,
 }
 
-fn write_gcode(o: &Options, job: &Job, path: &Path) -> Result<Written, String> {
+fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<Written, String> {
     let base = o
         .profile_config
         .as_ref()
@@ -2203,6 +2230,7 @@ fn write_gcode(o: &Options, job: &Job, path: &Path) -> Result<Written, String> {
     let mut marked = base.clone();
     marked.pause_heights = o.pause_at.clone();
     marked.colour_change_heights = o.colour_change_at.clone();
+    marked.keep_position = positioned;
     let cfg = &marked;
     if o.settings.every != 1 {
         return Err("--gcode needs every layer planned; drop --every".to_owned());
@@ -2406,9 +2434,8 @@ fn job_report(input: &ReportInput, job: &Job, totals: &JobTotals) -> String {
     );
     let _ = writeln!(
         &mut text,
-        "Distance field resolution: {:.4} mm ({} cells per millimetre)",
-        o.settings.wall.h,
-        1.0 / o.settings.wall.h
+        "Slice simplification: {:.4} mm; brim raster: {:.4} mm",
+        o.settings.resolution, o.settings.wall.h
     );
     let _ = writeln!(&mut text, "Layers: {}", job.layers.len());
     if !job.skipped.is_empty() {
@@ -2475,8 +2502,8 @@ fn job_report(input: &ReportInput, job: &Job, totals: &JobTotals) -> String {
     }
     let _ = writeln!(
         &mut text,
-        "Thin-wall field cells: {}; dropped unprintable cells: {}; ridge vertices: {}",
-        job.stats.thin_nodes, job.stats.dropped_nodes, job.stats.ridge_vertices
+        "Wall loops: {}; gap strands: {}; wall vertices: {}",
+        job.stats.wall_loops, job.stats.gap_strands, job.stats.wall_points
     );
     let _ = writeln!(&mut text, "\nMesh diagnostics before preparation:");
     append_mesh(&mut text, before);

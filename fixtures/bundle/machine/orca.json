@@ -1,0 +1,12 @@
+{
+ "name": "Demo Orca 350",
+ "type": "machine",
+ "from": "system",
+ "instantiation": "true",
+ "inherits": "",
+ "printable_area": ["0x0", "350x0", "350x350", "0x350"],
+ "printable_height": "325",
+ "machine_max_speed_x": ["500", "500"],
+ "machine_start_gcode": "PRINT_START EXTRUDER=[nozzle_temperature_initial_layer] BED=[bed_temperature_initial_layer_single] PRINT_MIN={first_layer_print_min[0]},{first_layer_print_min[1]} PRINT_MAX={first_layer_print_max[0]},{first_layer_print_max[1]}",
+ "machine_end_gcode": "PRINT_END LAYERS=[total_layer_count] BED_MAX={print_bed_max}"
+}

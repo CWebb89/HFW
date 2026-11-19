@@ -77,14 +77,14 @@ pub fn audit(cfg: &PrinterConfig) -> Vec<Finding> {
             ("first_layer_speed", cfg.first_layer_speed),
             ("first_layer_outer_speed", cfg.first_layer_outer_speed),
             ("first_layer_inner_speed", cfg.first_layer_inner_speed),
-            ("first_layer_perimeter_speed", cfg.first_layer_perimeter_speed),
+            (
+                "first_layer_perimeter_speed",
+                cfg.first_layer_perimeter_speed,
+            ),
             ("first_layer_solid_speed", cfg.first_layer_solid_speed),
             ("first_layer_infill_speed", cfg.first_layer_infill_speed),
             ("max_speed", cfg.max_speed),
-            (
-                "filament_infill_max_speed",
-                cfg.filament_infill_max_speed,
-            ),
+            ("filament_infill_max_speed", cfg.filament_infill_max_speed),
             (
                 "filament_infill_max_crossing_speed",
                 cfg.filament_infill_max_crossing_speed,
@@ -196,8 +196,9 @@ pub fn audit(cfg: &PrinterConfig) -> Vec<Finding> {
     if cfg.retract_len == 0.0 {
         off.push(Finding {
             severity: Severity::Off,
-            message: "retract_len is 0: nothing retracts, so every travel keeps its pressure and strings"
-                .to_owned(),
+            message:
+                "retract_len is 0: nothing retracts, so every travel keeps its pressure and strings"
+                    .to_owned(),
         });
     } else if cfg.z_hop == 0.0 {
         off.push(Finding {
@@ -255,22 +256,23 @@ mod tests {
     use super::*;
 
     fn base() -> PrinterConfig {
-        let mut cfg = PrinterConfig::default();
-        cfg.retract_len = 0.8;
-        cfg.retract_speed = 35.0;
-        cfg.deretract_speed = 35.0;
-        cfg.z_hop = 0.4;
-        cfg.pressure_advance = 0.04;
-        cfg.machine_max_feedrate_x = 500.0;
-        cfg.machine_max_feedrate_y = 500.0;
-        cfg.machine_max_feedrate_e = 120.0;
-        cfg.machine_max_accel_x = 20000.0;
-        cfg.machine_max_accel_y = 20000.0;
-        cfg.nozzle_temp = 210.0;
-        cfg.first_nozzle_temp = 210.0;
-        cfg.bed_temp = 60.0;
-        cfg.first_layer_bed_temp = 60.0;
-        cfg
+        PrinterConfig {
+            retract_len: 0.8,
+            retract_speed: 35.0,
+            deretract_speed: 35.0,
+            z_hop: 0.4,
+            pressure_advance: 0.04,
+            machine_max_feedrate_x: 500.0,
+            machine_max_feedrate_y: 500.0,
+            machine_max_feedrate_e: 120.0,
+            machine_max_accel_x: 20000.0,
+            machine_max_accel_y: 20000.0,
+            nozzle_temp: 210.0,
+            first_nozzle_temp: 210.0,
+            bed_temp: 60.0,
+            first_layer_bed_temp: 60.0,
+            ..PrinterConfig::default()
+        }
     }
 
     #[test]

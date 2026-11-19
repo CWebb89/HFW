@@ -353,6 +353,35 @@ const DYNAMIC_PLACEHOLDERS: &[(&str, &str)] = &[
     ("current_extruder", "0"),
 ];
 
+/// Placeholders the G-code writer fills, because their value belongs to the slice
+/// rather than to the configuration.
+///
+/// Intake runs before a single layer exists and cannot know where the part sits or
+/// how tall it is. Leaving these unresolved in the text is the point: the writer
+/// substitutes them at emission. Naming them as unknown would report every real
+/// machine preset's start G-code as broken, which is how a report stops being read.
+///
+/// `crates/gcode/tests/gcode.rs` templates every name here and fails if the writer
+/// leaves one behind, so these lists cannot drift from the writer's vocabulary.
+pub fn writer_placeholders() -> impl Iterator<Item = &'static str> {
+    START_PLACEHOLDERS
+        .iter()
+        .chain(LAYER_PLACEHOLDERS.iter())
+        .copied()
+}
+
+/// The writer's placeholders that only a start or end G-code can carry: the part's
+/// extent on the bed, which no layer has yet.
+pub const START_PLACEHOLDERS: &[&str] = &[
+    "first_layer_print_min",
+    "first_layer_print_max",
+    "print_bed_max",
+    "max_print_height",
+];
+
+/// The writer's placeholders that only a per-layer hook can carry.
+pub const LAYER_PLACEHOLDERS: &[&str] = &["total_layers", "layer_z", "layer_num"];
+
 /// Substitutes the reference dialects' placeholders in the G-code a preset carries.
 ///
 /// A machine preset's start G-code is a template, and the two dialects template it
@@ -408,7 +437,9 @@ fn fill_placeholders(config: &mut PrinterConfig, preset: &Preset, report: &mut I
                 .or_else(|| intrinsic(config, name))
         };
         let (conditioned, expressions) = crate::expression::expand(text, &lookup);
-        unresolved.extend(expressions);
+        for expression in expressions {
+            record_unresolved(&mut unresolved, &expression);
+        }
         let mut filled = String::with_capacity(conditioned.len());
         let mut rest = conditioned.as_str();
         while let Some(at) = rest.find(['[', '{']) {
@@ -442,10 +473,8 @@ fn fill_placeholders(config: &mut PrinterConfig, preset: &Preset, report: &mut I
                     // A conditional is decided by the writer, which knows the layer
                     // height this one does not; naming it here would report the
                     // profile's own control flow as a typo.
-                    if !crate::expression::deferred(token)
-                        && !unresolved.iter().any(|seen| seen == name)
-                    {
-                        unresolved.push(name.to_owned());
+                    if !crate::expression::deferred(token) {
+                        record_unresolved(&mut unresolved, name);
                     }
                     filled.push(open);
                     filled.push_str(token);
@@ -487,6 +516,18 @@ fn strip_index(token: &str) -> &str {
     }
 }
 
+/// Records a name intake could not fill, once, and only if the writer will not fill
+/// it either.
+fn record_unresolved(unresolved: &mut Vec<String>, name: &str) {
+    let name = strip_index(name);
+    if writer_placeholders().any(|filled| filled == name)
+        || unresolved.iter().any(|seen| seen == name)
+    {
+        return;
+    }
+    unresolved.push(name.to_owned());
+}
+
 /// The first element of a dialect value, which stores lists as comma-separated text.
 fn first_value(value: &str) -> String {
     value
@@ -502,15 +543,17 @@ fn first_value(value: &str) -> String {
 pub(crate) fn intrinsic(config: &PrinterConfig, name: &str) -> Option<String> {
     let number = |value: f64| Some(format!("{value}"));
     match name {
-        "first_layer_temperature" => number(config.first_nozzle_temp),
-        "temperature" | "nozzle_temperature" => number(config.nozzle_temp),
-        "first_layer_bed_temperature" | "bed_temperature_initial_layer_single" => {
-            number(if config.first_layer_bed_temp > 0.0 {
-                config.first_layer_bed_temp
-            } else {
-                config.bed_temp
-            })
+        "first_layer_temperature" | "nozzle_temperature_initial_layer" => {
+            number(config.first_nozzle_temp)
         }
+        "temperature" | "nozzle_temperature" => number(config.nozzle_temp),
+        "first_layer_bed_temperature"
+        | "bed_temperature_initial_layer"
+        | "bed_temperature_initial_layer_single" => number(if config.first_layer_bed_temp > 0.0 {
+            config.first_layer_bed_temp
+        } else {
+            config.bed_temp
+        }),
         "bed_temperature" => number(config.bed_temp),
         "nozzle_diameter" => number(config.nozzle_diameter),
         "num_extruders" => Some("1".to_owned()),
@@ -1071,6 +1114,97 @@ mod tests {
     }
 
     #[test]
+    fn an_orca_machines_bed_and_height_are_read_under_their_orca_names() {
+        // OrcaSlicer names the outline `printable_area`, writes it as a list of
+        // `XxY` strings, and calls the height `printable_height`. Reading only
+        // `bed_shape` left every machine preset from its library on the default
+        // 220 mm bed, which is the wrong size to centre on and to fit-check against.
+        let preset = Preset::parse(
+            r#"{"type":"machine","printable_area":["0x0","350x0","350x350","0x350"],"printable_height":"325","nozzle_diameter":["0.4"]}"#,
+        )
+        .expect("preset parses");
+        let (config, report) = PrinterConfig::from_preset(&preset);
+        assert!((config.bed_x - 350.0).abs() < 1e-9);
+        assert!((config.bed_y - 350.0).abs() < 1e-9);
+        assert!((config.max_z - 325.0).abs() < 1e-9);
+        for key in ["printable_area", "printable_height"] {
+            let intake = report
+                .entries()
+                .find(|(name, _)| *name == key)
+                .map(|(_, intake)| intake);
+            assert_eq!(
+                intake,
+                Some(Intake::Applied),
+                "{key} must be applied, not merely recognised"
+            );
+        }
+    }
+
+    #[test]
+    fn a_machine_preset_alone_fills_its_initial_layer_temperatures() {
+        // The values are in the filament preset when there is one, and the machine
+        // preset is read first: without an intrinsic fallback a machine-only job
+        // keeps the reference spelling as literal text.
+        let preset = Preset::parse(
+            "machine_start_gcode = M190 S[bed_temperature_initial_layer] M109 S[nozzle_temperature_initial_layer]\n"
+        )
+        .expect("preset parses");
+        let (config, _report) = PrinterConfig::from_preset(&preset);
+        let bed = if config.first_layer_bed_temp > 0.0 {
+            config.first_layer_bed_temp
+        } else {
+            config.bed_temp
+        };
+        assert_eq!(
+            config.start_gcode,
+            format!("M190 S{bed} M109 S{}", config.first_nozzle_temp)
+        );
+    }
+
+    #[test]
+    fn placeholders_the_writer_fills_are_not_reported_as_unknown() {
+        // Every one of these is substituted at emission, once the part's extent and
+        // the layer are known. Intake reporting them made every real machine preset
+        // look broken, which is how a warning stops being read.
+        let start: Vec<String> = writer_placeholders()
+            .map(|name| format!("[{name}]"))
+            .collect();
+        let text = format!(
+            "machine_start_gcode = {} {{layer_z}} {{layer_num}}\n",
+            start.join(" ")
+        );
+        let preset = Preset::parse(&text).expect("preset parses");
+        let (_, report) = PrinterConfig::from_preset(&preset);
+        assert!(
+            report.warnings.is_empty(),
+            "no placeholder should be reported: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn an_unknown_placeholder_is_reported_once_under_its_own_name() {
+        // `[foo[0]]` and `{foo[1]}` are one unknown setting, not two, and the report
+        // names the setting rather than the element the profile asked for.
+        let preset = Preset::parse(
+            "machine_start_gcode = PRINT_MIN={first_layer_print_bogus[0]},{first_layer_print_bogus[1]}\n",
+        )
+        .expect("preset parses");
+        let (_, report) = PrinterConfig::from_preset(&preset);
+        let warning = report
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("placeholder"))
+            .expect("an unknown placeholder is reported");
+        assert!(warning.contains("1 placeholder(s)"), "{warning}");
+        assert!(
+            warning.contains("first_layer_print_bogus;")
+                || warning.ends_with("first_layer_print_bogus"),
+            "{warning}"
+        );
+    }
+
+    #[test]
     fn per_object_overrides_are_read_and_volume_metadata_is_not() {
         let parts = vec![(
             "Metadata/Slic3r_PE_model.config".to_owned(),
@@ -1204,13 +1338,53 @@ accel_to_decel_enable = 1
 
     #[test]
     fn an_unfamiliar_enum_value_is_unconverted_not_a_failure() {
-        let preset = Preset::parse("support_style = organic\n").expect("parses");
+        let preset = Preset::parse("support_style = waffle\n").expect("parses");
         let (config, report) = PrinterConfig::from_preset(&preset);
         assert_eq!(config.support_style, PrinterConfig::default().support_style);
         assert!(report
             .gaps()
             .iter()
             .any(|(_, intake)| *intake == Intake::Unconverted));
+    }
+
+    #[test]
+    fn dialect_enum_spellings_reach_the_engine() {
+        let preset = Preset::parse(
+            "support_material_style = tree slim\n\
+             cooling_slowdown_logic = consistent surface speed\n\
+             ironing_type = top\n\
+             ironing = false\n\
+             arc_fitting = disabled\n\
+             enable_arc_fitting = enabled\n",
+        )
+        .expect("parses");
+        let (config, report) = PrinterConfig::from_preset(&preset);
+        assert_eq!(config.support_style, "tree");
+        assert_eq!(config.cooling_slowdown_logic, "consistent_surface");
+        assert!(!config.ironing, "ironing_type must not switch ironing on");
+        assert_eq!(config.ironing_type, "top_surfaces");
+        assert!(config.arc_fitting);
+        assert_eq!(report.count(Intake::Unconverted), 0);
+    }
+
+    #[test]
+    fn a_support_switch_carries_its_spelling() {
+        let preset = Preset::parse("support_material = everywhere\n").expect("parses");
+        let (config, report) = PrinterConfig::from_preset(&preset);
+        assert!(config.support);
+        assert_eq!(report.count(Intake::Applied), 1);
+
+        let preset = Preset::parse("support_material = none\n").expect("parses");
+        let (config, _report) = PrinterConfig::from_preset(&preset);
+        assert!(!config.support);
+    }
+
+    #[test]
+    fn a_percent_reaches_a_plain_number() {
+        let preset = Preset::parse("seam_gap_distance = 15%\n").expect("parses");
+        let (config, report) = PrinterConfig::from_preset(&preset);
+        assert!((config.seam_gap - 0.15).abs() < 1e-9);
+        assert_eq!(report.count(Intake::Unconverted), 0);
     }
 
     #[test]

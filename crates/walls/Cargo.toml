@@ -11,3 +11,6 @@ hfw-kernel = { path = "../kernel" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+hfw-skeleton = { path = "../skeleton" }

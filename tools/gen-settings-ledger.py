@@ -40,6 +40,7 @@ LEGACY = (
 )
 HFW_PARSE = HFW / "crates/config/src/parse.rs"
 FOREIGN_SETTINGS = NEXT_LAYER / "src/qt/src/ForeignSettings.cpp"
+PRESET_IMPORT = NEXT_LAYER / "src/qt/src/PresetImport.cpp"
 LOOP_AXES = ("x", "y", "z", "e")
 LOOP_PREFIXES = ("machine_max_feedrate_", "machine_max_acceleration_",
                  "machine_max_jerk_")
@@ -119,6 +120,12 @@ HFW_SYNONYMS = {
     "max_layer_height": ("max_layer_height", "applied", "the profile's ceiling, first extruder's value"),
     "infill_acceleration": ("infill_accel", "applied",
                              "sparse, solid and top skin all fall back to it"),
+    "pressure_advance_value": (
+        "pressure_advance",
+        "applied",
+        "the figure the engine keeps apart from its on/off switch; this engine reads "
+        "both spellings into one value",
+    ),
 }
 
 HFW_ALIAS = {
@@ -299,8 +306,7 @@ HFW_ALIAS = {
     "chamber_minimal_temperature": ("chamber_minimal_temperature", "applied",
                                     "waits with M191 before the first layer"),
     "pressure_advance_value": ("pressure_advance", "applied",
-                               "SET_PRESSURE_ADVANCE for Klipper, M900 for Marlin"),
-    "top_infill_width": ("top_infill_extrusion_width", "applied",
+                               "SET_PRESSURE_ADVANCE for Klipper, M900 for Marlin"),    "top_infill_width": ("top_infill_extrusion_width", "applied",
                          "the top skin is drawn with its own bead width while the shell"
                          " layers under it keep the solid width"),
     "first_layer_width": ("first_layer_extrusion_width", "applied",
@@ -320,8 +326,8 @@ HFW_ALIAS = {
                          " the dialect key and overrides it when set"),
     "flow": ("extrusion_multiplier", "applied", ""),
     "seam": ("seam_position", "applied",
-             "all four; random scatters deterministically from the loop, and rear is the"
-             " rearmost vertex instead of a direction from the centroid"),
+             "all four; random scatters deterministically from the loop, and aligned keeps"
+             " each loop's seam where the loop below put it"),
     "inner_walls_first": ("external_perimeters_first", "partial",
                           "inverted meaning: the dialect flag puts the outer wall first,"
                           " and the parser stores it inverted"),
@@ -585,6 +591,33 @@ def parse_foreign(path: Path):
     return {foreign: engine for foreign, engine in pairs}
 
 
+def parse_import(path: Path):
+    if not path.exists():
+        return {}
+    pairs = re.findall(
+        r'\{"([a-z0-9_]+)",\s*"([a-z0-9_]+)",\s*Transform::\w+,',
+        path.read_text(encoding="utf-8", errors="replace"),
+    )
+    return {foreign: engine for foreign, engine in pairs}
+
+
+def dialect_renames():
+    """Orca/Bambu spelling -> engine spelling, from both proven tables.
+
+    `PresetImport.cpp` carries the keys the application's own importer renames
+    and `ForeignSettings.cpp` the ones its oracle gates. They overlap and
+    disagree on four keys, so the gated table wins: `overhang_1_4_speed` and
+    its neighbours are quarter-of-the-perimeter speeds whose index the two
+    files number differently, and `infill_combination` means different layers
+    there. A key only the importer renames is still a real rename -- without
+    them a machine preset's `printable_area` and `machine_max_speed_x` never
+    reach this engine.
+    """
+    pairs = parse_import(PRESET_IMPORT)
+    pairs.update(parse_foreign(FOREIGN_SETTINGS))
+    return pairs
+
+
 def tier_for(name: str, entry: dict, surface: set | None) -> str:
     if surface is not None and name not in surface:
         return "int"
@@ -615,7 +648,7 @@ def tier_for(name: str, entry: dict, surface: set | None) -> str:
 HFW_CAVEATS = {
     "avoid_crossing_perimeters": (
         "partial",
-        "the emitter picks the loop entry point whose travel does not cut a perimeter on this layer, then routes the travel itself around the loops: the layer's perimeters are offset both ways by a bead of clearance, and a visibility graph over those offset rings yields a path that holds that clearance from every wall, emitted as one retracted chain of moves. Partial because supports and curled overhangs from earlier layers are not obstacles, and a travel whose start or end sits against several nested walls can find no route at all and falls back to the straight move",
+        "on by default: the emitter routes the travel itself around the loops — the layer's perimeters are offset both ways by a bead of clearance, and a visibility graph over those offset rings yields a path that holds that clearance from every wall, emitted as one retracted chain of moves. A closed loop keeps the seam the profile chose unless the seam is `nearest`, so routing costs distance and never the seam; only an open path has its entry point moved to save the crossing. Partial because supports and curled overhangs from earlier layers are not obstacles, and a travel whose start or end sits against several nested walls can find no route at all and falls back to the straight move",
     ),
     "avoid_crossing_perimeters_max_detour": (
         "applied",

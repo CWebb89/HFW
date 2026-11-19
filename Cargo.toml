@@ -6,6 +6,7 @@ members = [
     "crates/mesh",
     "crates/slicing",
     "crates/walls",
+    "crates/skeleton",
     "crates/infill",
     "crates/support",
     "crates/toolpath",

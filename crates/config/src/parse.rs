@@ -8,8 +8,15 @@ use crate::{Flavor, PrintSequence, PrinterConfig, Seam, Substitution, Thumbnail}
 
 fn number(key: &str, value: &str) -> Result<f64, ConfigError> {
     let text = value.trim();
-    match text.parse::<f64>() {
-        Ok(v) if v.is_finite() => Ok(v),
+    // The dialect writes a rate or a density as `30%` where this engine keeps the
+    // fraction, and a `%` reaching the number reader used to end the whole key as
+    // a spelling it could not convert.
+    let (body, percent) = match text.strip_suffix('%') {
+        Some(body) => (body.trim(), true),
+        None => (text, false),
+    };
+    match body.parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(if percent { v / 100.0 } else { v }),
         _ => Err(ConfigError::NotANumber {
             key: key.to_owned(),
             value: text.to_owned(),
@@ -182,13 +189,22 @@ fn finish_bed(points: Vec<(f64, f64)>) -> Result<Vec<(f64, f64)>, ConfigError> {
 }
 
 fn boolean(key: &str, value: &str) -> Result<bool, ConfigError> {
-    match value.trim() {
-        "true" | "yes" | "on" | "1" => Ok(true),
-        "false" | "no" | "off" | "0" => Ok(false),
-        _ => Err(ConfigError::NotABoolean {
-            key: key.to_owned(),
-            value: value.trim().to_owned(),
-        }),
+    // A switch's spelling differs between the dialects: PrusaSlicer and Orca write
+    // `enabled`/`disabled`, some write the switch as a count, and a support switch
+    // writes what to support rather than whether to support at all.
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" | "enabled" | "enable" => Ok(true),
+        "emit_center" | "emit" => Ok(true),
+        "false" | "no" | "off" | "0" | "disabled" | "disable" => Ok(false),
+        "everywhere" | "auto" | "buildplate" | "build_plate" => Ok(true),
+        "none" => Ok(false),
+        other => match other.parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(v != 0.0),
+            _ => Err(ConfigError::NotABoolean {
+                key: key.to_owned(),
+                value: value.trim().to_owned(),
+            }),
+        },
     }
 }
 
@@ -675,15 +691,21 @@ impl PrinterConfig {
             }
             "support_min_area" => self.support_min_area = number(key, value)?,
             "support_style" => {
-                self.support_style = match value {
-                    "normal" | "tree" => value.to_owned(),
-                    _ => {
-                        return Err(ConfigError::BadChoice {
-                            key: "support_style",
-                            value: value.to_owned(),
-                            allowed: "normal, tree",
-                        })
+                // `support_material_style` in the dialect names the look of the
+                // generated support; this engine generates two shapes. A spelling
+                // outside the list stays a reported gap rather than a silent guess.
+                let style = value.trim().to_ascii_lowercase();
+                self.support_style = match style.as_str() {
+                    "normal" | "grid" | "snug" | "support_material_style" => "normal".to_owned(),
+                    "tree" | "organic" | "tree slim" | "tree strong" | "tree hybrid" => {
+                        "tree".to_owned()
                     }
+                    _ => return Err(ConfigError::BadChoice {
+                        key: "support_style",
+                        value: value.to_owned(),
+                        allowed:
+                            "normal, grid, snug, tree, organic, tree slim, tree strong, tree hybrid",
+                    }),
                 }
             }
             "support_branch_angle" => self.support_branch_angle = number(key, value)?,
@@ -787,15 +809,13 @@ impl PrinterConfig {
             "min_speed_factor" => self.min_speed_factor = number(key, value)?,
             "min_print_speed" => self.min_print_speed = number(key, value)?,
             "cooling_slowdown_logic" => {
-                self.cooling_slowdown_logic = match value {
-                    "proportional" | "uniform" | "consistent_surface" => value.to_owned(),
-                    _ => {
-                        return Err(ConfigError::BadChoice {
-                            key: "cooling_slowdown_logic",
-                            value: value.to_owned(),
-                            allowed: "proportional, uniform, consistent_surface",
-                        })
-                    }
+                let logic = value.trim().to_ascii_lowercase();
+                self.cooling_slowdown_logic = if logic.contains("consistent") {
+                    "consistent_surface".to_owned()
+                } else if logic.contains("proportional") {
+                    "proportional".to_owned()
+                } else {
+                    "uniform".to_owned()
                 }
             }
             "cooling_perimeter_transition_distance" => {
@@ -940,7 +960,13 @@ impl PrinterConfig {
                 }
             },
             "support_material_interface_contact_loops" => {
-                self.support_interface_loops = whole(key, value)?
+                // The dialect writes this as a switch, this engine keeps the number
+                // of interface loops it asks for.
+                self.support_interface_loops = match whole(key, value) {
+                    Ok(count) => count,
+                    Err(_) if boolean(key, value)? => 1,
+                    Err(_) => 0,
+                }
             }
             "support_material_closing_radius" => self.support_closing_radius = number(key, value)?,
             "support_material_bottom_contact_distance" => {
@@ -1107,17 +1133,18 @@ impl PrinterConfig {
             "ironing" => self.ironing = boolean(key, value)?,
             "ironing_all_solid" => self.ironing_all_solid = boolean(key, value)?,
             "ironing_type" => {
-                self.ironing_type = match value {
-                    "top_surfaces" => "top_surfaces".to_owned(),
-                    "topmost_only" | "topmost" => "topmost_only".to_owned(),
-                    "all_solid" => "all_solid".to_owned(),
-                    _ => {
-                        return Err(ConfigError::BadChoice {
-                            key: "ironing_type",
-                            value: value.to_owned(),
-                            allowed: "top_surfaces, topmost_only, all_solid",
-                        })
-                    }
+                let kind = value.trim().to_ascii_lowercase();
+                if kind.contains("no ironing") || kind == "none" || kind.is_empty() {
+                    self.ironing = false;
+                    self.ironing_type = "top_surfaces".to_owned();
+                } else {
+                    self.ironing_type = if kind.contains("solid") {
+                        "all_solid".to_owned()
+                    } else if kind.contains("topmost") {
+                        "topmost_only".to_owned()
+                    } else {
+                        "top_surfaces".to_owned()
+                    };
                 }
             }
             "ironing_flow" => self.ironing_flow = number(key, value)?,
@@ -2024,8 +2051,9 @@ mod tests {
             .expect("brim settings parse");
         assert_eq!(off.adhesion_brim_loops(), 0);
 
-        let shaped = PrinterConfig::parse("brim_type = outer_only\nbrim_width = 5\nline_width = 0.4\n")
-            .expect("brim settings parse");
+        let shaped =
+            PrinterConfig::parse("brim_type = outer_only\nbrim_width = 5\nline_width = 0.4\n")
+                .expect("brim settings parse");
         assert_eq!(shaped.adhesion_brim_loops(), 13);
 
         let counted = PrinterConfig::parse("brim_loops = 2\nline_width = 0.4\n")
@@ -2214,8 +2242,9 @@ mod tests {
             bare.slice_closing_radius
         );
         assert!(
-            bare.resolution.abs() < 1e-9,
-            "resolution defaults to zero, which disables simplification"
+            (bare.resolution - 0.012).abs() < 1e-9,
+            "resolution defaults to upstream's 0.012, got {}",
+            bare.resolution
         );
         PrinterConfig::parse("resolution = -1\n").expect_err("a negative tolerance is refused");
         PrinterConfig::parse("slice_closing_radius = 4\n")
@@ -2231,8 +2260,22 @@ mod tests {
         assert!(config.avoid_crossing_perimeters);
         assert!((config.avoid_crossing_perimeters_max_detour - 5.5).abs() < 1e-9);
         let bare = PrinterConfig::parse("").expect("an empty profile parses");
-        assert!(!bare.avoid_crossing_perimeters);
-        assert!(bare.avoid_crossing_perimeters_max_detour.abs() < 1e-9);
+        assert!(
+            bare.avoid_crossing_perimeters,
+            "travel keeps clear of printed walls by default: a travel across a wall \
+             leaves a blob on it, and both references avoid it"
+        );
+        assert!(
+            (bare.avoid_crossing_perimeters_max_detour - 2.0).abs() < 1e-9,
+            "the detour cap is the reference two millimetres, got {}",
+            bare.avoid_crossing_perimeters_max_detour
+        );
+        let off =
+            PrinterConfig::parse("avoid_crossing_perimeters = false\n").expect("the switch parses");
+        assert!(
+            !off.avoid_crossing_perimeters,
+            "and a profile may turn it off"
+        );
     }
 
     #[test]
@@ -2586,12 +2629,14 @@ mod tests {
         let numeric = PrinterConfig::parse("pressure_advance = 0.04\n").expect("a number parses");
         assert!((numeric.pressure_advance - 0.04).abs() < 1e-9);
 
-        let orca_shape = PrinterConfig::parse("pressure_advance = enabled\npressure_advance_value = 0.05\n")
-            .expect("the reference slicers' split shape parses");
+        let orca_shape =
+            PrinterConfig::parse("pressure_advance = enabled\npressure_advance_value = 0.05\n")
+                .expect("the reference slicers' split shape parses");
         assert!((orca_shape.pressure_advance - 0.05).abs() < 1e-9);
 
-        let value_first = PrinterConfig::parse("pressure_advance_value = 0.05\npressure_advance = enabled\n")
-            .expect("key order does not matter");
+        let value_first =
+            PrinterConfig::parse("pressure_advance_value = 0.05\npressure_advance = enabled\n")
+                .expect("key order does not matter");
         assert!((value_first.pressure_advance - 0.05).abs() < 1e-9);
 
         let off = PrinterConfig::parse("pressure_advance = disabled\n").expect("a switch parses");

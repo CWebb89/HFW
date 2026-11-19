@@ -37,9 +37,6 @@ fn settings(cfg: &PrinterConfig) -> Settings {
         cfg.top_one_perimeter_type.clone()
     };
     s.nozzle = cfg.nozzle_diameter;
-    if cfg.wall_transition_length > 0.0 {
-        s.wall.trans_len = cfg.wall_transition_length;
-    }
     if cfg.perimeter_generator == "classic" {
         s.mode = hfw_engine::Mode::Classic;
     }
@@ -143,6 +140,84 @@ fn config_rejects_bad_input() {
 }
 
 #[test]
+fn every_placeholder_the_writer_owns_is_substituted_where_it_is_emitted() {
+    // Intake deliberately leaves these in the text, because their value belongs to
+    // the slice. The lists live in the config crate so intake can stay quiet about
+    // them, which makes this test the thing that keeps them honest: a name added
+    // there but not substituted here would reach the printer as literal text.
+    let template = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| format!("{{{name}}}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut cfg = voron();
+    cfg.start_gcode = format!("PRINT_START {}", template(hfw_config::START_PLACEHOLDERS));
+    cfg.end_gcode = format!("PRINT_END {}", template(hfw_config::START_PLACEHOLDERS));
+    cfg.before_layer_gcode = format!("BEFORE_LAYER {}", template(hfw_config::LAYER_PLACEHOLDERS));
+    let (gcode, _) = make("cube.stl", &cfg);
+    let head = &gcode.text[..gcode.text.find("PRINT_START").expect("start G-code")];
+    let start = &gcode.text[gcode.text.find("PRINT_START").expect("start G-code")..];
+    let start = &start[..start.find('\n').expect("a start G-code line")];
+    let hook = gcode
+        .text
+        .split_once("BEFORE_LAYER")
+        .map(|(_, rest)| rest)
+        .expect("a per-layer hook");
+    let hook = &hook[..hook.find('\n').expect("a per-layer hook line")];
+    assert!(
+        !head.contains('{'),
+        "the head carries a placeholder: {head}"
+    );
+    assert!(
+        !start.contains('{'),
+        "a start placeholder survived: {start}"
+    );
+    assert!(
+        !hook.contains('{'),
+        "a per-layer placeholder survived: {hook}"
+    );
+    assert!(
+        !gcode.text.contains("{layer_z}"),
+        "the end G-code keeps a per-layer placeholder it cannot know"
+    );
+    let report = verify(&gcode.text, &cfg);
+    assert!(report.ok(), "{:?}", report.errors);
+}
+
+#[test]
+fn a_placeholder_left_in_the_file_fails_verification() {
+    // A machine preset's macro that receives the word `[bed_temperature]` instead of
+    // a number is how a print starts wrong, and a file carrying one must not be
+    // reported as printable. A display string or a comment may keep its brackets.
+    let mut cfg = voron();
+    cfg.end_gcode =
+        "PRINT_END FAN={during_print_exhaust_fan_speed_num[current_extruder]}".to_owned();
+    let (gcode, _) = make("cube.stl", &cfg);
+    let report = verify(&gcode.text, &cfg);
+    assert!(
+        !report.ok(),
+        "an unsubstituted placeholder passed verification"
+    );
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("unsubstituted placeholder")),
+        "{:?}",
+        report.errors
+    );
+    let mut fine = voron();
+    fine.start_gcode = "M117 Printing [part] ; [layer] comment".to_owned();
+    let (gcode, _) = make("cube.stl", &fine);
+    assert!(
+        verify(&gcode.text, &fine).ok(),
+        "a bracket in a comment or a display string is not a placeholder"
+    );
+}
+
+#[test]
 fn cube_gcode_passes_verification_and_is_centered() {
     let cfg = voron();
     let (gcode, job) = make("cube.stl", &cfg);
@@ -224,12 +299,13 @@ fn every_layer_planned_covers_the_model() {
         report.volume_mm3,
         planned
     );
-    // Wall beads round off into the corners they do not fill, so the file carries
-    // about 2.4% less plastic than the cube's geometric volume; the rest is solid
-    // fill at its full rectangle.
+    // Wall beads round off into the corners they do not fill, and the skin overlaps
+    // the innermost loop by the configured overlap so that it meets the wall instead
+    // of leaving a gap beside it; the two corrections very nearly cancel, and both
+    // reference slicers come out the same side of 1.0 on this cube.
     let covered = report.volume_mm3 / 8000.0;
     assert!(
-        (covered - 0.9725).abs() < 0.01,
+        (covered - 1.0176).abs() < 0.01,
         "the file carries {covered:.4} of the cube"
     );
 }
@@ -385,7 +461,9 @@ fn exclude_object_is_emitted_when_enabled() {
     assert!(gcode.text.contains("EXCLUDE_OBJECT_END NAME=MY_PART"));
     let unnamed = generate(&job.layers, &cfg, None).expect("gcode builds");
     assert!(
-        unnamed.text.contains("EXCLUDE_OBJECT_DEFINE NAME=HFW_MODEL"),
+        unnamed
+            .text
+            .contains("EXCLUDE_OBJECT_DEFINE NAME=HFW_MODEL"),
         "a part with no name still needs one the machine can cancel"
     );
     cfg.exclude_object = false;
@@ -1321,8 +1399,13 @@ fn a_fitted_arc_lays_the_same_plastic_as_the_chords_it_replaces() {
     let arc_report = verify(&with_arcs.text, &fitted);
     let chord_report = verify(&chords.text, &fitted);
     let ratio = arc_report.filament_mm / chord_report.filament_mm;
+    // A chord cuts the curve it replaces, so an arc that follows that curve is
+    // longer by the length the chord gave up. On a rasterised wall path of 67 um
+    // steps that was a hundredth of a percent; a layer polygon simplified to
+    // 0.012 mm has chords two orders of magnitude longer, and about a percent is
+    // the length they were cutting.
     assert!(
-        (ratio - 1.0).abs() < 0.01,
+        (ratio - 1.0).abs() < 0.015,
         "arcs changed the filament total by {:.1}%",
         100.0 * (ratio - 1.0)
     );
@@ -2269,7 +2352,10 @@ fn bead_cross_section_matches_the_reference_slicers() {
         (area - 0.071_415_9).abs() < 1e-6,
         "bead area {area} is not the rounded 0.4x0.2 section"
     );
-    assert!(area < 0.08 && area > 0.88 * 0.08, "{area} left the rounded range");
+    assert!(
+        area < 0.08 && area > 0.88 * 0.08,
+        "{area} left the rounded range"
+    );
     assert_eq!(hfw_gcode::bead_area(0.4, 0.0), 0.0);
     let width = hfw_gcode::bead_width(area * 10.0, 10.0, 0.2);
     assert!((width - 0.4).abs() < 1e-9, "inverse read back {width}");
@@ -2278,5 +2364,8 @@ fn bead_cross_section_matches_the_reference_slicers() {
 #[test]
 fn a_bead_narrower_than_its_own_corners_keeps_its_rectangle() {
     let area = hfw_gcode::bead_area(0.12, 0.2);
-    assert!(area >= 0.5 * 0.12 * 0.2, "{area} fell below half the rectangle");
+    assert!(
+        area >= 0.5 * 0.12 * 0.2,
+        "{area} fell below half the rectangle"
+    );
 }

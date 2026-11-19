@@ -19,7 +19,8 @@ model.3mf / .stl
    outlines
       │
       │  ② PLANNING     decide what to draw inside each outline
-      ▼                 → walls: loops stepping inward from the edge
+      ▼                 → walls: beads at increasing depth from the edge,
+                                each as wide as its own section allows
                         → skin: solid fill where a surface is exposed
                         → sparse infill: the cheap lattice inside
                         → supports: columns under anything overhanging air
@@ -132,7 +133,8 @@ single-extruder print can actually feel: the last three seam options, a lift
 before an obstacle, the two support closing options, the first-layer
 single-perimeter modes, and support-aware travel routing. Printing several
 objects on one plate, one object at a time within a layer or one whole object at
-a time, is done, as is routing a travel around the walls it would have cut, and
+a time, is done, as is routing a travel around the walls it would have cut — on by
+default, and it never moves a closed loop's seam — and
 compensating a cross-section for the squeeze at the bed or for a press fit.
 
 Both size corrections are one operation: offset the layer's cross-section by a
@@ -218,7 +220,7 @@ Already working, which is more than a weekend experiment: arc fitting (the spher
 at 0.2 mm comes out as 8 415 `G2`/`G3` where a chorded slice needs 41 171 moves),
 a wall phase that runs on every core with byte-identical output, ironing over the
 visible top surface, a top surface with its own speed and acceleration, first-layer
-speeds per feature, walls with medial-axis beading, skin classification,
+speeds per feature, walls as beads divided from the measured section, skin classification,
 sparse/sparse-grid infill with the gyroid and 3D honeycomb, closing-radius and
 resolution slice repair, bridging with span-budgeted supports, tree supports, 3MF
 import including project settings, the full PrusaSlicer/Orca dialect intake, a
@@ -284,6 +286,8 @@ Things learned the hard way, kept because they will bite again:
   they must be re-resolved after the whole profile is read, not where they appear.
 - **The wall ladder is cumulative.** A wider outer bead shifts every loop behind
   it by the full difference; computing offsets as `(i + 0.5) × w` leaves a ridge.
+  The field generator has the same rule from the other side: bead `i`'s centre is
+  `(i + 0.5)` of *that section's* bead width, not of the nominal one.
 - **Fish has no heredocs**, and `math "1.5 > 1"` is rejected — use `test`.
 - **A batch edit that fails on one hunk applies nothing.** Re-read the file.
 - **"Top surface" is not "top skin".** Skin is solid for several layers so the

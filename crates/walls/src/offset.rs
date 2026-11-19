@@ -3,93 +3,44 @@
 //! Offsetting each ring on its own is wrong the moment two features are close:
 //! outward offsets of neighbouring outlines overlap, and an inward offset of a
 //! hole either vanishes or turns inside out. The region is therefore treated as
-//! a set, not as a list of rings: sample its signed distance on a grid, take the
-//! iso-line at the requested offset, and rebuild the rings from that contour. A
-//! hole smaller than twice the offset closes by itself, and features that grow
-//! into each other merge, both without a special case.
+//! a set, not as a list of rings, and the offset is the polygon offset in
+//! `hfw_kernel`: displaced edges are allowed to cross, and the crossings are
+//! resolved by winding, so a hole smaller than twice the offset closes, features
+//! that grow into each other merge, and a shape thinner than twice a shrink
+//! disappears, all without a special case.
 //!
-//! The grid decides only which iso-line to follow, never where its vertices sit:
-//! every traced vertex is then walked onto the exact offset from the contour it
-//! came from, so the result is as accurate as the offset ladder the wall
-//! generator uses, not as accurate as the grid.
+//! The join is round because that is the offset by a disc, which is what a
+//! physical offset is; a wall loop wants a miter instead and asks the kernel for
+//! one directly.
 
-use hfw_kernel::{Region, SegIndex, V2};
+use hfw_kernel::{offset_rings, Join, Region, V2};
 
-use crate::contour;
-use crate::field::{scan_inside, Grid};
-use crate::WallsError;
+/// Largest chord error allowed at a rounded corner for resolution `h`.
+///
+/// The caller passes its sampling resolution, which used to be the grid the
+/// iso-line was traced on. Offsetting no longer samples anything, but the number
+/// still carries the accuracy the caller asked for, so it becomes the arc
+/// tolerance: half of it keeps a corner at least as close to a true arc as the
+/// raster was.
+fn arc_tolerance(h: f64) -> f64 {
+    if h.is_finite() && h > 0.0 {
+        0.5 * h
+    } else {
+        0.005
+    }
+}
 
-/// Offsets `region` by `grow` millimetres, positive outward, at grid resolution
-/// `h`.
+/// Offsets `region` by `grow` millimetres, positive outward, at resolution `h`.
 ///
 /// Returns the region unchanged when `grow` is zero. A shrinking offset that
 /// removes every feature returns an empty region: an object thinner than twice
 /// the offset is gone, which is what the caller asked for.
-pub fn offset_region(region: &Region, grow: f64, h: f64) -> Result<Region, WallsError> {
+pub fn offset_region(region: &Region, grow: f64, h: f64) -> Region {
     if grow == 0.0 || region.is_empty() {
-        return Ok(region.clone());
+        return region.clone();
     }
-    let reach = grow.abs() + 4.0 * h;
-    let bounds = region.bounds().grown(reach);
-    let index = SegIndex::new(region.segments(), bounds.grown(2.0 * reach), 2.0 * reach);
-    let grid = Grid::covering(bounds, h);
-    let inside = scan_inside(region, &grid);
-    let phi: Vec<f64> = (0..grid.len())
-        .map(|id| signed(&index, grid.pos_id(id), inside[id], reach) + grow)
-        .collect();
-    let nan = vec![f64::NAN; grid.len()];
-    let mut rings = Vec::new();
-    for raw in contour::trace(&grid, &phi, &nan, &nan) {
-        if !raw.closed || raw.pts.len() < 3 {
-            continue;
-        }
-        let ring: Vec<V2> = raw
-            .pts
-            .iter()
-            .map(|&p| project(p, grow, &index, reach, h))
-            .collect();
-        rings.push(ring);
-    }
-    Ok(Region::new(rings))
-}
-
-/// Signed distance to the region boundary from one point: positive inside,
-/// infinite when the boundary is further than `reach` away.
-fn signed(index: &SegIndex, p: V2, inside: bool, reach: f64) -> f64 {
-    match index.nearest(p, reach) {
-        Some(hit) if inside => hit.d,
-        Some(hit) => -hit.d,
-        None if inside => f64::INFINITY,
-        None => f64::NEG_INFINITY,
-    }
-}
-
-/// Walks `p` onto the exact distance `grow` from the nearest contour edge.
-///
-/// The traced point is within half a cell of the iso-line, so a few steps of
-/// Newton along the outward normal converge; the step is capped so a bad
-/// nearest-edge guess in a corner cannot throw the vertex across the part. The
-/// side of the boundary the iso-line sits on follows from the offset's sign: an
-/// outward offset lands outside the region, an inward one inside.
-fn project(mut p: V2, grow: f64, index: &SegIndex, reach: f64, h: f64) -> V2 {
-    let inside = grow < 0.0;
-    for _ in 0..6 {
-        let Some(hit) = index.nearest(p, reach) else {
-            break;
-        };
-        let out = p - hit.foot;
-        let len = out.len();
-        if len < 1e-12 {
-            break;
-        }
-        let distance = if inside { hit.d } else { -hit.d };
-        let error = distance + grow;
-        if error.abs() < 1e-9 {
-            break;
-        }
-        p = p + out.norm() * error.clamp(-0.75 * h, 0.75 * h);
-    }
-    p
+    let rings: Vec<Vec<V2>> = offset_rings(&region.rings, grow, arc_tolerance(h), Join::Round);
+    Region::new(rings)
 }
 
 #[cfg(test)]
@@ -129,7 +80,7 @@ mod tests {
 
     #[test]
     fn growing_a_square_moves_every_side_out() {
-        let grown = offset_region(&Region::new(vec![square(10.0)]), 0.5, 0.1).expect("field");
+        let grown = offset_region(&Region::new(vec![square(10.0)]), 0.5, 0.1);
         let (x0, y0, x1, y1) = extents(&grown);
         assert!((x0 + 0.5).abs() < 0.02, "left {x0}");
         assert!((y0 + 0.5).abs() < 0.02, "bottom {y0}");
@@ -141,7 +92,7 @@ mod tests {
 
     #[test]
     fn shrinking_a_square_moves_every_side_in() {
-        let shrunk = offset_region(&Region::new(vec![square(10.0)]), -0.5, 0.1).expect("field");
+        let shrunk = offset_region(&Region::new(vec![square(10.0)]), -0.5, 0.1);
         let (x0, y0, x1, y1) = extents(&shrunk);
         assert!((x0 - 0.5).abs() < 0.02, "left {x0}");
         assert!((y0 - 0.5).abs() < 0.02, "bottom {y0}");
@@ -152,7 +103,7 @@ mod tests {
     #[test]
     fn growing_closes_a_hole_between_two_features() {
         let region = Region::new(vec![square(10.0), rect(11.0, 4.0, 13.0, 6.0)]);
-        let grown = offset_region(&region, 1.2, 0.1).expect("field");
+        let grown = offset_region(&region, 1.2, 0.1);
         assert_eq!(
             grown.rings.len(),
             1,
@@ -163,19 +114,19 @@ mod tests {
     #[test]
     fn shrinking_opens_a_ring_into_a_hole() {
         let ring = annulus(20.0, 4.0);
-        let shrunk = offset_region(&ring, -1.0, 0.1).expect("field");
+        let shrunk = offset_region(&ring, -1.0, 0.1);
         assert_eq!(shrunk.rings.len(), 2, "the hole grows, the outline shrinks");
-        assert!(
-            (shrunk.area() - (18.0 * 18.0 - 6.0 * 6.0)).abs() < 1.0,
-            "{}",
-            shrunk.area()
-        );
+        // The outline loses a sharp 18 mm square's worth; the 4 mm hole grows
+        // into its disc offset, which is 16 mm2 of square plus 16 mm of edge
+        // swept a millimetre plus the rounded corners.
+        let expected = 18.0 * 18.0 - (16.0 + 16.0 + std::f64::consts::PI);
+        assert!((shrunk.area() - expected).abs() < 0.5, "{}", shrunk.area());
     }
 
     #[test]
     fn a_hole_smaller_than_twice_the_growth_is_filled() {
         let ring = annulus(20.0, 2.0);
-        let grown = offset_region(&ring, 1.2, 0.1).expect("field");
+        let grown = offset_region(&ring, 1.2, 0.1);
         assert_eq!(
             grown.rings.len(),
             1,
@@ -192,14 +143,14 @@ mod tests {
             V2::new(30.0, 0.3),
             V2::new(0.0, 0.3),
         ]]);
-        let shrunk = offset_region(&thin, -0.4, 0.1).expect("field");
+        let shrunk = offset_region(&thin, -0.4, 0.1);
         assert!(shrunk.is_empty(), "0.3 mm cannot survive 0.4 mm a side");
     }
 
     #[test]
     fn zero_growth_is_a_no_op() {
         let region = annulus(20.0, 4.0);
-        let same = offset_region(&region, 0.0, 0.1).expect("field");
+        let same = offset_region(&region, 0.0, 0.1);
         assert_eq!(same.rings.len(), region.rings.len());
         assert!((same.area() - region.area()).abs() < 1e-9);
     }

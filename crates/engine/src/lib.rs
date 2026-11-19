@@ -35,11 +35,9 @@ pub use hfw_toolpath::{
     evaluate as evaluate_perimeter, evaluate_full as evaluate_all, line_volume, JobTotals, Metrics,
     PlannedLayer as PlannedSlice, MANIFEST_HEADER,
 };
-pub use hfw_walls::field::FieldError;
 pub use hfw_walls::{
     generate as generate_walls, Kind as PathKind, Line as Path, WallMode as Mode, WallParams,
 };
-pub use hfw_walls::{WallsError, MAX_FIELD_CELLS};
 
 /// Engine-wide settings for one job.
 #[derive(Clone, Debug)]
@@ -190,8 +188,6 @@ impl Default for Settings {
 pub enum EngineError {
     /// Slicing failed: bad layer height, open cross-section, or bad input range.
     Slice(SliceError),
-    /// A wall distance field would exceed the memory budget.
-    Walls(WallsError),
     /// Spiral vase and support were asked for at once.
     ///
     /// A vase is one wall that climbs continuously; a support pillar is a solid
@@ -206,17 +202,10 @@ impl From<SliceError> for EngineError {
     }
 }
 
-impl From<WallsError> for EngineError {
-    fn from(error: WallsError) -> Self {
-        EngineError::Walls(error)
-    }
-}
-
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EngineError::Slice(e) => write!(f, "slicing failed: {e}"),
-            EngineError::Walls(e) => write!(f, "wall generation failed: {e}"),
             EngineError::VaseWithSupport => write!(
                 f,
                 "spiral vase mode cannot carry support; clear one of the two"
@@ -256,14 +245,12 @@ pub struct JobStats {
     pub processed_layers: usize,
     /// Triangles intersected across the whole stack.
     pub triangles_tested: usize,
-    /// Distance-field cells allocated in total.
-    pub field_nodes: usize,
-    /// Cells classified as belonging to a thin wall.
-    pub thin_nodes: usize,
-    /// Cells dropped as unprintable.
-    pub dropped_nodes: usize,
-    /// Medial-axis vertices extracted in total.
-    pub ridge_vertices: usize,
+    /// Perimeter loops emitted in total.
+    pub wall_loops: usize,
+    /// Gap-fill strands emitted in total.
+    pub gap_strands: usize,
+    /// Wall path vertices emitted in total.
+    pub wall_points: usize,
     /// Milliseconds spent slicing.
     pub ms_slice: f64,
     /// Milliseconds spent generating walls.
@@ -353,7 +340,7 @@ pub fn run(
     let step = settings.every.max(1);
 
     let t_offset = std::time::Instant::now();
-    compensate(&mut regions, settings)?;
+    compensate_all(&mut regions, settings)?;
     let ms_offset = t_offset.elapsed().as_secs_f64() * 1e3;
     let mut cache =
         if settings.infill.is_some() || settings.support.is_some() || settings.measure_overhang {
@@ -402,7 +389,7 @@ pub fn run(
         .iter()
         .map(|spec| (spec.print_z - spec.bottom_z) as f64 / 1e6)
         .collect();
-    let combined = match (settings.infill.as_ref(), cache.as_mut()) {
+    let combined = match (settings.infill.as_ref(), cache.as_ref()) {
         (Some(ip), Some(cache)) => combine_plan(cache, ip, &heights, settings.nozzle),
         _ => Vec::new(),
     };
@@ -434,6 +421,77 @@ pub fn run(
     } else {
         0
     };
+    // Infill only reads the mask cache, which never changes once built, so the
+    // layers are filled in one wave of their own instead of one after another.
+    // On a benchy that is half the remaining serial time.
+    let t_infill = std::time::Instant::now();
+    let mut infill_for = {
+        let fill = |k: usize| -> Option<Vec<Path>> {
+            let ip = settings.infill.as_ref()?;
+            let cache = cache.as_ref()?;
+            if regions[k].is_empty() || (k % step != 0 && k != last) {
+                return None;
+            }
+            if settings.spiral_vase && k >= vase_base {
+                return None;
+            }
+            let layer_ip = if k == 0 && settings.first_layer_width > 0.0 {
+                ip.scaled_to(settings.first_layer_width)
+            } else {
+                *ip
+            };
+            let print_z = (schedule.layers()[k].print_z) as f64 / 1e6;
+            let mut lines: Vec<Path> = Vec::new();
+            if settings.extra_perimeters_overhangs {
+                lines.extend(hfw_infill::overhang_perimeter(
+                    &regions[k],
+                    cache,
+                    k,
+                    &settings.wall,
+                    &layer_ip,
+                ));
+            }
+            let combine = combined.get(k).and_then(Option::as_ref).map(|c| Combine {
+                strip: c.strip.as_slice(),
+                extra: c.extra.as_slice(),
+                layers: c.layers,
+            });
+            lines.extend(generate_infill(
+                &regions[k],
+                cache,
+                k,
+                print_z,
+                &settings.wall,
+                &layer_ip,
+                combine.as_ref(),
+            ));
+            if settings.ironing && ironing_covers(settings.ironing_target, k + 1 == regions.len()) {
+                lines.extend(hfw_infill::ironing_layer(
+                    &regions[k],
+                    cache,
+                    k,
+                    &layer_ip,
+                    settings.ironing_spacing,
+                    settings.ironing_target,
+                ));
+            }
+            Some(lines)
+        };
+        let threads = worker_count(settings, schedule.len());
+        let mut slots: Vec<Option<Vec<Path>>> = (0..schedule.len()).map(|_| None).collect();
+        if settings.infill.is_some() && cache.is_some() && threads > 1 {
+            for (index, lines) in dynamic_map(threads, schedule.len(), &fill) {
+                slots[index] = lines;
+            }
+        } else {
+            for (index, slot) in slots.iter_mut().enumerate() {
+                *slot = fill(index);
+            }
+        }
+        slots
+    };
+    stats.ms_infill += t_infill.elapsed().as_secs_f64() * 1e3;
+
     let steps_out: Vec<bool> = if settings.extra_perimeters {
         regions
             .iter()
@@ -491,12 +549,13 @@ pub fn run(
                 settings.brim_gap,
                 settings.brim_separation,
                 settings.brim_side,
-            )?);
+            ));
         }
         let vase = settings.spiral_vase && k >= vase_base;
         let mut wall = if vase {
             WallParams {
                 walls: 1,
+                gap_fill: false,
                 ..settings.wall
             }
         } else {
@@ -505,13 +564,16 @@ pub fn run(
         if k == 0 && settings.first_layer_width > 0.0 {
             wall = wall.scaled_to(settings.first_layer_width);
         }
+        if settings.resolution > 0.0 {
+            wall.simplify = wall.simplify.max(settings.resolution);
+        }
         if !vase && steps_out.get(k).copied().unwrap_or(false) {
             wall = wall.with_walls(wall.walls + 1);
         }
         if !vase && one_wall.get(k).copied().unwrap_or(false) && wall.walls > 1 {
             wall = wall.with_walls(1);
         }
-        let out = hfw_walls::generate(&regions[k], &wall, settings.mode)?;
+        let out = hfw_walls::generate(&regions[k], &wall, settings.mode);
         if vase {
             lines.extend(out.lines.into_iter().filter(|line| line.kind.is_wall()));
         } else {
@@ -523,28 +585,14 @@ pub fn run(
         }))
     };
 
-    let threads = if settings.threads == 0 {
-        std::thread::available_parallelism()
-            .map(|count| count.get())
-            .unwrap_or(1)
-    } else {
-        settings.threads
-    }
-    .min(schedule.len().max(1));
+    let threads = worker_count(settings, schedule.len());
     let t_walls = std::time::Instant::now();
+    let collected = dynamic_map(threads, schedule.len(), &wall_for);
     let mut passes: Vec<Option<Result<Option<WallPass>, EngineError>>> =
         (0..schedule.len()).map(|_| None).collect();
-    let chunk = schedule.len().div_ceil(threads).max(1);
-    std::thread::scope(|scope| {
-        for (index, part) in passes.chunks_mut(chunk).enumerate() {
-            let wall_for = &wall_for;
-            scope.spawn(move || {
-                for (offset, slot) in part.iter_mut().enumerate() {
-                    *slot = Some(wall_for(index * chunk + offset));
-                }
-            });
-        }
-    });
+    for (index, result) in collected {
+        passes[index] = Some(result);
+    }
     stats.ms_walls_elapsed = t_walls.elapsed().as_secs_f64() * 1e3;
     stats.threads = threads;
 
@@ -587,64 +635,21 @@ pub fn run(
             planned.paths.extend(pass.lines);
             let layer_ms = pass.stats.ms_total;
             stats.processed_layers += 1;
-            stats.field_nodes += pass.stats.nodes;
-            stats.thin_nodes += pass.stats.thin_nodes;
-            stats.dropped_nodes += pass.stats.dropped_nodes;
-            stats.ridge_vertices += pass.stats.ridge_vertices;
+            stats.wall_loops += pass.stats.loops;
+            stats.gap_strands += pass.stats.gaps;
+            stats.wall_points += pass.stats.points;
             stats.ms_walls += layer_ms;
             if layer_ms > worst_ms {
                 worst_ms = layer_ms;
                 worst_layer = k;
             }
 
-            if let (Some(ip), Some(cache)) = (settings.infill.as_ref(), cache.as_mut()) {
-                let t2 = std::time::Instant::now();
-                let layer_ip = if k == 0 && settings.first_layer_width > 0.0 {
-                    ip.scaled_to(settings.first_layer_width)
-                } else {
-                    *ip
-                };
-                if settings.extra_perimeters_overhangs {
-                    planned.paths.extend(hfw_infill::overhang_perimeter(
-                        &regions[k],
-                        cache,
-                        k,
-                        &settings.wall,
-                        &layer_ip,
-                    ));
-                }
-                let combine = combined.get(k).and_then(Option::as_ref).map(|c| Combine {
-                    strip: c.strip.as_slice(),
-                    extra: c.extra.as_slice(),
-                    layers: c.layers,
-                });
-                let combine = combine.as_ref();
-                planned.paths.extend(generate_infill(
-                    &regions[k],
-                    cache,
-                    k,
-                    planned.print_z,
-                    &settings.wall,
-                    &layer_ip,
-                    combine,
-                ));
-                if settings.ironing
-                    && ironing_covers(settings.ironing_target, k + 1 == regions.len())
-                {
-                    planned.paths.extend(hfw_infill::ironing_layer(
-                        &regions[k],
-                        cache,
-                        k,
-                        &layer_ip,
-                        settings.ironing_spacing,
-                        settings.ironing_target,
-                    ));
-                }
-                stats.ms_infill += t2.elapsed().as_secs_f64() * 1e3;
+            if let Some(mut lines) = infill_for[k].take() {
+                planned.paths.append(&mut lines);
             }
             planned.recount();
             if settings.measure_overhang {
-                if let Some(cache) = cache.as_mut() {
+                if let Some(cache) = cache.as_ref() {
                     annotate_overhang(&mut planned.paths, cache, k);
                 }
             }
@@ -705,7 +710,7 @@ struct LayerCombine {
 /// cell that is sparse in one layer and solid in another stays where it is, so a
 /// top surface still gets its own skin on every layer it needs.
 fn combine_plan(
-    cache: &mut MaskCache,
+    cache: &MaskCache,
     ip: &InfillParams,
     heights: &[f64],
     nozzle: f64,
@@ -795,7 +800,7 @@ fn close_group(
 /// Sampling is bounded: at most eight points per path, so a 200 mm loop is
 /// measured by a sample rather than by every vertex. The number is a share of the
 /// path's own length, which is what the speed ladder and the fan ladder want.
-fn annotate_overhang(paths: &mut [hfw_walls::Line], cache: &mut MaskCache, k: usize) {
+fn annotate_overhang(paths: &mut [hfw_walls::Line], cache: &MaskCache, k: usize) {
     if k == 0 {
         for path in paths.iter_mut() {
             path.overhang = 0.0;
@@ -896,29 +901,139 @@ fn slice_stack(
 /// land. Simplification comes last, so a crack is closed at full detail before
 /// any vertex is dropped.
 fn compensate(regions: &mut [Region], settings: &Settings) -> Result<(), EngineError> {
-    let ceiling = settings.wall.w / 4.0;
     for (index, region) in regions.iter_mut().enumerate() {
-        if region.is_empty() {
-            continue;
-        }
-        if settings.closing_radius > 0.0 {
-            *region = hfw_walls::close_gaps(region, settings.closing_radius);
-        }
-        let grow = settings.xy_size
-            - if index == 0 {
-                settings.elephant_foot
-            } else {
-                0.0
-            };
-        if grow != 0.0 && !region.is_empty() {
-            let h = (grow.abs() / 3.0).clamp(0.02, ceiling);
-            *region = hfw_walls::offset_region(region, grow, h)?;
-        }
-        if settings.resolution > 0.0 && !region.is_empty() {
-            *region = hfw_walls::simplify_region(region, settings.resolution);
-        }
+        compensate_one(region, index, settings)?;
     }
     Ok(())
+}
+
+/// The same work spread over the layers.
+///
+/// A layer's outline is compensated from its own geometry and the settings, so
+/// which thread prepares it cannot change the result: every layer produces the
+/// one it would have produced alone. The first layer is special only in taking
+/// the elephant-foot correction, which the region's own index carries.
+fn compensate_all(regions: &mut [Region], settings: &Settings) -> Result<(), EngineError> {
+    let threads = worker_count(settings, regions.len());
+    if threads <= 1 || regions.len() <= 1 {
+        return compensate(regions, settings);
+    }
+    let chunks = (regions.len() / (threads * 8)).max(1);
+    let queue: std::sync::Mutex<Vec<(usize, &mut [Region])>> = std::sync::Mutex::new(
+        regions
+            .chunks_mut(chunks)
+            .enumerate()
+            .map(|(index, part)| (index * chunks, part))
+            .collect(),
+    );
+    let mut errors: Vec<(usize, EngineError)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let queue = &queue;
+                scope.spawn(move || {
+                    let mut local: Vec<(usize, EngineError)> = Vec::new();
+                    loop {
+                        let next = queue.lock().map(|mut queue| queue.pop()).ok().flatten();
+                        let Some((base, part)) = next else {
+                            break;
+                        };
+                        for (offset, region) in part.iter_mut().enumerate() {
+                            if let Err(error) = compensate_one(region, base + offset, settings) {
+                                local.push((base + offset, error));
+                            }
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("a planning worker panicked"))
+            .collect()
+    });
+    errors.sort_by_key(|(index, _)| *index);
+    match errors.into_iter().next() {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Runs `work` over `0..count` with one shared queue.
+///
+/// Layers differ in cost by more than an order of magnitude — a small top layer
+/// against a first layer with brim and elephant-foot compensation — so handing
+/// each worker a fixed slice leaves it waiting on the slowest one. The queue
+/// hands the next index to whichever worker is free, and the results come back
+/// keyed by index so the output keeps layer order.
+fn dynamic_map<T: Send>(
+    threads: usize,
+    count: usize,
+    work: &(dyn Fn(usize) -> T + Sync),
+) -> Vec<(usize, T)> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, T)>> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads.min(count));
+        for _ in 0..threads.min(count) {
+            let next = &next;
+            handles.push(scope.spawn(move || {
+                let mut local = Vec::new();
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if index >= count {
+                        break;
+                    }
+                    local.push((index, work(index)));
+                }
+                local
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("a planning worker panicked"))
+            .collect()
+    });
+    parts.into_iter().flatten().collect()
+}
+
+fn compensate_one(
+    region: &mut Region,
+    index: usize,
+    settings: &Settings,
+) -> Result<(), EngineError> {
+    let ceiling = settings.wall.w / 4.0;
+    if region.is_empty() {
+        return Ok(());
+    }
+    if settings.closing_radius > 0.0 {
+        *region = hfw_walls::close_gaps(region, settings.closing_radius);
+    }
+    let grow = settings.xy_size
+        - if index == 0 {
+            settings.elephant_foot
+        } else {
+            0.0
+        };
+    if grow != 0.0 && !region.is_empty() {
+        let h = (grow.abs() / 3.0).clamp(0.02, ceiling);
+        *region = hfw_walls::offset_region(region, grow, h);
+    }
+    if settings.resolution > 0.0 && !region.is_empty() {
+        *region = hfw_walls::simplify_region(region, settings.resolution);
+    }
+    Ok(())
+}
+
+/// How many workers a per-layer phase should run.
+fn worker_count(settings: &Settings, units: usize) -> usize {
+    let threads = if settings.threads == 0 {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+    } else {
+        settings.threads
+    };
+    threads.min(units.max(1))
 }
 
 /// Slices one plane and returns its millimetre region.

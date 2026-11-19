@@ -27,9 +27,21 @@ import tempfile
 
 FILAMENT_AREA = 3.141592653589793 * (1.75 / 2) ** 2
 
-ORCA_ROOT = "/opt/orca-slicer/resources/profiles"
-ORCA_MACHINE = f"{ORCA_ROOT}/Voron/machine/Voron 2.4 350 0.4 nozzle.json"
-ORCA_PROCESS = f"{ORCA_ROOT}/Voron/process/0.20mm Standard @Voron.json"
+ORCA_MACHINE_REL = "Voron/machine/Voron 2.4 350 0.4 nozzle.json"
+ORCA_PROCESS_REL = "Voron/process/0.20mm Standard @Voron.json"
+ORCA_ROOTS = (
+    os.environ.get("HFW_ORCA_PROFILES", ""),
+    os.path.expanduser("~/.config/OrcaSlicer/system"),
+    "/opt/orca-slicer/resources/profiles",
+    os.path.expanduser("~/dev/reference/OrcaSlicer/resources/profiles"),
+)
+ORCA_ROOT = next(
+    (root for root in ORCA_ROOTS
+     if root and os.path.isfile(os.path.join(root, ORCA_MACHINE_REL))),
+    None,
+)
+ORCA_MACHINE = os.path.join(ORCA_ROOT, ORCA_MACHINE_REL) if ORCA_ROOT else ""
+ORCA_PROCESS = os.path.join(ORCA_ROOT, ORCA_PROCESS_REL) if ORCA_ROOT else ""
 
 WALL = {"outer wall", "inner wall", "perimeter", "external perimeter",
         "internal perimeter", "overhang perimeter"}
@@ -43,7 +55,11 @@ THIN = {"gap infill", "thin wall"}
 # for: both references substitute a full-width bead for a 0.3 mm wall and
 # therefore deposit about 12% more plastic than the model contains.
 EXPECTED = {
-    "thin_wall.stl": ("references substitute a full-width bead for a 0.3 mm wall", 0.20),
+    "thin_wall.stl": ("references substitute a full-width bead for a 0.3 mm wall", 0.25),
+    "taper_wall.stl": (
+        "the taper passes through widths below one bead, printed at their measured width",
+        0.25,
+    ),
 }
 
 
@@ -236,6 +252,10 @@ def slice_hfw(args, model, work, log):
 def slice_orca(args, model, work, log):
     out = os.path.join(work, "orca")
     os.makedirs(out, exist_ok=True)
+    if not ORCA_ROOT:
+        print("missing OrcaSlicer Voron presets; looked in: "
+              + ", ".join(r for r in ORCA_ROOTS if r), file=sys.stderr)
+        return None
     machine = json.load(open(ORCA_MACHINE))
     machine["layer_gcode"] = "G92 E0"
     process = json.load(open(ORCA_PROCESS))

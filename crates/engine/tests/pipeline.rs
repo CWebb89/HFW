@@ -152,16 +152,38 @@ fn a_thin_wall_is_printed_by_hfw_and_missed_by_classic() {
 
 /// The share of a shape's own volume that reaches the bed when every cell is solid.
 ///
-/// Below 1.0 because a wall bead rounds off into the two corners it does not fill,
-/// which is the same correction both reference slicers apply to perimeter flow; skin
-/// and infill keep the full rectangle. A shifted grid, a lost jitter or a changed
-/// overlap moves these by more than the tolerance, which is why they are pinned.
+/// Slightly above 1.0, because a solid skin is clipped one overlap inside the
+/// shell's inner edge so that it meets the innermost loop instead of leaving a
+/// gap beside it, and the overlap is plastic laid over a bead already there.
+/// PrusaSlicer and OrcaSlicer clip their fill the same way and come out the same
+/// side of 1.0: on these three fixtures at 100% density the references deposit
+/// 8001.6, 14130.3 and 3786.3 mm³ against the cube's 8000, the sphere's 14123
+/// and the torus's 3778, and this engine is within 1% of OrcaSlicer on all three.
+/// A shifted boundary, a lost overlap or a strand in the wrong place moves these
+/// by more than the tolerance, which is why they are pinned.
+///
+/// Re-measured after the skin clip moved from the fill's inset to the shell edge
+/// (2026-11-19): all three rose by 2-4%, which is the strip beside the wall that a
+/// top surface used to leave empty.
+///
+/// Re-measured again after the wall stage moved from the offset ladder to beads divided
+/// from the measured section (2026-11-20). All three fell, and all three got closer to
+/// the references: the cube deposits 8049.6 mm³ against OrcaSlicer's 8001.6, the sphere
+/// 14142.8 against 14130.3, and the torus 3783.0 against 3786.3 — within 0.7% where the
+/// ladder's torus was 2.1% high, because the ladder over-extruded a wall thinner than a
+/// whole number of beads and the section division does not.
+///
+/// The torus moved twice: 1.0232 on the ladder, 1.0093 when the beads landed, and 1.0013
+/// once the depth field was made total. The last 0.8% was material the tracer laid around
+/// cells left at zero depth — a razor-thin ring just past the band's search radius, read
+/// as outside the layer and contoured as a hole — which only the torus's curved concave
+/// boundary was long enough to close into a loop.
 #[test]
 fn solid_infill_reproduces_the_published_volume_ratios() {
     for (name, expected) in [
-        ("cube.stl", 0.9725),
-        ("sphere.stl", 0.9700),
-        ("torus.stl", 0.9449),
+        ("cube.stl", 1.0062),
+        ("sphere.stl", 1.0014),
+        ("torus.stl", 1.0013),
     ] {
         let m = mesh(name);
         let mut s = settings(3);

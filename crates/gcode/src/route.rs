@@ -60,20 +60,20 @@ pub fn detour(start: V2, end: V2, loops: &[Vec<V2>], bead: f64, max_detour: f64)
         return None;
     }
     let clearance = bead * CLEARANCE_IN_BEADS;
-    let simplified: Vec<Vec<V2>> = loops
+    let reach = corridor(start, end, clearance * 2.0);
+    let near: Vec<Vec<V2>> = loops
         .iter()
+        .filter(|loop_| boxes_meet(&bbox(loop_), &reach))
         .map(|loop_| simplify(loop_, MAX_VERTICES_PER_LOOP))
         .filter(|loop_| loop_.len() >= 3)
         .collect();
-    let walls = segments(&simplified);
+    if near.is_empty() {
+        return None;
+    }
+    let walls = segments(&near);
     if !touches(start, end, &walls) {
         return None;
     }
-    let reach = corridor(start, end, clearance * 2.0);
-    let near: Vec<&Vec<V2>> = simplified
-        .iter()
-        .filter(|loop_| boxes_meet(&bbox(loop_), &reach) || touches(start, end, &segments_1(loop_)))
-        .collect();
     let mut nodes = vec![start, end];
     let mut rings: Vec<(usize, usize)> = Vec::new();
     for loop_ in &near {

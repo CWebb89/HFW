@@ -587,8 +587,7 @@ follows.
 
 The closing does not round concave corners by the radius the way PrusaSlicer's
 does, and a filled crack leaves two coincident outlines rather than one merged
-one — the wall generator works from the region's distance field, so both print
-the same walls. A hairline *solid* is never removed: closing only adds material,
+one — the wall generator offsets each ring set once, so both print the same walls. A hairline *solid* is never removed: closing only adds material,
 which is the property the "crack or thin wall" test exists to protect.
 
 ## C5. What these patterns are not
@@ -850,10 +849,10 @@ for p in cube sphere torus
 end
 ```
 
-Expected on this build: cube **15.1 min** kinematic → **16.2 min** with acceleration,
-sphere **20.3 → 21.8**, torus **6.7 → 10.1**. The sphere was printed in **21 min**
-and the cube in **16 min** (jobs `0003EC` and `0003E7`), so the planned numbers are
-the honest ones and the sum is 5–6 % optimistic on both.
+Expected on this build: cube **15.7 min**, sphere **21.6 min**, torus **8.2 min**. One
+number is printed because the estimate plans the machine's acceleration and the travel
+routing; the sphere was printed in **21 min** and the cube in **16 min** (jobs `0003EC`
+and `0003E7`), so the plan is within a minute of the bed on both.
 
 ## E15. The newer sparse patterns
 
@@ -1050,10 +1049,18 @@ for style in aligned rear random
 end
 ```
 
-Expected with `profiles/voron_klipper.cfg` as the base: aligned **100**
-crossings and **246** retractions, rear **45** crossings and **156** retractions
-(the seam sits on the rear vertex, so consecutive loops start near each other),
-random **100** crossings but **346** retractions (every loop starts somewhere new).
+The seam test that matters is on a part whose rear edge is not a single point:
+a tapered or chamfered cross-section offers two rear candidates whose heights swap
+from layer to layer, and a seam chosen per layer alone then crosses the entire rear
+face. `Revolver All Parts.3mf` sliced at 0.2 mm with 2 walls is the case measured
+(p99 seam step between layers **4.0 mm**, 5% of layers over 1 mm, against 31.6 mm and
+30% when the seam was chosen per layer).
+Expected with `profiles/voron_klipper.cfg` as the base: aligned **109**
+crossings and **201** retractions, rear **91** crossings and **210** retractions
+(aligned holds each loop's seam where the loop below put it, rear reselects the
+rearmost vertex every layer), random **109** crossings and **201** retractions but a
+different file — with travel routing on, the crossing count is governed by the route
+rather than by which vertex the seam chose, so it no longer separates the three.
 
 Then, on the same cube: `brim_width = 5` adds **43.2 mm** of filament over no
 brim at all (1140.1 against 1096.9, 12 loops of a 0.4 mm bead),
