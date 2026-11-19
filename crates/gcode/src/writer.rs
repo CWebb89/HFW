@@ -1225,12 +1225,14 @@ fn is_perimeter(f: Feature) -> bool {
 /// Cross-section of one path, in square millimetres.
 ///
 /// Walls round off into the corners they do not fill, and both reference slicers
-/// subtract that area from a perimeter's flow. Skin and infill do not get the same
-/// treatment: their beads merge into their neighbours and fill the region solid, so
-/// the rectangle is what they deposit. The planner's volume figures come from
-/// `hfw_toolpath::section_area`, which draws the line in the same place.
+/// subtract that area from a perimeter's flow. A gap strand is the exception: it
+/// fills a slot whose corners its neighbours already own, so it deposits the
+/// rectangle. Skin and infill do not get the corner treatment either: their beads
+/// merge into their neighbours and fill the region solid. The planner's volume
+/// figures come from `hfw_toolpath::section_area`, which draws the line in the
+/// same place.
 fn section_area(feature: Feature, width: f64, height: f64) -> f64 {
-    if is_perimeter(feature) {
+    if matches!(feature, Feature::Outer | Feature::Inner) {
         crate::bead_area(width, height)
     } else {
         width * height

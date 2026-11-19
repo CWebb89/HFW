@@ -246,7 +246,9 @@ pub fn line_volume(line: &Line, height: f64) -> f64 {
 /// filled solid; subtracting there would leave every solid surface 11% short, which
 /// is exactly what the oracle's 100%-infill comparison catches.
 pub fn section_area(kind: Kind, width: f64, height: f64) -> f64 {
-    if kind.is_wall() {
+    if matches!(kind, Kind::Middle) {
+        width * height
+    } else if kind.is_wall() {
         bead_area(width, height)
     } else {
         width * height
@@ -263,6 +265,11 @@ pub fn section_area(kind: Kind, width: f64, height: f64) -> f64 {
 ///
 /// A bead narrower than its own corners would come out thinner than nothing, so half
 /// the rectangle stays as a floor for that case.
+///
+/// A middle bead is the exception: it fills a slot whose corners its two neighbours
+/// already occupy, so subtracting the corner term there withholds plastic the slot
+/// demands — 14% of a 0.3 mm rib by construction. [`section_area`] gives it the
+/// rectangle.
 pub fn bead_area(width: f64, height: f64) -> f64 {
     if height <= 0.0 || width <= 0.0 {
         return 0.0;

@@ -120,6 +120,11 @@ fn perimeter_type(tag: &str) -> bool {
     matches!(tag, "Outer wall" | "Inner wall" | "Gap infill")
 }
 
+/// True when a perimeter tag names a gap strand, which fills a slot outright.
+fn gap_type(tag: &str) -> bool {
+    tag == "Gap infill"
+}
+
 /// True when `a`-`b` crosses `c`-`d`; touching an endpoint does not count.
 fn segments_cross(a: (f64, f64), b: (f64, f64), c: (f64, f64), d: (f64, f64)) -> bool {
     if b.0.max(a.0) < c.0.min(d.0)
@@ -231,6 +236,7 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
     let mut saw_heater_off = false;
     let mut saw_fan_on = false;
     let mut in_perimeter = false;
+    let mut in_gap = false;
     let mut walls: Vec<((f64, f64), (f64, f64))> = Vec::new();
     let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
     let half_x = if cfg.origin_center {
@@ -259,6 +265,7 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                 walls.clear();
             } else if let Some(kind) = tag.strip_prefix("TYPE:") {
                 in_perimeter = perimeter_type(kind.trim());
+                in_gap = gap_type(kind.trim());
             } else if let Some(h) = tag.strip_prefix("HEIGHT:") {
                 height = h.trim().parse().unwrap_or(f64::NAN);
             }
@@ -544,7 +551,7 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                             );
                         }
                         if height.is_finite() && height > 0.0 {
-                            let width = if in_perimeter {
+                            let width = if in_perimeter && !in_gap {
                                 crate::bead_width(volume, distance, height)
                             } else {
                                 volume / (distance * height)
