@@ -35,8 +35,9 @@ use hfw_config::PrinterConfig;
 use hfw_config::{Bundle, Intake, IntakeReport, Kind, Preset, PrintSequence, ProjectSettings};
 use hfw_engine::{
     evaluate_all, evaluate_perimeter, infill_pattern, run, slice_plane, InfillPattern, Job,
-    JobTotals, MaskCache, Mesh, MeshDiagnostics, MeshRepairReport, MeshTransform, Metrics, Mode,
-    PlannedSlice, PlateOrder, Settings, SupportSettings, SupportStyle, MANIFEST_HEADER,
+    JobTotals, Marker, MarkerKind, MaskCache, Mesh, MeshDiagnostics, MeshRepairReport,
+    MeshTransform, Metrics, Mode, PlannedSlice, PlateOrder, Settings, SupportSettings,
+    SupportStyle, MANIFEST_HEADER,
 };
 
 const USAGE: &str = "\
@@ -143,6 +144,10 @@ Printer:
   --list-bundle               Name every preset in --bundle and stop.
   --flow <f>                  Extrusion multiplier 0.5..1.5, overriding the
                               profile. 1.0 prints the geometric volume.
+  --markers <path>            The plate's timeline: one `<kind> <z> = <gcode>` per
+                              line, kinds `custom`, `pause` and `colour`. Only a
+                                custom marker carries G-code; a pause and a colour
+                                change use the profile's own commands.
   --gcode <path>              Emit G-code for the whole job (needs --profile,
                               plans every layer, then verifies the result).
   --check-gcode <path>        Verify an existing G-code file and exit.
@@ -231,6 +236,7 @@ struct Options {
     check_gcode: Option<PathBuf>,
     pause_at: Vec<f64>,
     colour_change_at: Vec<f64>,
+    markers: Vec<Marker>,
     json: bool,
     json_paths: bool,
     /// Where the intake report goes as JSON, one entry per key the preset stated.
@@ -287,6 +293,7 @@ impl Options {
             check_gcode: None,
             pause_at: Vec::new(),
             colour_change_at: Vec::new(),
+            markers: Vec::new(),
             json: false,
             json_paths: false,
             intake_json: None,
@@ -706,6 +713,10 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 let value = next_value(&mut arguments, "--colour-change-at")?;
                 o.colour_change_at =
                     heights(&value).map_err(|e| format!("--colour-change-at: {e}"))?;
+            }
+            "--markers" => {
+                let path = PathBuf::from(next_value(&mut arguments, "--markers")?);
+                o.markers = read_markers(&path)?;
             }
             "--check-gcode" => {
                 o.check_gcode = Some(PathBuf::from(next_value(&mut arguments, "--check-gcode")?))
@@ -1143,6 +1154,55 @@ fn seat_on_bed(parts: &mut [PlatePart]) -> Result<(), String> {
 /// 1 sparse_infill_density = 50%
 /// 2 wall_loops = 4
 /// ```
+/// Reads the plate's timeline: one `<kind> <z> = <gcode>` per line.
+///
+/// The kinds are `custom`, `pause` and `colour` (`color` is taken too). Only a custom
+/// marker carries G-code; a pause and a colour change take their command from the
+/// profile, so their text may be left empty — that is the difference between a marker
+/// and a line, and it is what lets one plate pause correctly on two printers.
+fn read_markers(path: &Path) -> Result<Vec<Marker>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut markers = Vec::new();
+    for (line_number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let where_ = || format!("{} line {}", path.display(), line_number + 1);
+        let (kind, rest) = line
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| format!("{}: expected `<kind> <z> = <gcode>`", where_()))?;
+        let (z, gcode) = rest
+            .split_once('=')
+            .ok_or_else(|| format!("{}: expected `<z> = <gcode>` after the kind", where_()))?;
+        let z: f64 = z.trim().parse().map_err(|_| {
+            format!(
+                "{}: `{}` is not a height in millimetres",
+                where_(),
+                z.trim()
+            )
+        })?;
+        let kind = match kind.trim().to_ascii_lowercase().as_str() {
+            "custom" => MarkerKind::Custom,
+            "pause" => MarkerKind::Pause,
+            "colour" | "color" => MarkerKind::ColourChange,
+            other => {
+                return Err(format!(
+                    "{}: `{other}` is not a marker kind; use custom, pause or colour",
+                    where_()
+                ))
+            }
+        };
+        markers.push(Marker {
+            z,
+            kind,
+            text: gcode.trim().to_owned(),
+        });
+    }
+    Marker::sorted(markers).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 fn apply_object_settings_file(parts: &mut [PlatePart], path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -1770,7 +1830,7 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
         .file_stem()
         .and_then(|s| s.to_str());
     let written =
-        hfw_gcode::generate_with_markers(&job.layers, cfg, object, &job.seam_paint, &job.markers)
+        hfw_gcode::generate_with_markers(&job.layers, cfg, object, &job.seam_paint, &o.markers)
             .map_err(|error| error.to_string())?;
     let path = output_path(cfg, o, path)?;
     fs::write(&path, &written.text)
