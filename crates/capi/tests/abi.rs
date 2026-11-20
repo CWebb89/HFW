@@ -6,12 +6,13 @@ use std::fs;
 use hfw_capi::{
     hfw_abi_version, hfw_buffer_free, hfw_gcode_free, hfw_gcode_len, hfw_gcode_text,
     hfw_gcode_verified, hfw_job_cancel, hfw_job_poll, hfw_job_start, hfw_job_take_gcode,
-    hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_free, hfw_mesh_from_bytes,
-    hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get,
-    hfw_mesh_paint_set, hfw_mesh_transform, hfw_mesh_triangle_count, hfw_mesh_vertex_count,
-    hfw_mesh_vertices, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
-    hfw_plate_free, hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count,
-    hfw_plate_marker_get, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
+    hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_cut, hfw_mesh_free,
+    hfw_mesh_from_bytes, hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_file, hfw_mesh_new,
+    hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_part, hfw_mesh_part_count, hfw_mesh_transform,
+    hfw_mesh_triangle_count, hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume,
+    hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free, hfw_plate_in_layer_count,
+    hfw_plate_in_layer_get, hfw_plate_marker_count, hfw_plate_marker_get, hfw_plate_metadata_get,
+    hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
     hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
     hfw_plate_object_enabled, hfw_plate_object_enabled_get, hfw_plate_object_ids,
     hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mesh,
@@ -21,11 +22,11 @@ use hfw_capi::{
     hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_settings_json,
     hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
     hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
-    hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_slice,
-    hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free, hfw_text_mesh, HfwBounds,
-    HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED,
-    HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT, HFW_VOLUME_MODIFIER,
-    HFW_VOLUME_NEGATIVE,
+    hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_set_metadata,
+    hfw_plate_slice, hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free, hfw_text_mesh,
+    HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE,
+    HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT,
+    HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -1195,6 +1196,171 @@ fn system_font() -> Option<String> {
 }
 
 #[test]
+fn a_cut_crosses_the_abi_and_both_halves_are_closed() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!cube.is_null(), "load failed: {}", last_error());
+    let whole = unsafe { hfw_mesh_volume(cube) };
+    let plane_normal = [0.0_f64, 0.0, 1.0];
+    let plane_point = [10.0_f64, 10.0, 10.0];
+    let mut below = std::ptr::null_mut();
+    let mut above = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            hfw_mesh_cut(
+                cube,
+                plane_normal.as_ptr(),
+                plane_point.as_ptr(),
+                &mut below,
+                &mut above,
+            )
+        },
+        0,
+        "the cut runs: {}",
+        last_error()
+    );
+    assert!(!below.is_null() && !above.is_null());
+    let lower = unsafe { hfw_mesh_volume(below) };
+    let upper = unsafe { hfw_mesh_volume(above) };
+    assert!(
+        (lower + upper - whole).abs() < 1.0,
+        "the halves add up: {lower} + {upper} against {whole}"
+    );
+    assert!(
+        (lower - whole / 2.0).abs() < 1.0,
+        "the cut is through the middle"
+    );
+
+    let empty_normal = [0.0_f64, 0.0, 0.0];
+    let mut refused = std::ptr::null_mut();
+    let mut spare = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            hfw_mesh_cut(
+                cube,
+                empty_normal.as_ptr(),
+                plane_point.as_ptr(),
+                &mut refused,
+                &mut spare,
+            )
+        },
+        -1,
+        "a normal with no direction is refused"
+    );
+    assert!(refused.is_null());
+    assert!(
+        last_error().contains("direction"),
+        "the refusal says why: {}",
+        last_error()
+    );
+
+    let surface = [0.0_f64, 0.0, 20.0];
+    let mut bottom = std::ptr::null_mut();
+    let mut top = std::ptr::null_mut();
+    assert_eq!(
+        unsafe {
+            hfw_mesh_cut(
+                cube,
+                plane_normal.as_ptr(),
+                surface.as_ptr(),
+                &mut bottom,
+                &mut top,
+            )
+        },
+        0
+    );
+    assert!((unsafe { hfw_mesh_volume(bottom) } - whole).abs() < 1.0);
+    assert_eq!(unsafe { hfw_mesh_triangle_count(top) }, 0);
+    unsafe {
+        hfw_mesh_free(bottom);
+        hfw_mesh_free(top);
+        hfw_mesh_free(below);
+        hfw_mesh_free(above);
+        hfw_mesh_free(cube);
+    }
+}
+
+#[test]
+fn separate_shells_split_across_the_abi() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!cube.is_null(), "load failed: {}", last_error());
+    assert_eq!(
+        unsafe { hfw_mesh_part_count(cube) },
+        1,
+        "a cube is one shell"
+    );
+    let moved = unsafe {
+        hfw_mesh_transform(
+            cube,
+            HfwTransform {
+                scale: [1.0, 1.0, 1.0],
+                rotation_degrees: [0.0, 0.0, 0.0],
+                translation_mm: [40.0, 0.0, 0.0],
+            },
+        )
+    };
+    assert!(!moved.is_null(), "transform failed: {}", last_error());
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for mesh in [cube, moved] {
+        let count = unsafe { hfw_mesh_index_count(mesh) };
+        let corners = count * 3;
+        let mut buffer = vec![0.0_f64; corners * 3];
+        assert_eq!(
+            unsafe { hfw_mesh_vertices(mesh, buffer.as_mut_ptr(), corners) },
+            0,
+            "vertices read: {}",
+            last_error()
+        );
+        let mut faces = vec![0_u32; count * 3];
+        assert_eq!(
+            unsafe { hfw_mesh_indices(mesh, faces.as_mut_ptr(), count) },
+            0,
+            "indices read: {}",
+            last_error()
+        );
+        let offset = (vertices.len() / 3) as u32;
+        vertices.extend_from_slice(&buffer);
+        indices.extend(faces.iter().map(|index| index + offset));
+    }
+    let joined = unsafe {
+        hfw_mesh_new(
+            vertices.as_ptr(),
+            vertices.len() / 3,
+            indices.as_ptr(),
+            indices.len() / 3,
+        )
+    };
+    assert!(
+        !joined.is_null(),
+        "the joined mesh builds: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_mesh_part_count(joined) }, 2, "two shells");
+    let first = unsafe { hfw_mesh_part(joined, 0) };
+    let other = unsafe { hfw_mesh_part(joined, 1) };
+    assert!(!first.is_null() && !other.is_null());
+    let sum = unsafe { hfw_mesh_volume(first) } + unsafe { hfw_mesh_volume(other) };
+    assert!(
+        (sum - unsafe { hfw_mesh_volume(joined) }).abs() < 1.0,
+        "the shells add up: {sum}"
+    );
+    assert!(
+        unsafe { hfw_mesh_part(joined, 2) }.is_null(),
+        "a third shell is refused"
+    );
+    assert!(last_error().contains("no shell 2"), "{}", last_error());
+    unsafe {
+        hfw_mesh_free(first);
+        hfw_mesh_free(other);
+        hfw_mesh_free(joined);
+        hfw_mesh_free(moved);
+        hfw_mesh_free(cube);
+    }
+}
+
+#[test]
 fn text_crosses_the_abi_and_engraving_removes_material() {
     let Some(font) = system_font() else {
         eprintln!("skipped: no TrueType font is installed");
@@ -1536,6 +1702,69 @@ fn a_plate_reads_back_the_volumes_of_its_objects() {
     assert!(unsafe { hfw_plate_object_volume_mesh(plate, id, 7) }.is_null());
 
     unsafe { hfw_mesh_free(geometry) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(mesh) };
+}
+
+/// The caller's own bytes travel with the plate: they are how the application keeps
+/// its own state -- plates, names, tool colours -- in the same file as the document.
+#[test]
+fn a_plates_callers_own_bytes_survive_the_project() {
+    let path = c_string(&fixture("cube.stl"));
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    unsafe { hfw_plate_add(plate, mesh) };
+
+    let mut length = 1usize;
+    assert!(unsafe { hfw_plate_metadata_get(plate, &mut length) }.is_null());
+    assert_eq!(length, 0, "a plate given nothing carries none");
+
+    let metadata = c_string(r#"{"plates":[{"name":"one"}]}"#);
+    assert_eq!(
+        unsafe { hfw_plate_set_metadata(plate, metadata.as_ptr(), metadata.as_bytes().len()) },
+        0,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_plate_set_metadata(plate, std::ptr::null(), 4) },
+        -1,
+        "a null pointer with a length is refused"
+    );
+
+    let mut written = 0usize;
+    let bytes = unsafe { hfw_plate_project_bytes(plate, &mut written) };
+    assert!(!bytes.is_null(), "{}", last_error());
+    let project = unsafe { std::slice::from_raw_parts(bytes as *const u8, written) }.to_vec();
+    unsafe { hfw_buffer_free(bytes, written) };
+
+    let reopened = unsafe {
+        hfw_plate_open_project(
+            project.as_ptr() as *const c_char,
+            project.len(),
+            std::ptr::null(),
+        )
+    };
+    assert!(!reopened.is_null(), "{}", last_error());
+    let mut length = 0usize;
+    let metadata = unsafe { hfw_plate_metadata_get(reopened, &mut length) };
+    assert!(!metadata.is_null(), "{}", last_error());
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(metadata as *const u8, length) },
+        br#"{"plates":[{"name":"one"}]}"#
+    );
+    unsafe { hfw_string_free(metadata) };
+
+    assert_eq!(
+        unsafe { hfw_plate_set_metadata(reopened, std::ptr::null(), 0) },
+        0
+    );
+    let mut length = 1usize;
+    assert!(unsafe { hfw_plate_metadata_get(reopened, &mut length) }.is_null());
+    assert_eq!(length, 0, "an empty write clears it");
+
+    unsafe { hfw_plate_free(reopened) };
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(mesh) };
 }

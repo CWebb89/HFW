@@ -42,6 +42,7 @@ use hfw_engine::{
     VolumeKind,
 };
 use hfw_font::Face;
+use hfw_mesh::CutPlane;
 use hfw_plate::{ObjectId, Plate, PlateObject};
 use hfw_text::text_prism;
 
@@ -125,6 +126,18 @@ fn report<T>(result: Result<T, String>, on_error: T) -> T {
             on_error
         }
     }
+}
+
+/// Reads three doubles the caller handed over as a point or a direction.
+unsafe fn read_point(value: *const f64, what: &str) -> Result<[f64; 3], String> {
+    if value.is_null() {
+        return Err(format!("{what} is null"));
+    }
+    let slice = unsafe { std::slice::from_raw_parts(value, 3) };
+    if slice.iter().any(|part| !part.is_finite()) {
+        return Err(format!("{what} holds a value that is not a number"));
+    }
+    Ok([slice[0], slice[1], slice[2]])
 }
 
 /// Turns a `*const c_char` the caller handed over into a `String`.
@@ -765,6 +778,74 @@ pub unsafe extern "C" fn hfw_plate_open_project(
     report(build(), ptr::null_mut())
 }
 
+/// Stores the caller's own bytes on the plate, saved and reopened with it.
+///
+/// The engine never reads them; they are the application's state that has to travel
+/// with the document -- which plates exist, what they are called, which tool has
+/// which colour -- and storing them here is what keeps a saved plate one file.
+/// Passing a `len` of zero clears them.
+///
+/// Returns 0 on success and -1 on a null plate or a null pointer with a non-zero
+/// length.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call, and `bytes` readable for
+/// `len` bytes or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_set_metadata(
+    plate: *mut HfwPlate,
+    bytes: *const c_char,
+    len: usize,
+) -> c_int {
+    let set = || -> Result<c_int, String> {
+        let plate = unsafe { plate_mut(plate) }?;
+        if len == 0 {
+            plate.plate.set_metadata(Vec::new());
+            return Ok(0);
+        }
+        if bytes.is_null() {
+            return Err("metadata bytes are null".to_owned());
+        }
+        let data = unsafe { std::slice::from_raw_parts(bytes as *const u8, len) };
+        plate.plate.set_metadata(data.to_vec());
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Returns the caller's own bytes as a NUL-terminated string, reporting its length in
+/// `out_len`, or NULL when the plate carries none.
+///
+/// Release it with `hfw_string_free`. The length is the real one, so bytes that are
+/// not text -- a document whose own format is binary -- survive a round trip.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out_len` writable for one `size_t`.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_metadata_get(
+    plate: *const HfwPlate,
+    out_len: *mut usize,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        if out_len.is_null() {
+            return Err("the length pointer is null".to_owned());
+        }
+        let metadata = plate.plate.metadata();
+        if metadata.is_empty() {
+            unsafe { *out_len = 0 };
+            return Ok(ptr::null_mut());
+        }
+        unsafe { *out_len = metadata.len() };
+        CString::new(metadata)
+            .map(CString::into_raw)
+            .map_err(|_| "the metadata contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
+}
+
 /// Writes the ids of the plate's objects into `out`, and returns how many there
 /// are.
 ///
@@ -1064,6 +1145,106 @@ pub unsafe extern "C" fn hfw_mesh_load_file(path: *const c_char) -> *mut HfwMesh
                 })
                 .map_err(|error| error.to_string())
         }),
+        ptr::null_mut(),
+    )
+}
+
+/// Cuts a mesh with a plane, returning the part below and the part above.
+///
+/// Both halves are closed: the cut's own opening is capped, and a cut that passes through
+/// a hole caps the hole's ring too. `normal` and `point` are three doubles each, in
+/// millimetres; the plane passes through `point` facing `normal`. A cut that misses the
+/// mesh puts it in one half and leaves the other with no triangles.
+///
+/// On failure both outputs are NULL and the error names the reason, which is a normal with
+/// no direction or a coordinate out of range. Each returned handle must be released with
+/// [`hfw_mesh_free`].
+///
+/// # Safety
+///
+/// `normal` and `point` must point at three readable doubles each, and `below` and
+/// `above` must point at writable handle slots.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_cut(
+    mesh: *const HfwMesh,
+    normal: *const f64,
+    point: *const f64,
+    below: *mut *mut HfwMesh,
+    above: *mut *mut HfwMesh,
+) -> c_int {
+    let outcome = (|| -> Result<(Mesh, Mesh), String> {
+        let mesh = unsafe { mesh.as_ref() }.ok_or_else(|| "mesh is null".to_owned())?;
+        let normal = unsafe { read_point(normal, "normal") }?;
+        let point = unsafe { read_point(point, "point") }?;
+        let plane = CutPlane::through(normal, point).map_err(|error| error.to_string())?;
+        let cut = mesh.mesh.cut(plane).map_err(|error| error.to_string())?;
+        Ok((cut.below, cut.above))
+    })();
+    match outcome {
+        Ok((below_mesh, above_mesh)) => {
+            if below.is_null() || above.is_null() {
+                set_error("below or above is null");
+                return -1;
+            }
+            unsafe {
+                below.write(Box::into_raw(Box::new(HfwMesh {
+                    mesh: below_mesh,
+                    paint: Paint::default(),
+                })));
+                above.write(Box::into_raw(Box::new(HfwMesh {
+                    mesh: above_mesh,
+                    paint: Paint::default(),
+                })));
+            }
+            0
+        }
+        Err(message) => {
+            set_error(&message);
+            -1
+        }
+    }
+}
+
+/// How many separate shells a mesh holds.
+///
+/// A shell is a group of triangles joined to each other, so a plate with two copies of a
+/// part imported as one mesh reports two. Use it with [`hfw_mesh_part`] to split one into
+/// one mesh per shell.
+///
+/// # Safety
+///
+/// `mesh` must be a handle from this library that has not been freed.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_part_count(mesh: *const HfwMesh) -> usize {
+    let Some(mesh) = (unsafe { mesh.as_ref() }) else {
+        return 0;
+    };
+    mesh.mesh.parts().map(|parts| parts.len()).unwrap_or(0)
+}
+
+/// One shell of a mesh, by index, in the order its first triangle appears.
+///
+/// Returns NULL when the mesh is null or the index is past the last shell; the handle must
+/// be released with [`hfw_mesh_free`].
+///
+/// # Safety
+///
+/// `mesh` must be a handle from this library that has not been freed.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_part(mesh: *const HfwMesh, index: usize) -> *mut HfwMesh {
+    report(
+        (|| -> Result<*mut HfwMesh, String> {
+            let mesh = unsafe { mesh.as_ref() }.ok_or_else(|| "mesh is null".to_owned())?;
+            let parts = mesh.mesh.parts().map_err(|error| error.to_string())?;
+            let part = parts
+                .into_iter()
+                .nth(index)
+                .ok_or_else(|| format!("the mesh has no shell {index}"))?;
+            Ok(Box::into_raw(Box::new(HfwMesh {
+                mesh: part,
+                paint: Paint::default(),
+            })))
+        })(),
         ptr::null_mut(),
     )
 }
@@ -2634,6 +2815,29 @@ pub unsafe extern "C" fn hfw_plate_in_layer_count(plate: *const HfwPlate) -> isi
         Ok(unsafe { &*plate }.plate.in_layer_polylines().len() as isize)
     };
     report(count(), -1)
+}
+
+/// How many points stroke `index` has, or -1 when the handle is null or it has no
+/// stroke at that index.
+///
+/// This is what sizes the buffer `hfw_plate_in_layer_get` fills.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_in_layer_points(plate: *const HfwPlate, index: usize) -> isize {
+    let points = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let stroke = plate.plate.in_layer_polylines().get(index).ok_or_else(|| {
+            format!(
+                "the plate has {} in-layer strokes, so stroke {index} does not exist",
+                plate.plate.in_layer_polylines().len()
+            )
+        })?;
+        Ok(stroke.points.len() as isize)
+    };
+    report(points(), -1)
 }
 
 /// Reads stroke `index` back: its Z, its point count, its width, height and speed.

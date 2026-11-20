@@ -13,15 +13,16 @@
 //! key this engine does not publish is refused on the way out instead of being
 //! saved as text nothing can read.
 //!
-//! Placement is written into the coordinates: an object is stored where it sits,
-//! as `Placed` says. A project is a layout, not a set of editable bodies with
-//! poses, and a reader that expected a pose would need to know our transform
-//! convention to place a part.
+//! Placement is written as a pose, not baked into the coordinates: an object's
+//! triangles stay in its own frame and `placement="sx sy sz rx ry rz tx ty tz"`
+//! says where it sits. Baking it would print the same and lose the one thing a
+//! panel edits -- a reopened object would come back already rotated, its transform
+//! reading zero -- so the pose travels and the geometry stays editable.
 
 use hfw_engine::{
     InLayerPolyline, Marker, MarkerKind, Mesh, Paint, PlateOrder, Settings, VolumeKind,
 };
-use hfw_mesh::{archive_parts, model_part_xml, objects_from_3mf_text};
+use hfw_mesh::{archive_parts, model_part_xml, objects_from_3mf_text, MeshTransform};
 
 use crate::{ObjectId, Plate, PlateError};
 
@@ -32,9 +33,10 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 ///
 /// Version 2 added per-object paint, version 3 volumes, version 4 per-object layer
 /// heights, version 5 the plate's timeline markers, version 6 its in-layer strokes,
-/// version 7 the settings a modifier volume prints its region with. Older files still
-/// open: they simply carry none of what they predate.
-pub const PROJECT_VERSION: u32 = 7;
+/// version 7 the settings a modifier volume prints its region with, version 8 the
+/// caller's own bytes. Older files still open: they simply carry none of what they
+/// predate.
+pub const PROJECT_VERSION: u32 = 8;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -60,17 +62,20 @@ impl Plate {
     /// its geometry because switching it back on in the panel is the same job as
     /// switching it off.
     pub fn to_project(&self) -> Result<Vec<u8>, PlateError> {
+        // Geometry is written in the object's own frame, and where it sits on the bed is
+        // recorded in the project part. Baking the placement into the triangles prints
+        // the same and loses the one thing a panel edits: a reopened object would come
+        // back already rotated, with a transform of zero.
         let mut placed: Vec<(String, Mesh)> = self
             .objects
             .iter()
-            .map(|object| Ok((object.name.clone(), object.placed_mesh()?)))
-            .collect::<Result<_, PlateError>>()?;
+            .map(|object| (object.name.clone(), object.mesh().clone()))
+            .collect();
         for object in &self.objects {
             for volume in object.volumes() {
-                let mesh = volume.mesh().transformed(object.placement())?;
                 placed.push((
                     format!("{} ({} volume)", object.name, volume.kind().name()),
-                    mesh,
+                    volume.mesh().clone(),
                 ));
             }
         }
@@ -169,6 +174,10 @@ impl Plate {
             let saved = extras.objects.iter().find(|saved| saved.index == index);
             if let Some(saved) = saved {
                 plate.set_object_enabled(id, saved.enabled)?;
+                if let Some(placement) = saved.placement {
+                    let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
+                    object.set_placement(placement);
+                }
                 for (key, value) in &saved.settings {
                     plate.set_object_setting(id, key, value)?;
                 }
@@ -182,6 +191,7 @@ impl Plate {
         }
         plate.set_markers(extras.markers)?;
         plate.set_in_layer_polylines(extras.in_layer)?;
+        plate.set_metadata(extras.metadata);
         Ok(plate)
     }
 
@@ -220,6 +230,7 @@ impl Plate {
 struct SavedObject {
     index: usize,
     enabled: bool,
+    placement: Option<MeshTransform>,
     settings: Vec<(String, String)>,
     support: Vec<u8>,
     seam: Vec<u8>,
@@ -249,9 +260,19 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<hfwProject version=\"{PROJECT_VERSION}\">\n"
     );
     for (index, object) in plate.objects.iter().enumerate() {
+        let placement = object.placement();
         xml.push_str(&format!(
-            "  <object index=\"{index}\" enabled=\"{}\">\n",
-            if object.enabled { 1 } else { 0 }
+            "  <object index=\"{index}\" enabled=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\">\n",
+            if object.enabled { 1 } else { 0 },
+            placement.scale[0],
+            placement.scale[1],
+            placement.scale[2],
+            placement.rotation_degrees[0],
+            placement.rotation_degrees[1],
+            placement.rotation_degrees[2],
+            placement.translation_mm[0],
+            placement.translation_mm[1],
+            placement.translation_mm[2]
         ));
         for key in object.overrides() {
             let settings = object.settings();
@@ -331,8 +352,80 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
             escape(&stroke.prefix)
         ));
     }
+    if !plate.metadata().is_empty() {
+        xml.push_str(&format!(
+            "  <metadata encoding=\"base64\">{}</metadata>\n",
+            encode_base64(plate.metadata())
+        ));
+    }
     xml.push_str("</hfwProject>\n");
     Ok(xml)
+}
+
+/// The caller's bytes as base64: the metadata is arbitrary and the project part is
+/// XML, so escaping it character by character would still fail on a byte sequence
+/// that is not text at all.
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        let mut quartet = [
+            ALPHABET[(first >> 2) as usize],
+            ALPHABET[(((first & 0b11) << 4) | (second >> 4)) as usize],
+            ALPHABET[(((second & 0b1111) << 2) | (third >> 6)) as usize],
+            ALPHABET[(third & 0b111111) as usize],
+        ];
+        let significant = match chunk.len() {
+            1 => 2,
+            2 => 3,
+            _ => 4,
+        };
+        for slot in quartet.iter_mut().skip(significant) {
+            *slot = b'=';
+        }
+        out.push_str(std::str::from_utf8(&quartet).unwrap_or_default());
+    }
+    out
+}
+
+fn decode_base64(text: &str) -> Result<Vec<u8>, PlateError> {
+    let mut digits = Vec::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => continue,
+            other => {
+                return Err(PlateError::Slice(format!(
+                    "the project's metadata is not base64: {:?} is not a digit",
+                    other as char
+                )))
+            }
+        };
+        digits.push(value);
+    }
+    let mut out = Vec::with_capacity(digits.len() / 4 * 3);
+    for quartet in digits.chunks(4) {
+        let mut word = [0u8; 4];
+        word[..quartet.len()].copy_from_slice(quartet);
+        out.push((word[0] << 2) | (word[1] >> 4));
+        if quartet.len() > 2 {
+            out.push((word[1] << 4) | (word[2] >> 2));
+        }
+        if quartet.len() > 3 {
+            out.push((word[2] << 6) | word[3]);
+        }
+    }
+    Ok(out)
 }
 
 /// The name a marker's kind is written under.
@@ -363,6 +456,7 @@ struct SavedProject {
     volumes: Vec<SavedVolume>,
     markers: Vec<Marker>,
     in_layer: Vec<InLayerPolyline>,
+    metadata: Vec<u8>,
 }
 
 /// Where one volume came from: which object owns it, which model-part object holds
@@ -432,9 +526,35 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
             };
             layer_heights.push((number(&z, "z")?, number(&height, "height")?));
         }
+        let placement = match attribute_in(&block, "object", "placement") {
+            Some(text) => {
+                let numbers: Vec<f64> = text
+                    .split_whitespace()
+                    .map(|number| number.parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| {
+                        PlateError::Slice(format!(
+                            "an object's placement is not nine numbers: {text:?}"
+                        ))
+                    })?;
+                if numbers.len() != 9 {
+                    return Err(PlateError::Slice(format!(
+                        "an object's placement must be nine numbers, and this one has {}",
+                        numbers.len()
+                    )));
+                }
+                Some(MeshTransform {
+                    scale: [numbers[0], numbers[1], numbers[2]],
+                    rotation_degrees: [numbers[3], numbers[4], numbers[5]],
+                    translation_mm: [numbers[6], numbers[7], numbers[8]],
+                })
+            }
+            None => None,
+        };
         saved.push(SavedObject {
             index,
             enabled: enabled.trim() != "0",
+            placement,
             settings,
             support,
             seam,
@@ -497,6 +617,10 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
             ))
         })
     };
+    let metadata = match elements(xml, "metadata").first() {
+        Some(block) => decode_base64(&text_between(block, "metadata").unwrap_or_default())?,
+        None => Vec::new(),
+    };
     let mut in_layer = Vec::new();
     for stroke in elements(xml, "inLayer") {
         let field = |name: &str| {
@@ -534,6 +658,7 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
         volumes,
         markers,
         in_layer,
+        metadata,
     })
 }
 
@@ -596,6 +721,19 @@ fn elements(xml: &str, name: &str) -> Vec<String> {
     out
 }
 
+/// The text an element wraps, with its tags removed.
+fn text_between(block: &str, element: &str) -> Option<String> {
+    let open_end = block.find(&format!("<{element}"))?;
+    let after_open = &block[open_end..];
+    let tag_end = after_open.find('>')? + 1;
+    let close = format!("</{element}>");
+    let end = after_open.find(&close)?;
+    if end < tag_end {
+        return Some(String::new());
+    }
+    Some(after_open[tag_end..end].to_owned())
+}
+
 fn attribute_in(block: &str, element: &str, name: &str) -> Option<String> {
     let start = block.find(&format!("<{element}"))?;
     let tag_end = block[start..].find('>')? + start;
@@ -626,6 +764,24 @@ fn unescape(text: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
+}
+
+#[cfg(test)]
+mod base64_tests {
+    use super::{decode_base64, encode_base64};
+
+    #[test]
+    fn base46_round_trips_every_length() {
+        for length in 0..40usize {
+            let bytes: Vec<u8> = (0..length).map(|index| (index * 7 + 3) as u8).collect();
+            let text = encode_base64(&bytes);
+            assert_eq!(
+                decode_base64(&text).expect("what was encoded decodes"),
+                bytes,
+                "length {length} encoded as {text}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -757,7 +913,7 @@ mod tests {
             Err(PlateError::Slice(message)) => {
                 assert!(message.contains("version 9"), "message was `{message}`");
                 assert!(
-                    message.contains("versions 1 to 7"),
+                    message.contains("versions 1 to 8"),
                     "the refusal names the range it reads: `{message}`"
                 );
             }

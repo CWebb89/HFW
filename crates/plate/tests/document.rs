@@ -942,3 +942,64 @@ fn a_volume_that_is_not_a_modifier_refuses_settings() {
         .expect_err("a negative volume has no region to print differently");
     assert!(error.to_string().contains("modifier"), "{error}");
 }
+
+/// The caller's bytes are the application's own state, so they have to come back
+/// exactly -- including bytes that are not text, and including none at all.
+#[test]
+fn a_projects_callers_own_bytes_survive_the_round_trip() {
+    let mut plate = Plate::new(Settings::default());
+    plate.add("cube", cube()).expect("a cube adds");
+    assert!(
+        plate.metadata().is_empty(),
+        "a plate that was never given any carries none"
+    );
+
+    let metadata = br##"{"plates":[{"name":"benchy one"}],"tool":["#d8452c"]}"##;
+    plate.set_metadata(metadata.to_vec());
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    assert_eq!(reopened.metadata(), metadata);
+
+    let binary: Vec<u8> = (0..=255u8).collect();
+    plate.set_metadata(binary.clone());
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    assert_eq!(
+        reopened.metadata(),
+        &binary[..],
+        "bytes that are not text survive a base64 round trip"
+    );
+
+    plate.set_metadata(Vec::new());
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    assert!(reopened.metadata().is_empty(), "clearing it writes nothing");
+}
+
+/// Where an object sits is part of the document: a reopened plate has to put it back
+/// with the pose it was saved with, not with that pose baked into its triangles.
+#[test]
+fn a_projects_object_placement_survives_the_round_trip() {
+    let mut plate = Plate::new(Settings::default());
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let placement = MeshTransform {
+        scale: [1.0, 1.0, 1.0],
+        rotation_degrees: [0.0, 0.0, 30.0],
+        translation_mm: [40.0, 25.0, 0.0],
+    };
+    plate
+        .object_mut(id)
+        .expect("added")
+        .set_placement(placement);
+
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    let saved = &reopened.objects()[0];
+    assert_eq!(saved.placement().rotation_degrees, [0.0, 0.0, 30.0]);
+    assert_eq!(saved.placement().translation_mm, [40.0, 25.0, 0.0]);
+    assert_eq!(
+        saved.mesh().triangle_count(),
+        cube().triangle_count(),
+        "the geometry came back unrotated, so the pose is the pose and not a baked mesh"
+    );
+}

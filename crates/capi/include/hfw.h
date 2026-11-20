@@ -103,6 +103,38 @@ HfwMesh *hfw_mesh_new(const double *vertices, size_t vertex_count, const uint32_
 HfwMesh *hfw_mesh_transform(const HfwMesh *mesh, HfwTransform transform);
 
 /**
+ * Cuts a mesh with a plane, returning the part below it and the part above it.
+ *
+ * Both halves are closed, because the cut's own opening is capped; a cut that passes
+ * through a hole caps the hole's ring too. `normal` and `point` are three doubles each, in
+ * millimetres, and the plane passes through `point` facing `normal`. A cut that misses the
+ * mesh puts it all in one half and leaves the other empty.
+ *
+ * Returns 0 on success and -1 when the mesh or either output slot is null, the normal has
+ * no direction, or a coordinate is out of range. Both handles must be released with
+ * `hfw_mesh_free`.
+ */
+int32_t hfw_mesh_cut(const HfwMesh *mesh, const double *normal, const double *point,
+                     HfwMesh **below, HfwMesh **above);
+
+/**
+ * How many separate shells a mesh holds.
+ *
+ * A shell is a group of triangles joined to each other, so two copies of a part imported as
+ * one mesh report two. Use it with `hfw_mesh_part` to split one mesh into one per shell.
+ * Returns 0 for a null handle.
+ */
+size_t hfw_mesh_part_count(const HfwMesh *mesh);
+
+/**
+ * One shell of a mesh, by index, in the order its first triangle appears.
+ *
+ * Returns NULL when the mesh is null or the index is past the last shell. The handle must
+ * be released with `hfw_mesh_free`.
+ */
+HfwMesh *hfw_mesh_part(const HfwMesh *mesh, size_t index);
+
+/**
  * Builds a mesh from a string of text, extruded from a font file.
  *
  * The mesh is a closed prism: the glyphs of `text` at `size_mm`, raised from `z_mm` to
@@ -397,6 +429,13 @@ int32_t hfw_plate_set_in_layer(HfwPlate *plate, const double *zs, const size_t *
 ptrdiff_t hfw_plate_in_layer_count(const HfwPlate *plate);
 
 /**
+ * How many points stroke `index` has, or -1 when there is no stroke at that index.
+ *
+ * This sizes the buffer `hfw_plate_in_layer_get` fills.
+ */
+ptrdiff_t hfw_plate_in_layer_points(const HfwPlate *plate, size_t index);
+
+/**
  * Reads stroke `index` back: its Z, its point count in `points`, its width, height and
  * speed. `points` receives up to `capacity` points as interleaved x, y and `prefix` up
  * to `len` bytes of its G-code including the terminator; either may be NULL to skip
@@ -543,6 +582,17 @@ char *hfw_plate_preview_json(const HfwPlate *plate, const char *profile,
  * frees with `hfw_mesh_free`; a name that does not fit its buffer reports the length
  * it needs and writes nothing.
  */
+/**
+ * The caller's own bytes, saved and reopened with the plate.
+ *
+ * The engine never reads them: they are the application's state that has to travel
+ * with the document. `len` of zero clears them; a NULL pointer with a non-zero length
+ * is an error. `hfw_plate_metadata_get` returns them NUL-terminated with their real
+ * length, so binary metadata survives, and returns NULL when there are none.
+ */
+int32_t hfw_plate_set_metadata(HfwPlate *plate, const char *bytes, size_t len);
+char *hfw_plate_metadata_get(const HfwPlate *plate, size_t *out_len);
+
 size_t hfw_plate_object_ids(const HfwPlate *plate, uint64_t *out, size_t len);
 ptrdiff_t hfw_plate_object_name_get(const HfwPlate *plate, uint64_t id, char *out,
                                     size_t len);

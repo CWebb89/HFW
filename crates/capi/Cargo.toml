@@ -11,6 +11,7 @@ name = "hfw_capi"
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
+hfw-mesh = { path = "../mesh" }
 hfw-font = { path = "../font" }
 hfw-text = { path = "../text" }
 hfw-config = { path = "../config" }

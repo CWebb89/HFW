@@ -606,6 +606,7 @@ pub struct Plate {
     objects: Vec<PlateObject>,
     markers: Vec<Marker>,
     in_layer: Vec<InLayerPolyline>,
+    metadata: Vec<u8>,
     next_id: u64,
 }
 
@@ -617,8 +618,24 @@ impl Plate {
             objects: Vec::new(),
             markers: Vec::new(),
             in_layer: Vec::new(),
+            metadata: Vec::new(),
             next_id: 0,
         }
+    }
+
+    /// Opaque bytes that belong to the caller, saved and reopened with the plate.
+    ///
+    /// The engine never reads them: they are the application's own state -- which
+    /// plates exist, what they are called, which tool has which colour -- that has to
+    /// travel with the document rather than in a second file beside it. Storing them
+    /// here is what keeps a saved plate one file.
+    pub fn metadata(&self) -> &[u8] {
+        &self.metadata
+    }
+
+    /// Replaces the caller's opaque bytes.
+    pub fn set_metadata(&mut self, metadata: Vec<u8>) {
+        self.metadata = metadata;
     }
 
     /// The plate's timeline: what runs at a height, earliest first.
