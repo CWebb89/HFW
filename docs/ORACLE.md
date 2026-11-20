@@ -203,6 +203,32 @@ Feature classes are not comparable across slicers by design.
   substitute a 0.4 mm one. The oracle carries that fixture with a documented 20%
   tolerance; at 24.3% it is over it, so the row is red on purpose.
 
+## Sequential printing: what the reference enforces, 2026-11-20
+
+`plate::check_sequential` refuses a plate the toolhead cannot print one object at a
+time. What the reference slicer does with the same plate was measured, because the
+rule's provenance was in question: PrusaSlicer's config source had been read once
+while the rule was being written (`docs/PROVENANCE.md`).
+
+Two 20 mm cubes, the first at x 20–40 mm and the second at x 45–65 mm, so the gap
+between their footprints is 5 mm against a 20 mm clearance radius:
+
+```
+prusa-slicer a.stl b.stl --dont-arrange --complete-objects \
+    --extruder-clearance-radius 20 --export-gcode -o out.gcode
+```
+
+Result: **exit 0, 127,659 bytes of G-code.** PrusaSlicer does not refuse a
+sequential plate whose parts are 5 mm apart; `extruder_clearance_radius` reaches
+the arranger's spacing (`min_object_distance`), not a validation step, so the
+setting only decides how far apart *auto-arrange* puts things.
+
+That makes hfw's check strictly stricter than the reference, and it makes the rule
+the engine's own rather than an inheritance: a plate PrusaSlicer would print, this
+engine refuses when the head cannot pass. The Orca column cannot be measured for
+this setting — 2.5.1 refuses standalone presets (see above) — so the claim covers
+one reference.
+
 ## What this does not cover
 
 - Print quality, surface finish, adhesion, stringing: only a print shows these.
