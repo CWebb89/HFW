@@ -16,6 +16,8 @@
 
 use hfw_font::{Contour, Face, FontError, Outline};
 use hfw_geometry::Coord;
+use hfw_kernel as kernel;
+use hfw_kernel::V2;
 use hfw_mesh::{Mesh, MeshError, Point3, Triangle};
 
 /// A prism could not be built from the contours it was given.
@@ -96,7 +98,7 @@ impl Prism {
         let top = z + height;
         for shell in &shells {
             for cap in triangulate_shell(shell)? {
-                let mut points = cap.positions;
+                let mut points = cap;
                 if !ccw(&points) {
                     points.swap(1, 2);
                 }
@@ -274,157 +276,32 @@ fn ccw(triangle: &[[f64; 2]; 3]) -> bool {
     (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]) > 0.0
 }
 
-/// One triangle of a cap, with the positions it was built from.
-struct CapTriangle {
-    positions: [[f64; 2]; 3],
-}
-
-/// Triangulates a boundary and its holes by bridging each hole into the boundary and
-/// clipping ears from the result.
-fn triangulate_shell(shell: &Shell) -> Result<Vec<CapTriangle>, TextError> {
-    let mut ring = shell.outer.clone();
-    let mut holes: Vec<Ring> = shell.holes.clone();
-    holes.sort_by(|a, b| {
-        let left = a.iter().map(|point| point[0]).fold(f64::MIN, f64::max);
-        let right = b.iter().map(|point| point[0]).fold(f64::MIN, f64::max);
-        right
-            .partial_cmp(&left)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for hole in &holes {
-        ring = bridge(&ring, hole).ok_or(TextError::Untriangulatable {
+/// Triangles for a shell's cap, from the shared ear-clipping capper in `hfw_kernel`.
+fn triangulate_shell(shell: &Shell) -> Result<Vec<[[f64; 2]; 3]>, TextError> {
+    let outer = to_v2(&shell.outer);
+    let holes: Vec<Vec<V2>> = shell.holes.iter().map(|hole| to_v2(hole)).collect();
+    kernel::cap::triangulate(&outer, &holes)
+        .map(|triangles| {
+            triangles
+                .iter()
+                .map(|triangle| {
+                    [
+                        [triangle[0].x, triangle[0].y],
+                        [triangle[1].x, triangle[1].y],
+                        [triangle[2].x, triangle[2].y],
+                    ]
+                })
+                .collect()
+        })
+        .ok_or(TextError::Untriangulatable {
             contours: shell.holes.len() + 1,
-        })?;
-    }
-    if !counterclockwise_ring(&ring) {
-        ring.reverse();
-    }
-    let mut triangles = Vec::new();
-    let mut indices: Vec<usize> = (0..ring.len()).collect();
-    let mut guard = 0;
-    while indices.len() > 3 {
-        guard += 1;
-        if guard > ring.len() * ring.len() + 8 {
-            break;
-        }
-        let mut clipped = false;
-        for position in 0..indices.len() {
-            let previous = indices[(position + indices.len() - 1) % indices.len()];
-            let current = indices[position];
-            let next = indices[(position + 1) % indices.len()];
-            let triangle = [ring[previous], ring[current], ring[next]];
-            if !ccw(&triangle) {
-                continue;
-            }
-            let mut blocked = false;
-            for candidate in &indices {
-                if *candidate == previous || *candidate == current || *candidate == next {
-                    continue;
-                }
-                let point = ring[*candidate];
-                if triangle.iter().any(|corner| same(corner, &point)) {
-                    continue;
-                }
-                if inside_triangle(point, &triangle) {
-                    blocked = true;
-                    break;
-                }
-            }
-            if blocked {
-                continue;
-            }
-            triangles.push(CapTriangle {
-                positions: triangle,
-            });
-            indices.remove(position);
-            clipped = true;
-            break;
-        }
-        if !clipped {
-            return Err(TextError::Untriangulatable {
-                contours: shell.holes.len() + 1,
-            });
-        }
-    }
-    if indices.len() == 3 {
-        triangles.push(CapTriangle {
-            positions: [ring[indices[0]], ring[indices[1]], ring[indices[2]]],
-        });
-    }
-    Ok(triangles)
+        })
 }
 
-/// Inserts a hole into the boundary along the shortest bridge that does not cross an
-/// edge of either.
-fn bridge(outer: &[[f64; 2]], hole: &[[f64; 2]]) -> Option<Ring> {
-    let hole_start = (0..hole.len()).max_by(|a, b| {
-        hole[*a][0]
-            .partial_cmp(&hole[*b][0])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })?;
-    let mut best: Option<(usize, f64)> = None;
-    for index in 0..outer.len() {
-        let distance = (outer[index][0] - hole[hole_start][0]).powi(2)
-            + (outer[index][1] - hole[hole_start][1]).powi(2);
-        if best.map(|(_, known)| distance < known).unwrap_or(true)
-            && !blocked(outer, hole, index, hole_start)
-        {
-            best = Some((index, distance));
-        }
-    }
-    let (index, _) = best?;
-    let mut ring = Vec::with_capacity(outer.len() + hole.len() + 2);
-    ring.extend_from_slice(&outer[..=index]);
-    for step in 0..hole.len() {
-        ring.push(hole[(hole_start + step) % hole.len()]);
-    }
-    ring.push(hole[hole_start]);
-    ring.extend_from_slice(&outer[index..]);
-    Some(ring)
-}
-
-/// True when the bridge from `outer[index]` to `hole[hole_index]` crosses another edge.
-fn blocked(outer: &[[f64; 2]], hole: &[[f64; 2]], index: usize, hole_index: usize) -> bool {
-    let a = outer[index];
-    let b = hole[hole_index];
-    for rings in [outer, hole] {
-        for (position, start) in rings.iter().enumerate() {
-            let end = rings[(position + 1) % rings.len()];
-            if same(start, &a) || same(start, &b) || same(&end, &a) || same(&end, &b) {
-                continue;
-            }
-            if crosses(a, b, *start, end) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn same(a: &[f64; 2], b: &[f64; 2]) -> bool {
-    a[0] == b[0] && a[1] == b[1]
-}
-
-fn crosses(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
-    let side = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| {
-        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
-    };
-    let d1 = side(a, b, c);
-    let d2 = side(a, b, d);
-    let d3 = side(c, d, a);
-    let d4 = side(c, d, b);
-    ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
-        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
-}
-
-fn inside_triangle(point: [f64; 2], triangle: &[[f64; 2]; 3]) -> bool {
-    let side = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| {
-        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
-    };
-    let a = side(triangle[0], triangle[1], point);
-    let b = side(triangle[1], triangle[2], point);
-    let c = side(triangle[2], triangle[0], point);
-    a >= 0.0 && b >= 0.0 && c >= 0.0
+fn to_v2(ring: &[[f64; 2]]) -> Vec<V2> {
+    ring.iter()
+        .map(|point| V2::new(point[0], point[1]))
+        .collect()
 }
 
 impl Prism {

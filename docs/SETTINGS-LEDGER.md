@@ -53,11 +53,11 @@ Tier n/a — not applicable to a Klipper FDM target (SLA, colour mixing, Bambu f
 ## Where the numbers stand
 
 - settings in the engine's FDM table: **383**
-- applicable to a Klipper FDM target: **364**
-- `applied` in HFW today: **300** (82%)
+- applicable to a Klipper FDM target: **372**
+- `applied` in HFW today: **309** (83%)
 - `partial`: **6**
-- `missing`: **58**
-- `n/a` (excluded with reason): **19**
+- `missing`: **57**
+- `n/a` (excluded with reason): **11**
 - legacy-table names not in the modern table: **214**
 - names Orca profiles use that are not engine settings: **236**
 
@@ -65,10 +65,10 @@ By tier, applicable only:
 
 | Tier | Count |
 |---|---|
-| 0e | 23 |
-| 0m | 15 |
-| 0p | 31 |
-| 1 | 246 |
+| 0e | 24 |
+| 0m | 18 |
+| 0p | 34 |
+| 1 | 247 |
 | 2 | 48 |
 
 Tier 2 is the whole of the hard work; tiers 0e, 0m, 0p and 1 are
@@ -202,12 +202,14 @@ falls to zero.
 | `filament_infill_max_speed` | 1 | applied |  | double | 0. | mm/s | Filament |
 | `filament_max_volumetric_speed` | 1 | applied |  | double | 0. | mm³/s | Filament |
 
-### Hidden (20 settings, 2 missing)
+### Hidden (20 settings, 0 missing)
 
 | Setting | Tier | Status | HFW key | Type | Default | Unit | Location |
 |---|---|---|---|---|---|---|---|
+| `thumbnails_format` | 0e | applied | thumbnails_format — PNG and QOI are the two formats `crates/gcode` can write, and a thumbnail entry that names no format takes this one; JPG and the BTT screen formats are refused by name and the refusal lists the two that work, rather than writing a PNG under a JPG label | EnumWrapper | GCodeThumbnailsFormat::PNG |  | Printer |
 | `filament_vendor` | 0m | applied |  | str | L("(Unknown)") |  | Filament |
 | `printer_model` | 0m | applied |  | str | "" |  | Printer |
+| `printer_technology` | 0m | applied | printer_technology — FFF and FDM are accepted and record nothing, because there is nothing to branch on; SLA and MSLA are refused with the machine's own error, so a resin preset fails loudly instead of slicing as if it were filament | EnumWrapper | PrinterTechnology::SLA |  | Printer |
 | `printer_variant` | 0m | applied |  | str | "" |  | Printer |
 | `default_print` | 0p | applied |  | str | "" |  | Printer |
 | `printer_vendor` | 0p | applied |  | str | "" |  | Printer |
@@ -224,8 +226,6 @@ falls to zero.
 | `extruder_colour` | int | n/a | not surfaced by any UI and not read here | vec<str> | {} |  | Project |
 | `wiping_volumes_matrix` | int | n/a | not surfaced by any UI and not read here | vec<double> | std::vector { 0., 140., 140., 140., 140., 140... |  | Project |
 | `wiping_volumes_use_custom_matrix` | int | n/a | not surfaced by any UI and not read here | bool | false |  | Project |
-| `printer_technology` | n/a | missing |  | EnumWrapper | PrinterTechnology::SLA |  | Printer |
-| `thumbnails_format` | n/a | missing |  | EnumWrapper | GCodeThumbnailsFormat::PNG |  | Printer |
 
 ### Machine Limits (12 settings, 0 missing)
 
@@ -360,7 +360,7 @@ falls to zero.
 | `travel_slope` | 1 | applied |  | double | 0. | ° | Print |
 | `wipe_tower_acceleration` | 1 | missing |  | double | 0. | mm/s² | Print |
 | `avoid_crossing_curled_overhangs` | 2 | applied |  | bool | false |  | Print |
-| `avoid_crossing_perimeters` | 2 | partial | avoid_crossing_perimeters — on by default: the emitter routes the travel itself around the loops — the layer's perimeters are offset both ways by a bead of clearance, and a visibility graph over those offset rings yields a path that holds that clearance from every wall, emitted as one retracted chain of moves. A closed loop keeps the seam the profile chose unless the seam is `nearest`, so routing costs distance and never the seam; only an open path has its entry point moved to save the crossing. Partial because supports and curled overhangs from earlier layers are not obstacles, and a travel whose start or end sits against several nested walls can find no route at all and falls back to the straight move | bool | false |  | Print |
+| `avoid_crossing_perimeters` | 2 | partial | avoid_crossing_perimeters — on by default, and it does two things: the emitter orders a layer's paths by nearest entry, and it routes the travel itself around the loops — each loop offset both ways by a bead of clearance, a visibility graph over those offset rings, and the route emitted as one retracted chain of moves. A closed loop keeps the seam the profile chose unless the seam is `nearest`, so routing costs distance and never the seam. Measured on `fixtures/stress_gear.stl`: 777 travels cross a printed perimeter with the switch off, 757 with it on, so 2.6% of the crossings this part produces are what routing and ordering can remove. What is left is not a bug in the router: a travel that begins inside a closed loop cannot leave it without crossing the loop, and two islands printed one after the other need a route between them that does not exist at that layer. Upstream reduces those by planning the layer as a whole, which this engine does not do yet | bool | false |  | Print |
 | `avoid_crossing_perimeters_max_detour` | 2 | applied | avoid_crossing_perimeters_max_detour — caps both the entry-point choice and the routed travel: a route longer than the straight move plus this budget is refused and the straight move is emitted instead. Zero means no limit, so the shipped profiles route without a ceiling | double | 0.0 | mm | Print |
 
 ### Print_MultiMaterial (27 settings, 23 missing)
@@ -407,7 +407,7 @@ falls to zero.
 |---|---|---|---|---|---|---|---|
 | `output_filename_format` | 1 | applied |  | str | "[input_filename_base].gcode" |  | Print |
 
-### Print_PrecisionSlicing (19 settings, 1 missing)
+### Print_PrecisionSlicing (19 settings, 0 missing)
 
 | Setting | Tier | Status | HFW key | Type | Default | Unit | Location |
 |---|---|---|---|---|---|---|---|
@@ -416,7 +416,7 @@ falls to zero.
 | `gcode_comments` | 1 | applied |  | bool | false |  | Print |
 | `gcode_label_objects` | 1 | applied |  | EnumWrapper | LabelObjectsStyle::Disabled |  | Print |
 | `min_bead_width` | 1 | applied |  | FloatOrPercentage | FloatOrPercentage(Percentage{85.}) | mm | Print |
-| `slicing_mode` | 1 | missing |  | EnumWrapper | SlicingMode::Regular |  | Print |
+| `slicing_mode` | 1 | applied | slicing_mode — `close_holes` fills every void in a layer: the ring set is reduced to the boundaries no other ring contains, so a hole prints over and an island that sat inside one becomes part of the same solid. `even_odd` is the same output as `regular`, and deliberately so: slice assembly already treats a stack of contours by the even-odd rule, so there is no second path to take. Measured on `fixtures/torus.stl`, close_holes prints 914.8 mm of filament against 831.5 mm, and the verifier passes both | EnumWrapper | SlicingMode::Regular |  | Print |
 | `spiral_vase` | 1 | applied |  | bool | false |  | Print |
 | `arc_fitting` | 2 | applied |  | EnumWrapper | ArcFittingType::Disabled |  | Print |
 | `elefant_foot_compensation` | 2 | applied | elefant_foot_compensation — shrinks the first layer's cross-section by the value, on the printed outline, so walls, infill, skin and the brim all follow the compensated layer. The offset is taken on the whole region at once, so a hole smaller than twice the value closes instead of turning inside out. Where the offset merges or opens a feature is decided on a grid of one third of the value (0.02 mm floor), and every vertex is then walked onto the exact offset from the contour it came from | double | 0. | mm | Printer |
@@ -456,7 +456,7 @@ falls to zero.
 | `travel_speed` | 1 | applied |  | double | 130. | mm/s | Print |
 | `travel_speed_z` | 1 | applied |  | double | 0. | mm/s | Print |
 
-### Print_Supports (27 settings, 1 missing)
+### Print_Supports (27 settings, 0 missing)
 
 | Setting | Tier | Status | HFW key | Type | Default | Unit | Location |
 |---|---|---|---|---|---|---|---|
@@ -474,6 +474,7 @@ falls to zero.
 | `support_material_interface_spacing` | 1 | applied |  | double | 0. | mm | Print |
 | `support_material_pattern` | 1 | applied |  | EnumWrapper | SupportMaterialPattern::smpRectilinear |  | Print |
 | `support_material_spacing` | 1 | applied |  | double | 2.5 | mm | Print |
+| `support_material_synchronize_layers` | 1 | applied | support_material_synchronize_layers — the boundaries always coincide: this engine plans one layer schedule for the whole job, support included, so a support layer begins and ends where the object's layer does. The reference only needs the option because a multi-extruder preset can print support at a coarser height than the part it holds up, and this engine has no second schedule to coarsen. The flag is recorded so a profile that asks for it round trips unchanged | bool | false |  | Print |
 | `support_material_threshold` | 1 | applied | support_threshold_angle | int | 0 | ° | Print |
 | `support_material_with_sheath` | 1 | applied |  | bool | true |  | Print |
 | `support_material_xy_spacing` | 1 | applied | support_xy_gap | FloatOrPercentage | FloatOrPercentage(Percentage{50.}) | mm | Print |
@@ -486,7 +487,6 @@ falls to zero.
 | `support_tree_tip_diameter` | 1 | applied | support_tip_diameter | double | 0.8 | mm | Print |
 | `support_tree_top_rate` | 1 | applied |  | Percentage | Percentage{15.} | % | Print |
 | `support_material_style` | 2 | partial | support_style — normal and tree only | EnumWrapper | SupportMaterialStyle::smsGrid |  | Print |
-| `support_material_synchronize_layers` | n/a | missing |  | bool | false |  | Print |
 
 ### Print_WallsPerimeters (22 settings, 0 missing)
 
@@ -515,13 +515,13 @@ falls to zero.
 | `thick_bridges` | 2 | applied |  | bool | true |  | Print |
 | `thin_walls` | 2 | applied |  | bool | true |  | Print |
 
-### Printer_Bed (3 settings, 2 missing)
+### Printer_Bed (3 settings, 0 missing)
 
 | Setting | Tier | Status | HFW key | Type | Default | Unit | Location |
 |---|---|---|---|---|---|---|---|
+| `bed_custom_model` | 0m | applied | bed_custom_model — the mesh is sliced halfway up its height and its largest ring becomes `bed_shape`, so packing uses the outline's box, centring moves a part into the outline and one that does not sit inside it is refused with the vertex count rather than a printed point list. Holes in a bed mesh are not holes in the printable area: `bed_shape` is one polygon, which is the same limit a hand-written outline has | str | "" |  | Printer |
+| `bed_custom_texture` | 0m | applied | bed_custom_texture — recorded in the profile and echoed to the panel, which is the only thing that draws a bed; the engine has no viewport and no surface a texture could change | str | "" |  | Printer |
 | `bed_shape` | 0m | applied |  | vec<Vec2d> | (std::vector<Domain::Vec2d>{{0., 0.}, { 200.,... |  | Printer |
-| `bed_custom_model` | n/a | missing |  | str | "" |  | Printer |
-| `bed_custom_texture` | n/a | missing |  | str | "" |  | Printer |
 
 ### Printer_CustomGCode (11 settings, 1 missing)
 
@@ -539,7 +539,7 @@ falls to zero.
 | `toolchange_gcode` | 0e | missing |  | str | "" |  | Printer |
 | `autoemit_temperature_commands` | 0p | applied |  | bool | true |  | Printer |
 
-### Printer_General (17 settings, 4 missing)
+### Printer_General (17 settings, 3 missing)
 
 | Setting | Tier | Status | HFW key | Type | Default | Unit | Location |
 |---|---|---|---|---|---|---|---|
@@ -555,23 +555,23 @@ falls to zero.
 | `extruder_clearance_radius` | 0m | applied |  | double | 20. | mm | Printer |
 | `max_print_height` | 0m | applied | max_z | double | 200. | mm | Printer |
 | `z_offset` | 0m | applied |  | double | 0. | mm | Printer |
+| `binary_gcode` | 0p | applied | binary_gcode — a profile that sets it writes the bgcode container instead of the text file: the same G-code in a gcode block, the thumbnails in blocks of their own, metadata in INI blocks and every block CRC32-checksummed. Nothing is compressed and nothing is MeatPack-encoded, because the specification allows both values to be 0 and this writer only emits those; a machine that insists on a compressed block is not served yet, which is a size optimisation rather than a second format. The C ABI still returns the text (`hfw_gcode_text`), so today the container is the command line's | bool | false |  | Printer |
+| `stuck_filament_detection` | 0p | applied |  | bool | false |  | Printer |
 | `thumbnails` | 0p | applied |  | str | "" |  | Printer |
 | `use_firmware_retraction` | 0p | applied |  | bool | false |  | Printer |
 | `use_volumetric_e` | 0p | applied |  | bool | false |  | Printer |
-| `binary_gcode` | n/a | missing |  | bool | false |  | Printer |
-| `stuck_filament_detection` | n/a | applied |  | bool | false |  | Printer |
 
 ### Printer_MachineLimits (7 settings, 0 missing)
 
 | Setting | Tier | Status | HFW key | Type | Default | Unit | Location |
 |---|---|---|---|---|---|---|---|
+| `machine_limits_usage` | 0p | applied |  | EnumWrapper | MachineLimitsUsage::TimeEstimateOnly | mm/s | Printer |
 | `machine_max_acceleration_extruding` | 0p | applied |  | vec<double> | std::vector{ 1500., 1250. } | mm/s² | Printer |
 | `machine_max_acceleration_retracting` | 0p | applied |  | vec<double> | std::vector{ 1500., 1250. } | mm/s² | Printer |
 | `machine_max_acceleration_travel` | 0p | applied |  | vec<double> | std::vector{ 1500., 1250. } | mm/s² | Printer |
 | `machine_max_junction_deviation` | 0p | applied |  | vec<double> | std::vector{ 0., 0. } | mm | Printer |
 | `machine_min_extruding_rate` | 0p | applied |  | vec<double> | std::vector{ 0., 0. } | mm/s | Printer |
 | `machine_min_travel_rate` | 0p | applied |  | vec<double> | std::vector{ 0., 0. } | mm/s | Printer |
-| `machine_limits_usage` | n/a | applied |  | EnumWrapper | MachineLimitsUsage::TimeEstimateOnly | mm/s | Printer |
 
 ### Printer_MultipleExtruders (1 settings, 1 missing)
 

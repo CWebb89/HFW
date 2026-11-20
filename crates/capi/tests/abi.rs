@@ -10,7 +10,7 @@ use hfw_capi::{
     hfw_mesh_from_bytes, hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_file, hfw_mesh_new,
     hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_part, hfw_mesh_part_count, hfw_mesh_transform,
     hfw_mesh_triangle_count, hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume,
-    hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free, hfw_plate_in_layer_count,
+    hfw_plate_add, hfw_plate_add_positioned, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free, hfw_plate_in_layer_count,
     hfw_plate_in_layer_get, hfw_plate_marker_count, hfw_plate_marker_get, hfw_plate_metadata_get,
     hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
     hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
@@ -23,7 +23,8 @@ use hfw_capi::{
     hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
     hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
     hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_set_metadata,
-    hfw_plate_slice, hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free, hfw_text_mesh,
+    hfw_plate_slice, hfw_plate_slice_placed, hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free,
+    hfw_text_mesh,
     HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE,
     HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT,
     HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
@@ -42,6 +43,29 @@ fn profile() -> String {
 
 fn c_string(text: &str) -> CString {
     CString::new(text).expect("a path with an interior NUL byte")
+}
+
+/// The X/Y box a file's printed moves cover, in millimetres.
+fn footprint(text: &str) -> (f64, f64, f64, f64) {
+    let mut out = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for line in text.lines() {
+        if !(line.starts_with("G1 ") || line.starts_with("G0 ")) {
+            continue;
+        }
+        let mut x = None;
+        let mut y = None;
+        for word in line.split_whitespace() {
+            if let Some(value) = word.strip_prefix('X').and_then(|v| v.parse::<f64>().ok()) {
+                x = Some(value);
+            } else if let Some(value) = word.strip_prefix('Y').and_then(|v| v.parse::<f64>().ok()) {
+                y = Some(value);
+            }
+        }
+        if let (Some(x), Some(y)) = (x, y) {
+            out = (out.0.min(x), out.1.min(y), out.2.max(x), out.3.max(y));
+        }
+    }
+    out
 }
 
 fn last_error() -> String {
@@ -307,6 +331,52 @@ fn a_plate_object_moves_before_it_is_sliced() {
     assert!(!gcode.is_null(), "slice failed: {}", last_error());
     assert_eq!(unsafe { hfw_gcode_verified(gcode) }, 1);
     unsafe { hfw_gcode_free(gcode) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(mesh) };
+}
+
+#[test]
+fn bare_geometry_is_placed_on_the_bed_by_the_placing_slice() {
+    let path = c_string(&fixture("cube.stl"));
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    assert_ne!(unsafe { hfw_plate_add_positioned(plate, mesh) }, 0);
+    let profile = c_string(&profile());
+
+    let kept = unsafe { hfw_plate_slice(plate, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!kept.is_null(), "slice failed: {}", last_error());
+    let placed = unsafe { hfw_plate_slice_placed(plate, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!placed.is_null(), "placing slice failed: {}", last_error());
+
+    let kept_box = footprint(unsafe { CStr::from_ptr(hfw_gcode_text(kept)) }.to_str().unwrap());
+    let placed_box = footprint(unsafe { CStr::from_ptr(hfw_gcode_text(placed)) }
+        .to_str()
+        .unwrap());
+    assert!(
+        (kept_box.2 - kept_box.0 - (placed_box.2 - placed_box.0)).abs() < 1e-3
+            && (kept_box.3 - kept_box.1 - (placed_box.3 - placed_box.1)).abs() < 1e-3,
+        "the placing slice changed the footprint: {kept_box:?} against {placed_box:?}"
+    );
+    let kept_centre = (
+        0.5 * (kept_box.0 + kept_box.2),
+        0.5 * (kept_box.1 + kept_box.3),
+    );
+    let placed_centre = (
+        0.5 * (placed_box.0 + placed_box.2),
+        0.5 * (placed_box.1 + placed_box.3),
+    );
+    assert!(
+        (kept_centre.0 - 10.0).abs() < 0.5 && (kept_centre.1 - 10.0).abs() < 0.5,
+        "a kept plate printed where it sits: centre {kept_centre:?}"
+    );
+    assert!(
+        (placed_centre.0 - 175.0).abs() < 0.5 && (placed_centre.1 - 175.0).abs() < 0.5,
+        "a placed plate was not centred on the 350 mm bed: centre {placed_centre:?}"
+    );
+    assert_eq!(unsafe { hfw_gcode_verified(placed) }, 1);
+    unsafe { hfw_gcode_free(kept) };
+    unsafe { hfw_gcode_free(placed) };
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(mesh) };
 }

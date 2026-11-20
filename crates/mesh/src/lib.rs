@@ -5,8 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cut;
 mod threemf;
 
+pub use cut::{Cut, CutPlane};
 pub use threemf::{
     archive_parts, from_3mf_reader, from_3mf_text, load_3mf, load_3mf_objects,
     metadata_from_reader, model_part_xml, objects_from_3mf_text, three_mf_metadata, write_archive,

@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 hfw-font = { path = "../font" }
 hfw-geometry = { path = "../geometry" }
+hfw-kernel = { path = "../kernel" }
 hfw-mesh = { path = "../mesh" }
 
 [lints]

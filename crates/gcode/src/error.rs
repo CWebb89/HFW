@@ -73,7 +73,7 @@ impl fmt::Display for GcodeError {
                 outline,
             } => write!(
                 f,
-                "part plus skirt is {width:.1} x {depth:.1} mm and does not sit inside the bed outline {outline} (2 mm safety margin)"
+                "part plus skirt is {width:.1} x {depth:.1} mm and does not sit inside the bed outline: {outline} (2 mm safety margin)"
             ),
             GcodeError::BadSubstitution { pattern, reason } => {
                 write!(f, "gcode_substitutions pattern `{pattern}` is not valid: {reason}")

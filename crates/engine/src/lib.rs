@@ -13,14 +13,13 @@
 use hfw_config::PrinterConfig;
 use hfw_geometry::Contour;
 use hfw_infill::{infill_layer as generate_infill, Combine};
-use hfw_kernel::Region;
 use hfw_slicing::{LayerSchedule, SliceError, SliceLayer};
 use hfw_support::SupportParams;
 use hfw_toolpath::{evaluate, evaluate_full, extruded_volume, PlannedLayer};
 use hfw_walls::BrimSide;
 
 pub use hfw_geometry::{Contour as SliceContour, Point2};
-pub use hfw_kernel::V2;
+pub use hfw_kernel::{Region, V2};
 mod settings_key;
 pub use hfw_infill::{
     infill_layer, InfillParams, InfillParams as InfillSettings, IroningTarget, MaskCache,
@@ -88,6 +87,8 @@ pub struct Settings {
     /// Grows the object and closes its holes when positive, shrinks it and opens
     /// them when negative.
     pub xy_size: f64,
+    /// How this object's cross-sections become printable regions.
+    pub slicing_mode: hfw_config::SliceMode,
     /// Cracks narrower than twice this are filled while slicing, in millimetres.
     ///
     /// Upstream's default is 0.049: a hairline between two facets is an artefact
@@ -194,6 +195,7 @@ impl Settings {
             brim_separation: 0.0,
             elephant_foot: 0.0,
             xy_size: 0.0,
+            slicing_mode: hfw_config::SliceMode::Regular,
             closing_radius: 0.049,
             close_gaps: 2.0,
             resolution: 0.0,
@@ -281,6 +283,7 @@ impl Settings {
         self.elephant_foot = cfg.elefant_foot_compensation;
         self.xy_size = cfg.xy_size_compensation;
         self.closing_radius = cfg.slice_closing_radius;
+        self.slicing_mode = cfg.slicing_mode;
         self.resolution = cfg.resolution;
         if let Some(ip) = self.infill.as_mut() {
             ip.density = cfg.infill_density;
@@ -1985,6 +1988,9 @@ fn compensate_one(
     if settings.closing_radius > 0.0 {
         *region = hfw_walls::close_gaps(region, settings.closing_radius);
     }
+    if settings.slicing_mode == hfw_config::SliceMode::CloseHoles {
+        *region = std::mem::take(region).with_holes_filled();
+    }
     let grow = settings.xy_size
         - if index == 0 {
             settings.elephant_foot
@@ -2052,6 +2058,24 @@ mod tests {
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/sphere.stl");
         let _ = radius;
         Mesh::load_stl(&path).expect("fixture loads")
+    }
+
+    #[test]
+    fn closing_holes_prints_over_the_void_a_torus_has() {
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/torus.stl");
+        let mesh = Mesh::load_stl(&path).expect("fixture loads");
+        let mut settings = Settings::new(0.4, 2);
+        settings.metrics_res = None;
+        let regular = run(&mesh, 0.2, 0.2, &settings).expect("the torus slices");
+        settings.slicing_mode = hfw_config::SliceMode::CloseHoles;
+        let filled = run(&mesh, 0.2, 0.2, &settings).expect("the torus slices closed");
+        let before: f64 = total_length(&regular);
+        let after: f64 = total_length(&filled);
+        assert!(
+            after > 1.05 * before,
+            "filling the hole should print more material: {before:.1} -> {after:.1} mm"
+        );
     }
 
     #[test]

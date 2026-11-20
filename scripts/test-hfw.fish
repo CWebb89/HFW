@@ -424,7 +424,7 @@ python3 tools/gen-settings-gaps.py --check
 or fail 'the gap breakdown is stale'
 
 section 'The settings surface is one document the panel can read'
-python3 -c 'import json; d = json.load(open("crates/config/assets/settings-surface.json")); assert d["surface"] == "hfw-settings"; assert len(d["settings"]) == d["counts"]["settings"]; assert all(row["status"] in d["statuses"] for row in d["settings"]); caps = d["capabilities"]; assert len(caps) >= 10 and len({c["id"] for c in caps}) == len(caps), "the parity backlog is malformed"; assert all(c["state"] in ("unbuilt", "blocked", "excluded") and c["panel"] in ("unavailable", "available") and c["note"] and c["cost"] for c in caps), "a capability is missing its state or its cost"; assert all(c.get("blocked_on") for c in caps if c["state"] in ("blocked", "excluded")), "a blocked capability does not say what it waits on"; assert not {c["id"] for c in caps} & {row["name"] for row in d["settings"]}, "a capability is also a setting"; print("Verified: the surface describes", len(d["settings"]), "settings,", d["counts"]["applied"], "of them applied,", len(caps), "capabilities in the backlog.")'
+python3 -c 'import json; d = json.load(open("crates/config/assets/settings-surface.json")); assert d["surface"] == "hfw-settings"; assert len(d["settings"]) == d["counts"]["settings"]; assert all(row["status"] in d["statuses"] for row in d["settings"]); caps = d["capabilities"]; assert len(caps) >= 10 and len({c["id"] for c in caps}) == len(caps), "the parity backlog is malformed"; assert all(c["state"] in ("unbuilt", "built", "blocked", "excluded") and c["panel"] in ("unavailable", "available") and c["note"] and c["cost"] for c in caps), "a capability is missing its state or its cost"; assert all(c.get("blocked_on") for c in caps if c["state"] in ("blocked", "excluded")), "a blocked capability does not say what it waits on"; assert not {c["id"] for c in caps} & {row["name"] for row in d["settings"]}, "a capability is also a setting"; print("Verified: the surface describes", len(d["settings"]), "settings,", d["counts"]["applied"], "of them applied,", len(caps), "capabilities in the backlog.")'
 or fail 'the settings surface is not valid JSON, or its counts disagree with its rows'
 $bin --settings-surface "$tmp/surface.json" >/dev/null
 or fail 'the command line could not write the settings surface'
@@ -1039,6 +1039,38 @@ test $thumbs -eq 2; or fail "expected two thumbnails, found $thumbs"
 set offgrid (grep -oE 'X[0-9]+\.[0-9]+' "$tmp/emit.gcode" | string replace -r 'X' '' | awk -F. '$2 % 5 != 0' | count)
 test $offgrid -eq 0; or fail "$offgrid coordinates are off the 0.05 mm grid"
 printf 'Verified: two thumbnails, %s progress reports, a hook per layer, no comments, and every X on the 0.05 mm grid.\n' (grep -c 'M73 P' "$tmp/emit.gcode")
+
+section 'Binary G-code: the container carries the same file'
+cp "$tmp/emit.cfg" "$tmp/binary.cfg"
+printf 'binary_gcode = true\n' >>"$tmp/binary.cfg"
+$bin fixtures/cube.stl --profile "$tmp/binary.cfg" --layer-height 0.2 \
+    --out-dir "$tmp/binary" --gcode "$tmp/binary.gcode" >"$tmp/binary.log" 2>&1
+ or fail 'the binary profile failed to slice'
+grep -q 'verify RESULT PASS' "$tmp/binary.log"; or fail 'the binary job failed verification'
+test -s "$tmp/binary.bgcode"; or fail 'no .bgcode file was written'
+test ! -e "$tmp/binary.gcode"; or fail 'a .gcode path was filled with binary bytes'
+test (head -c 4 "$tmp/binary.bgcode") = GCDE; or fail 'the container magic is missing'
+python3 scripts/bgcode-decode.py "$tmp/binary.bgcode" --gcode "$tmp/decoded.gcode" >"$tmp/decoded.log"
+ or fail 'the independent decoder refused a file this engine wrote'
+grep -q 'thumbnail, 64x64 PNG' "$tmp/decoded.log"; or fail 'the PNG thumbnail is not a block'
+grep -q 'thumbnail, 32x32 QOI' "$tmp/decoded.log"; or fail 'the QOI thumbnail is not a block'
+cp "$tmp/emit.gcode" "$tmp/stripped.gcode"
+sed -i '/; thumbnail begin/,/; thumbnail end/d' "$tmp/stripped.gcode"
+cmp -s "$tmp/stripped.gcode" "$tmp/decoded.gcode"
+ or fail 'decoding the container did not give the text the ASCII file holds'
+$bin --check-gcode "$tmp/binary.bgcode" --profile "$tmp/binary.cfg" >"$tmp/binarycheck.log" 2>&1
+ or fail 'the verifier refused the container it wrote'
+grep -q 'binary container: 7 blocks, 2 thumbnail' "$tmp/binarycheck.log"
+ or fail 'the check did not report the container it decoded'
+python3 -c 'import sys; d = bytearray(open(sys.argv[1], "rb").read()); d[len(d) // 2] ^= 1; open(sys.argv[2], "wb").write(bytes(d))' \
+    "$tmp/binary.bgcode" "$tmp/damaged.bgcode"
+ or fail 'the container could not be damaged for the checksum check'
+$bin --check-gcode "$tmp/damaged.bgcode" --profile "$tmp/binary.cfg" >"$tmp/damaged.log" 2>&1
+ and fail 'a corrupted container passed verification'
+grep -q 'fails its checksum' "$tmp/damaged.log"; or fail 'the refusal does not name the checksum'
+set container (wc -c <"$tmp/binary.bgcode")
+set ascii (wc -c <"$tmp/emit.gcode")
+printf 'Verified: a %s-byte container holds the same G-code as the %s-byte ASCII file, thumbnails in blocks, and a flipped byte fails its checksum.\n' $container $ascii
 
 section 'Emission: firmware retraction'
 cp "$tmp/base.cfg" "$tmp/marlin.cfg"
@@ -1760,9 +1792,62 @@ if $bin fixtures/cube.stl --profile "$tmp/tiny.cfg" --layer-height 0.2 \
     --out-dir "$tmp/tiny" --gcode "$tmp/tiny.gcode" >"$tmp/tiny.log" 2>&1
     fail 'a part whose skirt misses the outline was sliced anyway'
 end
-grep -q 'does not sit inside the bed outline 0x0,140x0,140x20,20x20,20x140,0x140' "$tmp/tiny.log"
+grep -q 'does not sit inside the bed outline: 0x0,140x0,140x20,20x20,20x140,0x140' "$tmp/tiny.log"
  or fail 'the outline refusal did not name the outline'
 printf 'Verified: a part that fits the span but not the outline is refused, and the message carries the polygon.\n'
+
+section 'Slicing modes: even-odd is the rule, close-holes fills the void'
+cp "$tmp/base.cfg" "$tmp/close.cfg"
+printf 'slicing_mode = close_holes\n' >>"$tmp/close.cfg"
+$bin fixtures/torus.stl --profile "$tmp/base.cfg" --layer-height 0.2 \
+    --out-dir "$tmp/torus" --gcode "$tmp/torus.gcode" >"$tmp/torus.log" 2>&1
+ or fail 'the torus failed to slice in regular mode'
+$bin fixtures/torus.stl --profile "$tmp/close.cfg" --layer-height 0.2 \
+    --out-dir "$tmp/torus-close" --gcode "$tmp/torus-close.gcode" >"$tmp/torus-close.log" 2>&1
+ or fail 'the torus failed to slice with close_holes'
+grep -q 'verify RESULT PASS' "$tmp/torus-close.log"
+ or fail 'the close-holes torus failed verification'
+set regular_len (string match -r -g 'filament used = ([0-9.]+)' <"$tmp/torus.gcode")[1]
+set closed_len (string match -r -g 'filament used = ([0-9.]+)' <"$tmp/torus-close.gcode")[1]
+test -n "$regular_len" -a -n "$closed_len"; or fail 'no filament total to compare'
+python3 -c "import sys; r,c=float(sys.argv[1]),float(sys.argv[2]); sys.exit(0 if c > 1.05*r else 1)" \
+    "$regular_len" "$closed_len"
+ or fail "close_holes printed $closed_len mm against $regular_len mm: the hole was not filled"
+printf 'Verified: close_holes prints over the torus void, %s mm -> %s mm, and the file verifies.\n' \
+    "$regular_len" "$closed_len"
+
+cp "$tmp/base.cfg" "$tmp/bad-mode.cfg"
+printf 'slicing_mode = spiral\n' >>"$tmp/bad-mode.cfg"
+if $bin fixtures/torus.stl --profile "$tmp/bad-mode.cfg" \
+    --layer-height 0.2 --gcode "$tmp/bad-mode.gcode" >"$tmp/bad-mode.log" 2>&1
+    fail 'an unknown slicing mode was accepted'
+end
+grep -q "'slicing_mode' must be one of regular, even_odd, close_holes, got 'spiral'" "$tmp/bad-mode.log"
+ or fail 'the unknown slicing mode was not refused by name'
+
+section 'A bed taken from a mesh sets the outline placement and refusal use'
+cp "$tmp/base.cfg" "$tmp/meshbed.cfg"
+printf 'bed_custom_model = fixtures/bed_round.stl\n' >>"$tmp/meshbed.cfg"
+$bin fixtures/cube.stl --profile "$tmp/meshbed.cfg" --layer-height 0.2 \
+    --out-dir "$tmp/meshbed" --gcode "$tmp/meshbed.gcode" >"$tmp/meshbed.log" 2>&1
+ or fail 'a part that fits the round bed was refused'
+grep -q 'bed model fixtures/bed_round.stl: printable area 300.0 x 300.0 mm' "$tmp/meshbed.log"
+ or fail 'the bed model was not read'
+grep -q 'outline: 96 vertices' "$tmp/meshbed.log"
+ or fail 'the sliced outline kept the duplicate vertices an unwelded mesh leaves'
+grep -q 'Placed footprint X 135.40..164.60, Y 135.40..164.60' "$tmp/meshbed.log"
+ or fail 'the part was not centred on the bed model'
+grep -q 'verify RESULT PASS' "$tmp/meshbed.log"
+ or fail 'the round-bed file failed verification'
+printf 'Verified: a mesh bed becomes the outline, the part centres on it and the file verifies.\n'
+
+if $bin fixtures/cube.stl --profile "$tmp/meshbed.cfg" --layer-height 1 --scale 12 \
+    --out-dir "$tmp/meshbed-big" --gcode "$tmp/meshbed-big.gcode" >"$tmp/meshbed-big.log" 2>&1
+    fail 'a part whose corners leave the round bed was sliced anyway'
+end
+grep -q 'does not sit inside the bed outline: a 300 x 300 mm area with 96 vertices' "$tmp/meshbed-big.log"
+ or fail 'the round-bed refusal did not summarise the outline'
+printf 'Verified: 240 mm part inside the outline box has all four corners off the disc, and is refused.\n'
 
 section 'A small island prints solid without touching its neighbour'
 cp "$tmp/base.cfg" "$tmp/island.cfg"

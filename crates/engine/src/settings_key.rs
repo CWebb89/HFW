@@ -95,6 +95,7 @@ pub const PER_OBJECT_KEYS: &[&str] = &[
     "perimeter_generator",
     "resolution",
     "slice_closing_radius",
+    "slicing_mode",
     "solid_infill_below_area",
     "solid_infill_every_layers",
     "solid_infill_width",
@@ -162,6 +163,10 @@ impl Settings {
             }
             "slice_closing_radius" => {
                 self.closing_radius = millimetres(value).ok_or_else(|| refused(LENGTH))?
+            }
+            "slicing_mode" => {
+                self.slicing_mode = hfw_config::SliceMode::parse(value)
+                    .ok_or_else(|| refused("regular, even_odd or close_holes"))?
             }
             "resolution" => self.resolution = millimetres(value).ok_or_else(|| refused(LENGTH))?,
             "walls" => {
@@ -394,6 +399,7 @@ impl Settings {
             "elefant_foot_compensation" => decimal(self.elephant_foot),
             "xy_size_compensation" => decimal(self.xy_size),
             "slice_closing_radius" => decimal(self.closing_radius),
+            "slicing_mode" => self.slicing_mode.name().to_owned(),
             "resolution" => decimal(self.resolution),
             "walls" => self.wall.walls.to_string(),
             "line_width" => decimal(self.wall.w),
@@ -602,6 +608,7 @@ mod tests {
         ("extra_perimeters_on_overhangs", "0", "1"),
         ("fill_angle", "45", "0"),
         ("gap_fill_enabled", "1", "0"),
+        ("slicing_mode", "close_holes", "regular"),
         ("infill_anchor", "2", "0"),
         ("infill_anchor_max", "12", "20"),
         ("infill_combination_max_layer_height", "0.4", "0.2"),

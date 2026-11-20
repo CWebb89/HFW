@@ -21,6 +21,7 @@ mod route;
 mod time;
 mod writer;
 
+pub mod bgcode;
 pub mod thumb;
 pub mod verify;
 

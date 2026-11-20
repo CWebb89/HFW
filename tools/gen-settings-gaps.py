@@ -62,6 +62,10 @@ BUCKETS: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = [
         "thumbnails, `gcode_substitutions` as a regular-expression pass, the pause "
         "and colour-change G-code at the heights the caller asks for, and "
         "`between_objects_gcode` between the objects of a sequential plate. "
+        "`binary_gcode` writes the bgcode container from the published byte "
+        "specification: the same text in a gcode block, the thumbnails in blocks of "
+        "their own, metadata in INI blocks and a CRC32 per block, with compression "
+        "and MeatPack left at 0. "
         "`silent_mode` is a host display choice upstream never writes either; it is "
         "kept and recorded in the header.",
         ("gcode_", "thumbnails", "binary_gcode", "remaining_times", "silent_mode",

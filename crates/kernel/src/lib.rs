@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cap;
 pub mod geom;
 pub mod index;
 pub mod offset;

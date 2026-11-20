@@ -17,13 +17,12 @@ is the work a setting cannot express.
 | capability | what closing it costs |
 | --- | --- |
 | **Text embossing and font loading**<br>`docs/TEXT.md` is the design note and the measured state. | part built: `crates/font` reads TrueType outlines and measured against FreeType, `crates/text` extrudes them into a closed prism, `hfw-cli --text` slices one, and `hfw_text_mesh` hands the same prism to the application as a mesh handle to add as a part or a negative volume. Left: kerning and shaping (advances are plain `hmtx` widths), placing text on an object's surface, and CFF-flavoured fonts |
-| **Cut, hollow and split**<br>A cut or hollowed body has to arrive that way today. | a plane-mesh split that caps both halves, and hollowing as an inward shell with a wall thickness and drain holes |
+| **Cut, hollow and split**<br>A cut body arrives as two closed meshes; a hollowed one still has to arrive hollowed. | part built: `Mesh::cut` splits a closed mesh by a plane and caps both halves, capping holes as well, and `Mesh::parts` splits separate shells; both cross the ABI as `hfw_mesh_cut` and `hfw_mesh_part` and are measured by volume and by closed-surface diagnostics. Left: hollowing, an inward shell with a wall thickness and drain holes, which needs a mesh offset the engine does not have — the 2D offsets it does have work per layer, so a hollowed body still has to arrive hollowed |
 | **Nesting arranger**<br>`hfw_plate_arrange` is the shelf packer, and it stays as the fast path. | interlocking 2D packing with rotations and a search; the shelf packer here fills rows and turns a part a quarter turn, so a bed whose parts only fit interlocked is refused |
 | **AMF reading**<br>STL, 3MF and OBJ are read; AMF is not. | an XML model with vertices, triangles and materials — small next to the 3MF reader already here |
 | **Internal bridges**<br>OrcaSlicer's `internal_bridge_*` settings assume it. | detect a bridge whose support is infill rather than air, and give it the bridging flow and direction; the external bridge path exists |
 | **Tiled distance field**<br>A large thin plate at a fine layer height is refused rather than slowed. | tile the per-layer mask so a 200 mm plate at 0.05 mm stops being refused for memory (~450 MB today) |
 | **Vendor G-code placeholders**<br>A real vendor machine preset leaves them literal today and the verifier rejects the file. | substitute the dialect's whole placeholder set (`[bed_temperature_initial_layer_single]`, `{during_print_exhaust_fan_speed_num[current_extruder]}` and the rest) in start and end G-code |
-| **Slicing mode and hole closing**<br>`slicing_mode` is the one unapplied setting in this group. | an even-odd and a close-holes contour policy beside the regular one |
 | **A gated corpus against libslic3r**<br>`scripts/oracle.py` is the fixture-level version of this. | drive libslic3r through its own API on a fixed corpus and diff the toolpaths, rather than comparing exported G-code on six fixtures |
 
 ## Blocked
@@ -42,30 +41,23 @@ is the work a setting cannot express.
 
 ## Settings: libslic3r has them, this engine does not
 
-383 settings are defined by the reference dialect; 70 of
-them are not applied here.
+383 settings are defined by the reference dialect; 372 of them
+are applicable to this machine and 309 of those are applied. The
+11 rows this ledger does not score are colour mixing, purge
+and wipe volumes, which mean nothing to a single-extruder engine.
 
-The ledger declines to score 19 rows as n/a — resin, milling, colour mixing
-and printer identity — so its own unapplied total is 64 rather than 70.
-
-57 of the unapplied settings need hardware this machine does not have: a second
-extruder, or the filament loading path a single-extruder run never uses. The rest, by name:
+63 applicable settings are not applied. 57 of them need hardware
+this machine does not have: a second extruder, or the filament loading path a
+single-extruder run never uses. The rest, by name:
 
 | setting | state | this engine's key |
 | --- | --- | --- |
-| `avoid_crossing_perimeters` | partial | avoid_crossing_perimeters — on by default: the emitter routes the travel itself around the loops — the layer's perimeters are offset both ways by a bead of clearance, and a visibility graph over those offset rings yields a path that holds that clearance from every wall, emitted as one retracted chain of moves. A closed loop keeps the seam the profile chose unless the seam is `nearest`, so routing costs distance and never the seam; only an open path has its entry point moved to save the crossing. Partial because supports and curled overhangs from earlier layers are not obstacles, and a travel whose start or end sits against several nested walls can find no route at all and falls back to the straight move |
-| `bed_custom_model` | missing | — |
-| `bed_custom_texture` | missing | — |
-| `binary_gcode` | missing | — |
+| `avoid_crossing_perimeters` | partial | avoid_crossing_perimeters — on by default, and it does two things: the emitter orders a layer's paths by nearest entry, and it routes the travel itself around the loops — each loop offset both ways by a bead of clearance, a visibility graph over those offset rings, and the route emitted as one retracted chain of moves. A closed loop keeps the seam the profile chose unless the seam is `nearest`, so routing costs distance and never the seam. Measured on `fixtures/stress_gear.stl`: 777 travels cross a printed perimeter with the switch off, 757 with it on, so 2.6% of the crossings this part produces are what routing and ordering can remove. What is left is not a bug in the router: a travel that begins inside a closed loop cannot leave it without crossing the loop, and two islands printed one after the other need a route between them that does not exist at that layer. Upstream reduces those by planning the layer as a whole, which this engine does not do yet |
 | `ensure_vertical_shell_thickness` | partial | ensure_vertical_shell_thickness — disabled narrows the solid window to the immediate neighbours; partial and enabled coincide, because the difference upstream is a void region a coverage grid cannot express |
 | `fill_pattern` | partial | infill_pattern — rectilinear, grid, line, triangle, cubic, gyroid, 3d_honeycomb, concentric, zig-zag, cross-hatch, honeycomb (a flat hexagonal lattice, distinct from the three-dimensional cell) and monotonic are all drawn; lightning is reported rather than printed, because it is a spanning tree grown down from the top surface rather than a fill of the layer's area |
 | `max_volumetric_extrusion_rate_slope_negative` | partial | max_volumetric_extrusion_rate_slope_negative — the same solve and the same gap for the falling direction |
 | `max_volumetric_extrusion_rate_slope_positive` | partial | max_volumetric_extrusion_rate_slope_positive — solved per bead path against the widest section on it, so a widening bead cannot push its own rate past the cap and a narrowing one pays its wide end's price. What is not done is what upstream does: splitting the move, so that two beads of different width meeting at a path boundary cannot step the rate between them. Measured on taper_wall, that boundary step reaches 6.2 mm3/s2 against a 4 mm3/s2 cap |
-| `printer_technology` | missing | — |
-| `slicing_mode` | missing | — |
 | `support_material_style` | partial | support_style — normal and tree only |
-| `support_material_synchronize_layers` | missing | — |
-| `thumbnails_format` | missing | — |
 
 Waiting on hardware — a second extruder, or a filament loading path the single-extruder pipeline never runs: `bed_temperature_extruder`, `cooling_tube_length`, `cooling_tube_retraction`, `enable_pressure_advance_during_ramming`, `extra_loading_move`, `extruder_clearance_height`, `extruder_offset`, `filament_change_time`, `filament_cooling_final_speed`, `filament_cooling_initial_speed`, `filament_cooling_moves`, `filament_loading_speed`, `filament_loading_speed_start`, `filament_minimal_purge_on_wipe_tower`, `filament_multitool_ramming`, `filament_multitool_ramming_flow`, `filament_multitool_ramming_volume`, `filament_purge_multiplier`, `filament_ramming_initial_delay`, `filament_ramming_parameters`, `filament_ramming_temperature_delta`, `filament_stamping_distance`, `filament_stamping_loading_speed`, `filament_toolchange_delay`, `filament_unloading_speed`, `filament_unloading_speed_start`, `high_current_on_filament_swap`, `infill_extruder`, `interlocking_beam`, `interlocking_beam_layer_count`, `interlocking_beam_width`, `interlocking_boundary_avoidance`, `interlocking_depth`, `interlocking_orientation`, `multimaterial_purging`, `ooze_prevention`, `parking_pos_retraction`, `perimeter_extruder`, `retract_length_toolchange`, `retract_restart_extra_toolchange`, `single_extruder_multi_material`, `solid_infill_extruder`, `standby_temperature_delta`, `support_material_extruder`, `support_material_interface_extruder`, `toolchange_gcode`, `toolchange_ordering`, `wipe_tower`, `wipe_tower_acceleration`, `wipe_tower_bridging`, `wipe_tower_brim_width`, `wipe_tower_cone_angle`, `wipe_tower_extra_flow`, `wipe_tower_extra_spacing`, `wipe_tower_extruder`, `wipe_tower_no_sparse_layers`, `wipe_tower_width`.
 

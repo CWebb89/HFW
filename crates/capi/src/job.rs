@@ -181,7 +181,7 @@ fn run(
         state.progress.done = 0;
         state.progress.total = job.layers.len();
     }
-    let gcode = write_job(&job, &cfg).map_err(Outcome::Failed)?;
+    let gcode = write_job(&job, &cfg, true).map_err(Outcome::Failed)?;
     {
         let mut state = state.lock();
         state.progress.done = state.progress.total;

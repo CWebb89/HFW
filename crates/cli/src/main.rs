@@ -164,7 +164,10 @@ Printer:
                                 change use the profile's own commands.
   --gcode <path>              Emit G-code for the whole job (needs --profile,
                               plans every layer, then verifies the result).
-  --check-gcode <path>        Verify an existing G-code file and exit.
+                              A profile with `binary_gcode` writes the bgcode
+                              container instead, retitling a `.gcode` path.
+  --check-gcode <path>        Verify an existing G-code file and exit; a bgcode
+                              container is decoded first.
 
 Evaluation:
   --every <n>                 Plan walls on every Nth layer, plus the last.
@@ -923,6 +926,11 @@ fn run_cli() -> Result<(), String> {
         o.apply_profile(&config);
     }
     o.apply_overrides();
+    if let Some(cfg) = o.profile_config.as_mut() {
+        if !cfg.bed_custom_model.trim().is_empty() {
+            apply_bed_model(cfg)?;
+        }
+    }
     if let Some(height) = o.gantry_height {
         if let Some(cfg) = o.profile_config.as_mut() {
             cfg.gantry_height = height;
@@ -1066,8 +1074,7 @@ fn run_plate(o: &Options, path: &Path) -> Result<(), String> {
     let layer_height = o
         .layer_height
         .ok_or_else(|| "--plate needs --profile or --layer-height".to_owned())?;
-    let first_layer_height = o.first_layer_height.unwrap_or(layer_height);
-    let bytes =
+    let first_layer_height = o.first_layer_height.unwrap_or(layer_height);    let bytes =
         fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
     let plate = hfw_plate::Plate::from_project(&bytes, o.settings.clone())
         .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -1649,6 +1656,107 @@ fn arrange_plate(parts: &mut [PlatePart], o: &Options) -> Result<(), String> {
     Ok(())
 }
 
+/// Replaces the profile's bed with the outline of the mesh `bed_custom_model` names.
+///
+/// The outline is the bed's own cross-section halfway up its height, taken as the
+/// largest ring so that a bed with a bolt hole in it reads as the shape around the
+/// hole. `bed_shape` then carries it, which is the same route a profile spells out a
+/// round or L-shaped bed by hand: packing uses its bounding box, centring moves the
+/// part into the outline, and a part that does not sit inside it is refused by name.
+///
+/// A relative path is resolved against the working directory, where model paths
+/// already resolve from.
+fn apply_bed_model(cfg: &mut PrinterConfig) -> Result<(), String> {
+    let named = cfg.bed_custom_model.trim().to_owned();
+    let mesh = Mesh::load_model(Path::new(&named))
+        .map_err(|error| format!("bed_custom_model {named}: {error}"))?;
+    let (min_x, min_y, max_x, max_y) = mesh
+        .xy_bounds_mm()
+        .ok_or_else(|| format!("bed_custom_model {named}: the mesh has no vertices"))?;
+    let (bottom_nm, top_nm) = mesh
+        .z_bounds()
+        .ok_or_else(|| format!("bed_custom_model {named}: the mesh has no height"))?;
+    let (bottom_z, top_z) = (bottom_nm as f64 / 1_000_000.0, top_nm as f64 / 1_000_000.0);
+    if top_z <= bottom_z {
+        return Err(format!(
+            "bed_custom_model {named}: the mesh is flat, so it has no cross-section to print on"
+        ));
+    }
+    let height = bottom_z + (top_z - bottom_z) / 2.0;
+    let (_, region) =
+        slice_plane(&mesh, height).map_err(|error| format!("bed_custom_model {named}: {error}"))?;
+    let outer = region
+        .rings
+        .iter()
+        .max_by(|a, b| ring_area(a).abs().total_cmp(&ring_area(b).abs()))
+        .ok_or_else(|| {
+            format!("bed_custom_model {named}: nothing to print on at {height:.2} mm")
+        })?;
+    if outer.len() < 3 {
+        return Err(format!(
+            "bed_custom_model {named}: the cross-section at {height:.2} mm is not an area"
+        ));
+    }
+    let ring = collapse_collinear(outer);
+    if ring.len() < 3 {
+        return Err(format!(
+            "bed_custom_model {named}: the cross-section at {height:.2} mm has no area"
+        ));
+    }
+    cfg.bed_shape = ring
+        .iter()
+        .map(|point| (point.x - min_x, point.y - min_y))
+        .collect();
+    cfg.bed_x = max_x - min_x;
+    cfg.bed_y = max_y - min_y;
+    outln!(
+        "bed model {named}: printable area {:.1} x {:.1} mm, print bed origin at the mesh's lower corner",
+        cfg.bed_x,
+        cfg.bed_y
+    );
+    outln!(
+        "  outline: {} vertices, {:.0} mm^2",
+        cfg.bed_shape.len(),
+        ring_area(&ring).abs()
+    );
+    Ok(())
+}
+
+/// Drops the vertices a slice leaves in the middle of a straight edge.
+///
+/// An unwelded mesh slices into a ring with a vertex per face rather than per corner,
+/// which spells the same outline with twice the points. Collinear points carry no
+/// shape, so they go; what is left is the polygon a profile would have written.
+fn collapse_collinear(ring: &[V2]) -> Vec<V2> {
+    let mut out: Vec<V2> = Vec::with_capacity(ring.len());
+    for (index, point) in ring.iter().enumerate() {
+        let previous = ring[(index + ring.len() - 1) % ring.len()];
+        let next = ring[(index + 1) % ring.len()];
+        let ax = point.x - previous.x;
+        let ay = point.y - previous.y;
+        let bx = next.x - point.x;
+        let by = next.y - point.y;
+        let cross = ax * by - ay * bx;
+        let scale = (ax * ax + ay * ay).sqrt() * (bx * bx + by * by).sqrt();
+        if scale > 0.0 && cross.abs() / scale < 1e-6 {
+            continue;
+        }
+        out.push(*point);
+    }
+    out
+}
+
+/// Signed area of a ring, in square millimetres.
+fn ring_area(ring: &[V2]) -> f64 {
+    let mut total = 0.0;
+    for index in 0..ring.len() {
+        let a = ring[index];
+        let b = ring[(index + 1) % ring.len()];
+        total += a.x * b.y - b.x * a.y;
+    }
+    total / 2.0
+}
+
 /// Labels every planned path with the object it belongs to.
 ///
 /// The engine slices the plate as one body, so object identity has to be put back
@@ -1802,8 +1910,25 @@ fn run_check(o: &Options, path: &PathBuf) -> Result<(), String> {
         .profile_config
         .as_ref()
         .ok_or_else(|| "--check-gcode needs --profile".to_owned())?;
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let bytes =
+        fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let text = if bytes.starts_with(&hfw_gcode::bgcode::MAGIC) {
+        let decoded = hfw_gcode::bgcode::decode(&bytes)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        outln!(
+            "  binary container: {} blocks, {} thumbnail(s)",
+            decoded.blocks,
+            decoded.thumbnails.len()
+        );
+        decoded.text
+    } else {
+        String::from_utf8(bytes).map_err(|_| {
+            format!(
+                "{} is neither text G-code nor a bgcode container",
+                path.display()
+            )
+        })?
+    };
     let report = hfw_gcode::verify(&text, cfg);
     outln!("Checked {} against profile '{}'.", path.display(), cfg.name);
     outln!(
@@ -2173,6 +2298,13 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
     if o.settings.every != 1 {
         return Err("--gcode needs every layer planned; drop --every".to_owned());
     }
+    if cfg.binary_gcode && !cfg.post_process.trim().is_empty() {
+        return Err(
+            "binary_gcode and post_process cannot both apply: a post-processing command \
+                      rewrites the text file that the container replaces"
+                .to_owned(),
+        );
+    }
     let object = o
         .plate
         .as_deref()
@@ -2207,13 +2339,23 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
             );
         }
     }
-    let path = output_path(cfg, o, path)?;
-    fs::write(&path, &written.text)
-        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
-    run_post_process(cfg, &path)?;
+    let path = binary_path(cfg, output_path(cfg, o, path)?)?;
+    if cfg.binary_gcode {
+        fs::write(&path, hfw_gcode::bgcode::encode(&written, cfg))
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    } else {
+        fs::write(&path, &written.text)
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+        run_post_process(cfg, &path)?;
+    }
     let s = &written.stats;
     outln!(
-        "G-code: {} layers, {:.1} mm filament ({:.2} g, {:.0} mm^3), estimated {:.1} min, {:.0} mm travel, {} retractions.",
+        "{}: {} layers, {:.1} mm filament ({:.2} g, {:.0} mm^3), estimated {:.1} min, {:.0} mm travel, {} retractions.",
+        if cfg.binary_gcode {
+            "Binary G-code"
+        } else {
+            "G-code"
+        },
         s.layers,
         s.filament_mm,
         s.filament_g,
@@ -2222,16 +2364,27 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
         s.travel_mm,
         s.retractions
     );
-    outln!(
-        "Placed footprint X {:.2}..{:.2}, Y {:.2}..{:.2}, top Z {:.2} on a {} x {} bed.",
-        s.bbox_min.x,
-        s.bbox_max.x,
-        s.bbox_min.y,
-        s.bbox_max.y,
-        s.top_z,
-        cfg.bed_x,
-        cfg.bed_y
-    );
+    let bed_named = cfg.bed_custom_model.trim();
+    match bed_named.is_empty() {
+        true => outln!(
+            "Placed footprint X {:.2}..{:.2}, Y {:.2}..{:.2}, top Z {:.2} on a {} x {} bed.",
+            s.bbox_min.x,
+            s.bbox_max.x,
+            s.bbox_min.y,
+            s.bbox_max.y,
+            s.top_z,
+            cfg.bed_x,
+            cfg.bed_y
+        ),
+        false => outln!(
+            "Placed footprint X {:.2}..{:.2}, Y {:.2}..{:.2}, top Z {:.2} on the bed model {bed_named}.",
+            s.bbox_min.x,
+            s.bbox_max.x,
+            s.bbox_min.y,
+            s.bbox_max.y,
+            s.top_z
+        ),
+    }
     let report = hfw_gcode::verify(&written.text, cfg);
     for finding in cfg.audit() {
         outln!("  audit: {}", finding.line());
@@ -2287,6 +2440,22 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
 /// expected to hunt for the file it asked for. A format still holding a
 /// placeholder this engine cannot fill keeps the caller's name instead of
 /// writing braces into a path.
+/// The path a binary container is written to.
+///
+/// `binary_gcode` says what the file *is*, so a path that names a text file is
+/// retitled rather than filled with bytes: a `.gcode` that a viewer opens as
+/// text must hold text.
+fn binary_path(cfg: &PrinterConfig, path: PathBuf) -> Result<PathBuf, String> {
+    let names_text = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gcode"));
+    if cfg.binary_gcode && names_text {
+        return Ok(path.with_extension("bgcode"));
+    }
+    Ok(path)
+}
+
 fn output_path(cfg: &PrinterConfig, o: &Options, asked: &Path) -> Result<PathBuf, String> {
     let format = cfg.output_filename_format.trim();
     let named = asked
@@ -2564,4 +2733,33 @@ fn print_metrics(m: &Metrics) {
         "  width {:.3}..{:.3} mm, violation {:.4} of length, {:.4} mm^2 of transverse variation per mm",
         m.min_width, m.max_width, m.width_violation, m.width_tv_per_mm
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_bed() -> PrinterConfig {
+        let mut cfg = PrinterConfig {
+            bed_custom_model: format!(
+                "{}/../../fixtures/bed_round.stl",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+            ..PrinterConfig::default()
+        };
+        apply_bed_model(&mut cfg).expect("the fixture loads");
+        cfg
+    }
+
+    #[test]
+    fn the_round_bed_becomes_the_profile_outline() {
+        let cfg = round_bed();
+        assert!(cfg.bed_shape.len() > 32, "the disc kept its facets");
+        assert!((cfg.bed_x - 300.0).abs() < 0.01, "span {}", cfg.bed_x);
+        assert!(cfg.bed_contains(175.0, 175.0), "the centre is bed");
+        assert!(
+            !cfg.bed_contains(30.0, 30.0),
+            "a corner inside the outline's box is off the disc"
+        );
+    }
 }

@@ -916,7 +916,7 @@ pub const PARTIAL: &[(&str, &str)] = &[
     ),
 ];
 
-/// Key names this crate's own profiles use (317), accepted as-is.
+/// Key names this crate's own profiles use (324), accepted as-is.
 pub const NATIVE: &[&str] = &[
     "arc_fitting",
     "arc_fitting_tolerance",
@@ -927,12 +927,15 @@ pub const NATIVE: &[&str] = &[
     "avoid_crossing_curled_overhangs",
     "avoid_crossing_perimeters",
     "avoid_crossing_perimeters_max_detour",
+    "bed_custom_model",
+    "bed_custom_texture",
     "bed_shape",
     "bed_temp",
     "bed_x",
     "bed_y",
     "before_layer_gcode",
     "between_objects_gcode",
+    "binary_gcode",
     "bottom_fill_pattern",
     "bottom_layers",
     "bottom_solid_min_thickness",
@@ -1121,6 +1124,7 @@ pub const NATIVE: &[&str] = &[
     "print_sequence",
     "printer_model",
     "printer_notes",
+    "printer_technology",
     "printer_variant",
     "printer_vendor",
     "raft_contact_distance",
@@ -1153,6 +1157,7 @@ pub const NATIVE: &[&str] = &[
     "skirt_height",
     "skirt_loops",
     "slice_closing_radius",
+    "slicing_mode",
     "slow_down_layer_time",
     "slow_down_min_speed",
     "solid_accel",
@@ -1187,6 +1192,7 @@ pub const NATIVE: &[&str] = &[
     "support_material_interface_spacing",
     "support_material_pattern",
     "support_material_spacing",
+    "support_material_synchronize_layers",
     "support_material_with_sheath",
     "support_max_branch_diameter",
     "support_min_area",
@@ -1206,6 +1212,7 @@ pub const NATIVE: &[&str] = &[
     "thin_speed",
     "thin_walls",
     "thumbnails",
+    "thumbnails_format",
     "top_fill_pattern",
     "top_infill_width",
     "top_layers",

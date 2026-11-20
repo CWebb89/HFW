@@ -97,9 +97,10 @@ mod tests {
         );
         let listed = text.matches("\"cost\":").count();
         assert!(listed >= 10, "only {listed} capabilities in the backlog");
-        let states = text.matches("\"state\": \"unbuilt\"").count()
-            + text.matches("\"state\": \"blocked\"").count()
-            + text.matches("\"state\": \"excluded\"").count();
+        let states = ["unbuilt", "built", "blocked", "excluded"]
+            .iter()
+            .map(|state| text.matches(&format!("\"state\": \"{state}\"")).count())
+            .sum::<usize>();
         assert_eq!(
             states, listed,
             "{listed} capabilities, {states} with a state"

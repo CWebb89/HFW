@@ -188,6 +188,12 @@ pub struct Gcode {
     pub text: String,
     /// Totals for that file.
     pub stats: GcodeStats,
+    /// Encoded thumbnails, in the order the profile asked for them.
+    ///
+    /// Present whether or not `text` carries them: the comment block is written
+    /// for an ASCII file, and a binary file puts the same bytes in their own
+    /// blocks instead of base64 in the header.
+    pub thumbnails: Vec<crate::thumb::Image>,
 }
 
 /// Axis-aligned extent of a planned job.
@@ -2158,7 +2164,7 @@ fn check_fit(extent: ModelExtent, cfg: &PrinterConfig) -> Result<(), GcodeError>
             return Err(GcodeError::OutsideBedShape {
                 width,
                 depth,
-                outline: cfg.bed_shape_text(),
+                outline: cfg.bed_shape_summary(),
             });
         }
     }
@@ -3821,6 +3827,7 @@ pub fn generate_with_extras(
     for finding in cfg.audit() {
         let _ = writeln!(head, "; AUDIT: {}", finding.line());
     }
+    let mut thumbnails: Vec<crate::thumb::Image> = Vec::new();
     if !cfg.thumbnails.is_empty() {
         let specs: Vec<crate::thumb::Spec> = cfg
             .thumbnails
@@ -3828,10 +3835,9 @@ pub fn generate_with_extras(
             .map(|t| crate::thumb::Spec {
                 width: t.width,
                 height: t.height,
-                format: if t.png {
-                    crate::thumb::Format::Png
-                } else {
-                    crate::thumb::Format::Qoi
+                format: match t.format.unwrap_or(cfg.thumbnails_format) {
+                    hfw_config::ThumbnailFormat::Png => crate::thumb::Format::Png,
+                    hfw_config::ThumbnailFormat::Qoi => crate::thumb::Format::Qoi,
                 },
             })
             .collect();
@@ -3842,12 +3848,16 @@ pub fn generate_with_extras(
             stats.bbox_max.x.max(stats.bbox_min.x) + margin,
             stats.bbox_max.y.max(stats.bbox_min.y) + margin,
         );
-        head.push_str(&crate::thumb::render(&w.segs, &specs, extent));
+        thumbnails = crate::thumb::payloads(&w.segs, &specs, extent);
+        if !cfg.binary_gcode {
+            head.push_str(&crate::thumb::comment_block(&thumbnails));
+        }
     }
     let substituted = substitute(&format!("{head}{}", w.out), cfg)?;
     Ok(Gcode {
         text: substituted,
         stats,
+        thumbnails,
     })
 }
 

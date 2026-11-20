@@ -273,9 +273,23 @@ fn bounds_from(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> HfwBound
 }
 
 /// Writes a planned job to a file, and asks the independent verifier about it.
-pub(crate) fn write_job(job: &Job, profile: &PrinterConfig) -> Result<HfwGcode, String> {
+///
+/// The text form is the ABI's: `hfw_gcode_text` hands the caller a string, so a
+/// profile that asks for the binary container is honoured by the command line and
+/// not here, where there would be no text to return and no thumbnails in it.
+///
+/// `positioned` is what the command line calls `--place`, inverted: a positioned
+/// job prints where the document put it, and an unpositioned one is laid on the
+/// bed the profile describes first, which is the only thing that centres a plate
+/// that arrived as bare geometry.
+pub(crate) fn write_job(
+    job: &Job,
+    profile: &PrinterConfig,
+    positioned: bool,
+) -> Result<HfwGcode, String> {
     let mut write_cfg = profile.clone();
-    write_cfg.keep_position = true;
+    write_cfg.keep_position = positioned;
+    write_cfg.binary_gcode = false;
     let written = hfw_gcode::generate_with_extras(
         &job.layers,
         &write_cfg,
@@ -332,7 +346,7 @@ fn slice_meshes(
         .collect();
     let job = hfw_plate::slice_placed(objects, first, layer, order_of(&cfg))
         .map_err(|error| error.to_string())?;
-    write_job(&job, &cfg)
+    write_job(&job, &cfg, true)
 }
 
 /// Plans the plate the way the command line would, without writing G-code.
@@ -345,6 +359,17 @@ fn plan_plate(
     let cfg = PrinterConfig::load(Path::new(profile)).map_err(|error| error.to_string())?;
     let mut settings = plate.settings().clone();
     settings.apply_printer(&cfg);
+    // The command line finishes the infill geometry from the width it ended up with,
+    // after every option has had its say, and nothing else writes G-code this
+    // application prints. Doing it here as well is what makes a slice through the
+    // library the same file as a slice through the command line: without it the skin
+    // resolution and the overlap keep the profile's own numbers, and the two differ
+    // by a seam's worth of toolpath on every layer.
+    if let Some(infill) = settings.infill.as_mut() {
+        infill.overlap = 0.1 * infill.width;
+        infill.skin_res = infill.width / 4.0;
+        infill.step = infill.width / 4.0;
+    }
     let (first, layer) = heights_of(&cfg, first_layer_height, layer_height);
     let job = plate
         .slice_using(&settings, first, layer, order_of(&cfg))
@@ -357,9 +382,10 @@ fn slice_document(
     profile: &str,
     first_layer_height: f64,
     layer_height: f64,
+    positioned: bool,
 ) -> Result<HfwGcode, String> {
     let (job, cfg) = plan_plate(plate, profile, first_layer_height, layer_height)?;
-    write_job(&job, &cfg)
+    write_job(&job, &cfg, positioned)
 }
 
 /// Returns the version of the surface this library exports.
@@ -2162,8 +2188,50 @@ pub unsafe extern "C" fn hfw_plate_slice(
     let build = || -> Result<*mut HfwGcode, String> {
         let plate = unsafe { plate_of(plate) }?;
         let profile = unsafe { text_of(profile, "profile") }?;
-        slice_document(&plate.plate, &profile, first_layer_height, layer_height)
-            .map(|gcode| Box::into_raw(Box::new(gcode)))
+        slice_document(
+            &plate.plate,
+            &profile,
+            first_layer_height,
+            layer_height,
+            true,
+        )
+        .map(|gcode| Box::into_raw(Box::new(gcode)))
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Slices the plate and places it on the bed before writing it.
+///
+/// The same call as [`hfw_plate_slice`], except that the plate is laid on the bed
+/// the profile describes instead of printed where it sits: the file keeps the
+/// plate's own coordinates in that call and this one moves it, which is what
+/// `hfw-cli --place` does. A plate that came from a document was placed by whoever
+/// laid it out and wants [`hfw_plate_slice`]; bare geometry with no document
+/// around it has no position to keep, and wants this.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `profile` must be a NUL-terminated string. The
+/// returned handle must be released with [`hfw_gcode_free`], and never used after
+/// it.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_slice_placed(
+    plate: *const HfwPlate,
+    profile: *const c_char,
+    first_layer_height: f64,
+    layer_height: f64,
+) -> *mut HfwGcode {
+    let build = || -> Result<*mut HfwGcode, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let profile = unsafe { text_of(profile, "profile") }?;
+        slice_document(
+            &plate.plate,
+            &profile,
+            first_layer_height,
+            layer_height,
+            false,
+        )
+        .map(|gcode| Box::into_raw(Box::new(gcode)))
     };
     report(build(), ptr::null_mut())
 }

@@ -37,22 +37,54 @@ pub struct Spec {
     pub format: Format,
 }
 
-/// Renders every requested thumbnail as one `; thumbnail` comment block.
-pub fn render(segments: &[Segment], specs: &[Spec], extent: (f64, f64, f64, f64)) -> String {
+/// One encoded thumbnail.
+///
+/// The bytes are what a viewer draws: a PNG, or the QOI stream. A header
+/// comment carries them base64-encoded; a binary G-code block carries them as
+/// they are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Image {
+    /// Image width in pixels.
+    pub width: usize,
+    /// Image height in pixels.
+    pub height: usize,
+    /// Encoding of `bytes`.
+    pub format: Format,
+    /// The encoded image.
+    pub bytes: Vec<u8>,
+}
+
+/// Encodes every requested thumbnail, in the order it was asked for.
+pub fn payloads(segments: &[Segment], specs: &[Spec], extent: (f64, f64, f64, f64)) -> Vec<Image> {
+    specs
+        .iter()
+        .map(|spec| {
+            let pixels = raster(segments, spec, extent);
+            let bytes = match spec.format {
+                Format::Png => png(&pixels, spec),
+                Format::Qoi => qoi(&pixels, spec),
+            };
+            Image {
+                width: spec.width,
+                height: spec.height,
+                format: spec.format,
+                bytes,
+            }
+        })
+        .collect()
+}
+
+/// Renders encoded images as one `; thumbnail` comment block.
+pub fn comment_block(images: &[Image]) -> String {
     let mut out = String::new();
-    for spec in specs {
-        let pixels = raster(segments, spec, extent);
-        let encoded = match spec.format {
-            Format::Png => png(&pixels, spec),
-            Format::Qoi => qoi(&pixels, spec),
-        };
+    for image in images {
         out.push_str(&format!(
             "; thumbnail begin {}x{} {}\n",
-            spec.width,
-            spec.height,
-            encoded.len()
+            image.width,
+            image.height,
+            image.bytes.len()
         ));
-        let text = base64(&encoded);
+        let text = base64(&image.bytes);
         for chunk in text.as_bytes().chunks(78) {
             out.push_str("; ");
             out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
@@ -115,7 +147,7 @@ fn raster(segments: &[Segment], spec: &Spec, extent: (f64, f64, f64, f64)) -> Ve
     pix
 }
 
-fn crc32(data: &[u8]) -> u32 {
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (i, slot) in table.iter_mut().enumerate() {
         let mut c = i as u32;

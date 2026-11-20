@@ -23,6 +23,7 @@ use std::ops::Range;
 
 mod cmap;
 mod glyf;
+mod kern;
 mod sfnt;
 
 pub use glyf::{Contour, Outline};
@@ -109,6 +110,7 @@ pub struct Face {
     long_loca: bool,
     long_metrics: u16,
     advances: Vec<u16>,
+    kerning: kern::Kerning,
     cmap: cmap::CharMap,
     face_index: u32,
 }
@@ -149,8 +151,10 @@ impl Face {
             advances.push(hmtx.u16_at(metric * 4)?);
         }
         let cmap = cmap::CharMap::parse(table(b"cmap")?)?;
+        let kerning = kern::Kerning::parse(table(b"GPOS").ok(), table(b"kern").ok())?;
         Ok(Self {
             cmap,
+            kerning,
             bytes: bytes.to_vec(),
             tables,
             units_per_em,
@@ -202,6 +206,20 @@ impl Face {
             .map(|advance| f64::from(advance) / f64::from(self.units_per_em) * size_mm)
     }
 
+    /// The kerning between two glyphs in font units, negative when they tighten.
+    ///
+    /// Read from the `kern` feature in GPOS when the font has one, and from the legacy
+    /// `kern` table otherwise; a pair the font does not mention is zero, which is most
+    /// of them.
+    pub fn kerning(&self, left: u16, right: u16) -> i16 {
+        self.kerning.pair(left, right)
+    }
+
+    /// The kerning between two glyphs in millimetres at the given size.
+    pub fn kerning_mm(&self, left: u16, right: u16, size_mm: f64) -> f64 {
+        f64::from(self.kerning(left, right)) / f64::from(self.units_per_em) * size_mm
+    }
+
     /// A table by tag, for a caller that needs raw bytes.
     pub fn table(&self, tag: [u8; 4]) -> Option<&[u8]> {
         let range = self.tables.get(&tag)?;
@@ -241,8 +259,11 @@ impl Face {
         Ok(outline)
     }
 
-    /// The outline of a string, laid out left to right with advances applied. Returns the
-    /// contours and the total advance in millimetres.
+    /// The outline of a string, laid out left to right with advances and pair kerning
+    /// applied. Returns the contours and the total advance in millimetres.
+    ///
+    /// Kerning is applied between glyphs that end up next to each other in the run, so a
+    /// character the font has no glyph for does not break the pair around it.
     pub fn layout_mm(
         &self,
         text: &str,
@@ -251,14 +272,19 @@ impl Face {
     ) -> Result<(Outline, f64), FontError> {
         let mut placed = Outline::default();
         let mut pen = 0.0_f64;
+        let mut previous: Option<u16> = None;
         for character in text.chars() {
             let Some(glyph) = self.glyph_index(character) else {
                 continue;
             };
+            if let Some(previous) = previous {
+                pen += self.kerning_mm(previous, glyph, size_mm);
+            }
             let mut outline = self.outline_mm(glyph, size_mm, tolerance_mm)?;
             outline.shift(pen, 0.0);
             placed.append(outline);
             pen += self.advance_mm(glyph, size_mm).unwrap_or(0.0);
+            previous = Some(glyph);
         }
         Ok((placed, pen))
     }

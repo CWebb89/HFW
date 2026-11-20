@@ -72,6 +72,7 @@ pub fn native_for(name: &str) -> Option<&'static str> {
         "hot_plate_temp" => Some("bed_temp"),
         "hot_plate_temp_initial_layer" => Some("first_layer_bed_temp"),
         "idle_temperature" => Some("idle_temp"),
+        "independent_support_layer_height" => Some("support_material_synchronize_layers"),
         "infill_combination" => Some("automatic_infill_combination"),
         "infill_direction" => Some("fill_angle"),
         "infill_extrusion_width" => Some("infill_width"),

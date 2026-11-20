@@ -111,6 +111,92 @@ fn advances_and_ink_bounds_agree_with_freetype() {
     );
 }
 
+const KERNED_FONTS: [&str; 4] = [
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSerif-Regular.ttf",
+    "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+    "/usr/share/fonts/sddm-astronaut/KogniGear.ttf",
+];
+
+const KERNED_TEXT: &str = "AVToYo";
+
+#[test]
+fn pair_kerning_agrees_with_the_systems_shaper() {
+    let Some(python) = python() else {
+        eprintln!("skipped: no .venv/bin/python with Pillow");
+        return;
+    };
+    let script = root().join("scripts/font-oracle.py");
+    let mut checked = 0_usize;
+    for font in KERNED_FONTS
+        .iter()
+        .copied()
+        .filter(|path| Path::new(path).exists())
+    {
+        let output = Command::new(&python)
+            .arg(&script)
+            .arg(font)
+            .arg(KERNED_TEXT)
+            .arg(format!("{SIZE_MM}"))
+            .output()
+            .expect("the oracle runs");
+        assert!(
+            output.status.success(),
+            "the oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).expect("the oracle prints UTF-8");
+        let oracle = json::parse(&text).unwrap_or_else(|| panic!("the oracle's JSON: {text}"));
+
+        let face =
+            Face::parse(&std::fs::read(font).expect("the font reads"), 0).expect("it parses");
+        let mut worst = 0.0_f64;
+        let mut kerned = 0_usize;
+        for row in oracle.index("pairs").iter() {
+            let left = row.index("left").as_str().expect("a character");
+            let right = row.index("right").as_str().expect("a character");
+            let left = face
+                .glyph_index(left.chars().next().expect("one"))
+                .expect("mapped");
+            let right = face
+                .glyph_index(right.chars().next().expect("one"))
+                .expect("mapped");
+            let ours = face.kerning_mm(left, right, SIZE_MM);
+            let theirs = row.index("kern").as_f64().expect("a kern");
+            if theirs.abs() > 1e-6 {
+                kerned += 1;
+            }
+            worst = worst.max((ours - theirs).abs());
+        }
+        assert!(
+            worst < 1e-3,
+            "{font}: pair kerning differs from the system shaper by {worst} mm on {KERNED_TEXT}"
+        );
+        let (_, width) = face
+            .layout_mm(KERNED_TEXT, SIZE_MM, 0.005)
+            .expect("the string lays out");
+        let expected = oracle.index("string_advance").as_f64().expect("an advance");
+        assert!(
+            (width - expected).abs() < 1e-3,
+            "{font}: {KERNED_TEXT} at {SIZE_MM} mm lays out {width} mm, the shaper says \
+             {expected} mm"
+        );
+        println!(
+            "kerning agrees within {worst:.6} mm on {kerned} kerned pairs of {KERNED_TEXT} in \
+             {}; string {width:.4} mm",
+            Path::new(font)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no kerned font on this machine to check against"
+    );
+}
+
 /// A hand-written JSON reader, because a test dependency on a parser is a dependency
 /// this workspace does not carry.
 mod json {

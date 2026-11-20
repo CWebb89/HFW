@@ -8,8 +8,8 @@ the algorithms that share a name with published work are named below.
 | crate | what it does | built from |
 |---|---|---|
 | `geometry` | integer nanometre points, contours, exact orientation predicates | own design; exact-predicate technique is textbook |
-| `kernel` | floating-point `V2`, bounds, regions, nearest-segment and nearest-point indices, ring area and winding | textbook computational geometry; spatial hashing is standard |
-| `mesh` (3MF) | STL parse, welding, topology diagnostics, repair, transforms; 3MF read and write (ZIP, model part, components, build transforms, `Metadata/` parts) | STL and the 3MF core specification's model, resource and build elements; triangle-plane intersection is standard. The writer emits only what the reader above already parses, so the two cannot drift into a format neither of them has tested |
+| `kernel` | floating-point `V2`, bounds, regions, nearest-segment and nearest-point indices, ring area and winding, and `cap`: a region with holes as triangles | textbook computational geometry; spatial hashing is standard. `cap` is the bridge-then-ear-clip construction (Eberly's description of bridging is the textbook one): a hole is joined to its boundary along the shortest segment that crosses nothing, then ears are clipped, and an ear is refused when it is clockwise, holds another ring point, or has a ring edge through it. A band sweep was written first and removed: it cuts the boundary at heights of its own choosing and leaves T-junctions against the walls |
+| `mesh` (3MF) | STL parse, welding, topology diagnostics, repair, transforms; 3MF read and write (ZIP, model part, components, build transforms, `Metadata/` parts) | STL and the 3MF core specification's model, resource and build elements; triangle-plane intersection is standard, and so is Sutherland–Hodgman clipping of a triangle against a plane, which is how `cut` splits one; the cap rings are walked out of the segments the plane leaves and capped by `kernel`'s clipper, and separate shells are found with a union-find over shared vertices. The writer emits only what the reader above already parses, so the two cannot drift into a format neither of them has tested |
 | `slicing` | layer schedule, marginal plane-triangle intersection, segment deduplication, contour assembly | own design |
 | `walls` | beads as level sets of the distance to the layer's boundary, widths divided from the section measured along the inward normal, marching-squares tracer carrying per-vertex width, polygon offset ladder with miter joins, tape-ordered bead footprints, gap pass by inward-normal ray, morphological opening for the feature floor, width-aware Douglas–Peucker, raster adhesion brim | level sets of a distance field are the standard construction for a contour-parallel path, and the section division is Wu, Kuipers, Doubrovski and Wang (2020) applied per section rather than per medial edge; the ladder's offset-through-union structure follows Clipper2; Douglas & Peucker 1973 for the simplifier; the tracer, the gap pass and the coverage bands are own design (`docs/WALLS-SKELETON.md`, `SLICE-SPEED-STATUS.md` §The wall rewrite) |
 | `skeleton` | Voronoi of the layer outline's own segments walked into a medial-axis graph; nodes carry the distance to the boundary, edges carry discretized geometry and the layer's section at every sample, each edge is marked central or not, and beads are laid along the edges and joined at their ends | the algorithm published by Kuipers, Doubrovski, Wu and Wang (2020), *A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling*, and the structure any skeletal wall generator needs; the central-edge test is that paper's width-to-length angle test, restated in `docs/WALLS-SKELETON.md`. The parabolic-edge sampling is derived here from the definition of a parabola, and the section measurement from sphere tracing, not taken from a source |
@@ -18,9 +18,9 @@ the algorithms that share a name with published work are named below.
 | `infill` | skin masks from a bounded ring of layer masks; line families clipped by a distance query | own design (`DESIGN.md` §7c) |
 | `toolpath` | planned layers, per-feature counters, coverage and spill metrics, SVG export | own design |
 | `config` | `key = value` printer profiles with validation | own design; the setting names follow slicer conventions so profiles are portable. Its settings surface (`assets/settings-surface.json`) is generated from the measurement in `tools/gen-settings-ledger.py` — names, types and defaults from the application's vendored definition table, statuses measured against this crate's parser — so it holds no hand-written claim about what the engine honours |
-| `gcode` | path ordering, seam placement, retraction, z-hop, per-segment extrusion from bead width, speeds, cooling, skirt, placement; independent verifier | public G-code command sets (Marlin and Klipper user documentation); the bead volume model subtracts the two corners a wall bead leaves unfilled, `h²(1 − π/4)`, which is the correction both reference slicers apply to perimeter flow |
+| `gcode` | path ordering, seam placement, retraction, z-hop, per-segment extrusion from bead width, speeds, cooling, skirt, placement; independent verifier; the bgcode binary container behind `binary_gcode` | public G-code command sets (Marlin and Klipper user documentation); the bead volume model subtracts the two corners a wall bead leaves unfilled, `h²(1 − π/4)`, which is the correction both reference slicers apply to perimeter flow. The container is the format owner's byte-level specification (`libbgcode/doc/specifications.md`) and nothing else — see the provenance note below |
 | `engine` | job orchestration across the pipeline | own design |
-| `cli` | headless command-line front end | own design |
+| `cli` | headless command-line front end; a `bed_custom_model` mesh becomes the profile's `bed_shape` outline | own design, reusing this engine's slicer for the bed's own cross-section |
 | `capi` | the C ABI: opaque mesh and G-code handles, a per-thread error slot, one plate-slice call | own design; the surface is the one `docs/NEXTLAYER-BRIDGE.md` negotiated with the application, and it reuses `engine`'s settings reader and plate merge rather than reimplementing either |
 | `plate` | the plate document: objects with a name, a placement, settings and an enabled flag; bounds; duplicate, turn and mirror; the sequential-print clearance check; the MaxRects shelf-free arranger; the project file (a 3MF plus `Metadata/hfw_project.xml`); slicing a plate into one job | own design; the object/placement/settings split is the shape every slicer's document model has because a UI needs it, and nothing here is derived from `PlateDocument.cpp` or any other engine's source. The arranger was written here as a bed packer — MaxRects with a best-short-side-fit score over a rectangle list — and moved out of `cli` in phase 5 so a panel and the command line lay a plate out the same way. The project part is this engine's own format, deliberately not PrusaSlicer's `Slic3r_PE_model.config` or Bambu's JSON: a format we write and read with one mapping cannot drift from another program's schema we would have to reverse-engineer. `check_sequential` is derived from the machine and measured against the reference — see the provenance note below |
 
@@ -71,6 +71,26 @@ published description plus the behaviour a slicer has to match, not the C++ text
 Slic3r and PrusaSlicer are named only as the thing this engine is measured
 against in `docs/ORACLE.md` and as the origin of the original idea of a slicing
 engine in this repository.
+
+## Provenance note: the binary G-code container
+
+The bgcode writer (`crates/gcode/src/bgcode.rs`) and its reader were written from
+`https://github.com/prusa3d/libbgcode/blob/main/doc/specifications.md`, the format
+owner's byte-level document: file header, block order, block header fields, per-type
+parameters and checksums. **No `libbgcode` and no PrusaSlicer source was read.**
+That document describes a container, not a slicing algorithm, which is the boundary
+the clean-room rule draws: the rule protects what a slicer decides, and this file
+only decides where bytes sit.
+
+Two consequences were accepted rather than papered over:
+
+- The specification does not say what a block checksum covers — the stored bytes or
+the bytes after decompression. Every block this writer emits is uncompressed, where
+the two readings are the same bytes, so the question cannot arise; a compressed block
+is refused by name instead of guessed at.
+- `scripts/bgcode-decode.py` is a second implementation written from the same document
+with no shared code. It caught a real defect the Rust reader could not: the block
+header is eight bytes when compression is 0, and the writer had emitted twelve.
 
 ## Third-party crates
 

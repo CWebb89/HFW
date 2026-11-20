@@ -78,6 +78,40 @@ pub enum PrintSequence {
     ByObject,
 }
 
+/// How a model's cross-sections become printable regions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SliceMode {
+    /// Sliced outlines, holes kept, cracks under `slice_closing_radius` welded.
+    #[default]
+    Regular,
+    /// Every surface treated as closed, which is the even-odd rule slice assembly
+    /// already applies to a stack of contours.
+    EvenOdd,
+    /// Sliced outlines with every hole in them filled in.
+    CloseHoles,
+}
+
+impl SliceMode {
+    /// The name this mode is written under, the same one a profile parses.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Regular => "regular",
+            Self::EvenOdd => "even_odd",
+            Self::CloseHoles => "close_holes",
+        }
+    }
+
+    /// The mode a profile's name asks for, or `None` when it names no mode here.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "regular" | "0" | "default" => Some(Self::Regular),
+            "even_odd" | "even-odd" | "evenodd" | "1" => Some(Self::EvenOdd),
+            "close_holes" | "close-holes" | "closeholes" | "2" => Some(Self::CloseHoles),
+            _ => None,
+        }
+    }
+}
+
 /// One embedded preview image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Thumbnail {
@@ -85,8 +119,37 @@ pub struct Thumbnail {
     pub width: usize,
     /// Image height in pixels.
     pub height: usize,
-    /// True for PNG, false for QOI.
-    pub png: bool,
+    /// The format the entry itself named, or `None` to use `thumbnails_format`.
+    pub format: Option<ThumbnailFormat>,
+}
+
+/// The image format a preview thumbnail is written in.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ThumbnailFormat {
+    /// A PNG, which every viewer and every printer screen reads.
+    #[default]
+    Png,
+    /// The quite-ok-image format, a quarter of the size and read by Klipper screens.
+    Qoi,
+}
+
+impl ThumbnailFormat {
+    /// The name this format is written under, the same one a profile parses.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Qoi => "QOI",
+        }
+    }
+
+    /// The format a profile's name asks for, or `None` when this engine cannot write it.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_uppercase().as_str() {
+            "PNG" => Some(Self::Png),
+            "QOI" => Some(Self::Qoi),
+            _ => None,
+        }
+    }
 }
 
 /// A number without trailing zeros, for the placeholder text.
@@ -742,6 +805,26 @@ pub struct PrinterConfig {
     pub end_filament_gcode: String,
     /// Preview thumbnails embedded in the header.
     pub thumbnails: Vec<Thumbnail>,
+    /// Format for a thumbnail entry that did not name one.
+    pub thumbnails_format: ThumbnailFormat,
+    /// A bed texture image, recorded for the panel; the engine draws none.
+    pub bed_custom_texture: String,
+    /// A mesh to use as the bed's printable outline, empty for the profile's rectangle.
+    pub bed_custom_model: String,
+    /// True to write the file as the binary G-code container instead of text.
+    ///
+    /// The container carries the same G-code text, so what prints does not
+    /// change; the thumbnails move from a base64 header block into their own
+    /// blocks, and every block is checksummed.
+    pub binary_gcode: bool,
+    /// How a model's cross-sections become printable regions.
+    pub slicing_mode: SliceMode,
+    /// Whether support layer boundaries must coincide with the object's.
+    ///
+    /// This engine has one layer schedule per job, so they always do; the flag is
+    /// recorded because a profile that turns it off is asking for a coarser support
+    /// schedule, which is a feature this engine does not have.
+    pub support_synchronize_layers: bool,
     /// True to emit `SET_PRINT_STATS_INFO` for Klipper layer tracking.
     pub emit_print_stats: bool,
     /// True to emit `EXCLUDE_OBJECT_DEFINE` so the part can be cancelled.
@@ -1231,6 +1314,12 @@ impl Default for PrinterConfig {
             start_filament_gcode: String::new(),
             end_filament_gcode: String::new(),
             thumbnails: Vec::new(),
+            thumbnails_format: ThumbnailFormat::Png,
+            bed_custom_texture: String::new(),
+            bed_custom_model: String::new(),
+            binary_gcode: false,
+            slicing_mode: SliceMode::Regular,
+            support_synchronize_layers: false,
             exclude_object: false,
             pressure_advance: 0.0,
             default_accel: 0.0,
@@ -1431,6 +1520,22 @@ impl PrinterConfig {
             .map(|&(x, y)| format!("{}x{}", trim(x), trim(y)))
             .collect::<Vec<_>>()
             .join(",")
+    }
+
+    /// The bed outline for a message: the polygon when it is short enough to read.
+    ///
+    /// A bed taken from a mesh arrives with dozens of vertices, and past a handful the
+    /// refusal is unreadable as a point list while the count and the span are not.
+    pub fn bed_shape_summary(&self) -> String {
+        if self.bed_shape.is_empty() || self.bed_shape.len() <= 16 {
+            return self.bed_shape_text();
+        }
+        format!(
+            "a {} x {} mm area with {} vertices",
+            trim(self.bed_x),
+            trim(self.bed_y),
+            self.bed_shape.len()
+        )
     }
 
     /// Substitutes `{placeholders}` in a G-code fragment.

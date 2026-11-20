@@ -84,9 +84,15 @@ BACKLOG = (
         "title": "Cut, hollow and split",
         "state": "unbuilt",
         "panel": "unavailable",
-        "cost": "a plane-mesh split that caps both halves, and hollowing as an inward "
-                "shell with a wall thickness and drain holes",
-        "note": "A cut or hollowed body has to arrive that way today.",
+        "cost": "part built: `Mesh::cut` splits a closed mesh by a plane and caps both "
+                "halves, capping holes as well, and `Mesh::parts` splits separate shells; "
+                "both cross the ABI as `hfw_mesh_cut` and `hfw_mesh_part` and are measured "
+                "by volume and by closed-surface diagnostics. Left: hollowing, an inward "
+                "shell with a wall thickness and drain holes, which needs a mesh offset "
+                "the engine does not have — the 2D offsets it does have work per layer, "
+                "so a hollowed body still has to arrive hollowed",
+        "note": "A cut body arrives as two closed meshes; a hollowed one still has to "
+                "arrive hollowed.",
     },
     {
         "id": "nesting",
@@ -141,10 +147,10 @@ BACKLOG = (
     {
         "id": "slicing_modes",
         "title": "Slicing mode and hole closing",
-        "state": "unbuilt",
+        "state": "built",
         "panel": "unavailable",
-        "cost": "an even-odd and a close-holes contour policy beside the regular one",
-        "note": "`slicing_mode` is the one unapplied setting in this group.",
+        "cost": "done: `slicing_mode` is regular, even_odd (the rule slice assembly already",
+        "note": "uses) or close_holes, which fills the void in every layer.",
     },
     {
         "id": "step_import",
@@ -252,11 +258,7 @@ ALGO_NAMES = {
 NOT_APPLICABLE_PREFIXES = ("colour_mix", "color_mix", "sla_", "milling_", "emboss_",
                            "spiral_vase_")
 NOT_APPLICABLE_NAMES = {
-    "stuck_filament_detection", "binary_gcode",
-    "support_material_synchronize_layers",
-    "printer_technology", "machine_limits_usage", "bed_custom_model",
-    "bed_custom_texture", "thumbnails_format", "preset_names", "profile_vendor",
-    "profile_version", "preset_name",
+    "preset_names", "profile_vendor", "profile_version", "preset_name",
 }
 
 # Engine settings that mean the same thing as a native key already listed above,
@@ -805,7 +807,18 @@ def tier_for(name: str, entry: dict, surface: set | None) -> str:
 HFW_CAVEATS = {
     "avoid_crossing_perimeters": (
         "partial",
-        "on by default: the emitter routes the travel itself around the loops — the layer's perimeters are offset both ways by a bead of clearance, and a visibility graph over those offset rings yields a path that holds that clearance from every wall, emitted as one retracted chain of moves. A closed loop keeps the seam the profile chose unless the seam is `nearest`, so routing costs distance and never the seam; only an open path has its entry point moved to save the crossing. Partial because supports and curled overhangs from earlier layers are not obstacles, and a travel whose start or end sits against several nested walls can find no route at all and falls back to the straight move",
+        "on by default, and it does two things: the emitter orders a layer's paths by "
+        "nearest entry, and it routes the travel itself around the loops — each loop offset "
+        "both ways by a bead of clearance, a visibility graph over those offset rings, and "
+        "the route emitted as one retracted chain of moves. A closed loop keeps the seam the "
+        "profile chose unless the seam is `nearest`, so routing costs distance and never the "
+        "seam. Measured on `fixtures/stress_gear.stl`: 777 travels cross a printed perimeter "
+        "with the switch off, 757 with it on, so 2.6% of the crossings this part produces are "
+        "what routing and ordering can remove. What is left is not a bug in the router: a "
+        "travel that begins inside a closed loop cannot leave it without crossing the loop, "
+        "and two islands printed one after the other need a route between them that does not "
+        "exist at that layer. Upstream reduces those by planning the layer as a whole, which "
+        "this engine does not do yet",
     ),
     "avoid_crossing_perimeters_max_detour": (
         "applied",
@@ -869,11 +882,66 @@ HFW_CAVEATS = {
         "partial",
         "the same solve and the same gap for the falling direction",
     ),
+    "support_material_synchronize_layers": (
+        "applied",
+        "the boundaries always coincide: this engine plans one layer schedule for the "
+        "whole job, support included, so a support layer begins and ends where the object's "
+        "layer does. The reference only needs the option because a multi-extruder preset can "
+        "print support at a coarser height than the part it holds up, and this engine has no "
+        "second schedule to coarsen. The flag is recorded so a profile that asks for it round "
+        "trips unchanged",
+    ),
+    "slicing_mode": (
+        "applied",
+        "`close_holes` fills every void in a layer: the ring set is reduced to the "
+        "boundaries no other ring contains, so a hole prints over and an island that sat "
+        "inside one becomes part of the same solid. `even_odd` is the same output as "
+        "`regular`, and deliberately so: slice assembly already treats a stack of contours "
+        "by the even-odd rule, so there is no second path to take. Measured on "
+        "`fixtures/torus.stl`, close_holes prints 914.8 mm of filament against 831.5 mm, "
+        "and the verifier passes both",
+    ),
+    "bed_custom_model": (
+        "applied",
+        "the mesh is sliced halfway up its height and its largest ring becomes `bed_shape`, "
+        "so packing uses the outline's box, centring moves a part into the outline and one "
+        "that does not sit inside it is refused with the vertex count rather than a printed "
+        "point list. Holes in a bed mesh are not holes in the printable area: `bed_shape` is "
+        "one polygon, which is the same limit a hand-written outline has",
+    ),
+    "thumbnails_format": (
+        "applied",
+        "PNG and QOI are the two formats `crates/gcode` can write, and a thumbnail entry "
+        "that names no format takes this one; JPG and the BTT screen formats are refused "
+        "by name and the refusal lists the two that work, rather than writing a PNG under "
+        "a JPG label",
+    ),
+    "printer_technology": (
+        "applied",
+        "FFF and FDM are accepted and record nothing, because there is nothing to branch "
+        "on; SLA and MSLA are refused with the machine's own error, so a resin preset "
+        "fails loudly instead of slicing as if it were filament",
+    ),
+    "bed_custom_texture": (
+        "applied",
+        "recorded in the profile and echoed to the panel, which is the only thing that "
+        "draws a bed; the engine has no viewport and no surface a texture could change",
+    ),
     "ensure_vertical_shell_thickness": (
         "partial",
         "disabled narrows the solid window to the immediate neighbours; partial and "
         "enabled coincide, because the difference upstream is a void region a coverage "
         "grid cannot express",
+    ),
+    "binary_gcode": (
+        "applied",
+        "a profile that sets it writes the bgcode container instead of the text file: the "
+        "same G-code in a gcode block, the thumbnails in blocks of their own, metadata in "
+        "INI blocks and every block CRC32-checksummed. Nothing is compressed and nothing is "
+        "MeatPack-encoded, because the specification allows both values to be 0 and this "
+        "writer only emits those; a machine that insists on a compressed block is not served "
+        "yet, which is a size optimisation rather than a second format. The C ABI still "
+        "returns the text (`hfw_gcode_text`), so today the container is the command line's",
     ),
 }
 
@@ -992,11 +1060,9 @@ def backlog_document(rows) -> str:
                 out.append(f"| **{entry['title']}**<br>{entry['note']} | {waiting} | {entry['cost']} |")
         out.append("")
 
-    applicable = [
-        row for row in rows if row["status"] != "n/a" and row.get("tier") != "n/a"
-    ]
     unapplied = [row for row in rows if row["status"] in ("missing", "partial")]
-    not_scored = [row for row in unapplied if row not in applicable]
+    applicable = [row for row in rows if row["status"] != "n/a" and row["tier"] != "n/a"]
+    applied = [row for row in applicable if row["status"] == "applied"]
 
     def toolchange(row) -> bool:
         return any(marker in row["name"].lower() for marker in TOOLCHANGE_MARKERS)
@@ -1006,14 +1072,14 @@ def backlog_document(rows) -> str:
     out += [
         "## Settings: libslic3r has them, this engine does not",
         "",
-        f"{len(rows)} settings are defined by the reference dialect; {len(unapplied)} of",
-        "them are not applied here.",
+        f"{len(rows)} settings are defined by the reference dialect; {len(applicable)} of them",
+        f"are applicable to this machine and {len(applied)} of those are applied. The",
+        f"{len(rows) - len(applicable)} rows this ledger does not score are colour mixing, purge",
+        "and wipe volumes, which mean nothing to a single-extruder engine.",
         "",
-        f"The ledger declines to score {len(rows) - len(applicable)} rows as n/a — resin, milling, colour mixing",
-        f"and printer identity — so its own unapplied total is {len(unapplied) - len(not_scored)} rather than {len(unapplied)}.",
-        "",
-        f"{len(waiting)} of the unapplied settings need hardware this machine does not have: a second",
-        "extruder, or the filament loading path a single-extruder run never uses. The rest, by name:",
+        f"{len(unapplied)} applicable settings are not applied. {len(waiting)} of them need hardware",
+        "this machine does not have: a second extruder, or the filament loading path a",
+        "single-extruder run never uses. The rest, by name:",
         "",
         "| setting | state | this engine's key |",
         "| --- | --- | --- |",

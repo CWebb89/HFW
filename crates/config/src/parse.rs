@@ -5,7 +5,9 @@ use std::path::Path;
 
 use crate::dialect::Preset;
 use crate::error::ConfigError;
-use crate::{Flavor, PrintSequence, PrinterConfig, Seam, Substitution, Thumbnail};
+use crate::{
+    Flavor, PrintSequence, PrinterConfig, Seam, SliceMode, Substitution, Thumbnail, ThumbnailFormat,
+};
 
 fn number(key: &str, value: &str) -> Result<f64, ConfigError> {
     let text = value.trim();
@@ -1028,6 +1030,37 @@ impl PrinterConfig {
                     why,
                 })?
             }
+            "thumbnails_format" => {
+                self.thumbnails_format =
+                    ThumbnailFormat::parse(value).ok_or_else(|| ConfigError::BadChoice {
+                        key: "thumbnails_format",
+                        value: value.to_owned(),
+                        allowed: "PNG, QOI",
+                    })?
+            }
+            "bed_custom_texture" => self.bed_custom_texture = value.to_owned(),
+            "bed_custom_model" => self.bed_custom_model = value.to_owned(),
+            "binary_gcode" => self.binary_gcode = boolean(key, value)?,
+            "support_material_synchronize_layers" => {
+                self.support_synchronize_layers = boolean(key, value)?
+            }
+            "slicing_mode" => {
+                self.slicing_mode =
+                    SliceMode::parse(value).ok_or_else(|| ConfigError::BadChoice {
+                        key: "slicing_mode",
+                        value: value.to_owned(),
+                        allowed: "regular, even_odd, close_holes",
+                    })?
+            }
+            "printer_technology" => {
+                if !matches!(value.trim().to_ascii_uppercase().as_str(), "FFF" | "FDM") {
+                    return Err(ConfigError::BadChoice {
+                        key: "printer_technology",
+                        value: value.to_owned(),
+                        allowed: "FFF, FDM",
+                    });
+                }
+            }
             "support_material_first_layer_density" => {
                 self.support_first_layer_density = number(key, value)?
             }
@@ -2014,8 +2047,9 @@ impl PrinterConfig {
 }
 /// Parses a `thumbnails` list such as `300x300/PNG, 64x64/QOI`.
 ///
-/// An empty value asks for no thumbnails; every other entry has to name a size
-/// between 1 and 2048 pixels and a format a viewer can decode.
+/// An empty value asks for no thumbnails; every other entry has to name a size between 1
+/// and 2048 pixels. The format is optional — `64x64` takes whatever `thumbnails_format`
+/// says — and an entry that names one must name a format a viewer can decode.
 fn thumbnails(value: &str) -> Result<Vec<Thumbnail>, String> {
     let mut out = Vec::new();
     for entry in value.split(',') {
@@ -2023,9 +2057,10 @@ fn thumbnails(value: &str) -> Result<Vec<Thumbnail>, String> {
         if entry.is_empty() {
             continue;
         }
-        let (size, format) = entry
-            .split_once('/')
-            .ok_or_else(|| format!("`{entry}` is not WIDTHxHEIGHT/FORMAT"))?;
+        let (size, format) = match entry.split_once('/') {
+            Some((size, format)) => (size, Some(format)),
+            None => (entry, None),
+        };
         let (w, h) = size
             .split_once(['x', 'X'])
             .ok_or_else(|| format!("`{size}` is not WIDTHxHEIGHT"))?;
@@ -2040,12 +2075,18 @@ fn thumbnails(value: &str) -> Result<Vec<Thumbnail>, String> {
         if width == 0 || height == 0 || width > 2048 || height > 2048 {
             return Err(format!("`{size}` is outside 1..2048 pixels"));
         }
-        let png = match format.trim().to_ascii_uppercase().as_str() {
-            "PNG" => true,
-            "QOI" => false,
-            other => return Err(format!("`{other}` is not PNG or QOI")),
+        let format = match format {
+            Some(name) => Some(
+                ThumbnailFormat::parse(name)
+                    .ok_or_else(|| format!("`{}` is not PNG or QOI", name.trim()))?,
+            ),
+            None => None,
         };
-        out.push(Thumbnail { width, height, png });
+        out.push(Thumbnail {
+            width,
+            height,
+            format,
+        });
     }
     Ok(out)
 }
@@ -2053,6 +2094,90 @@ fn thumbnails(value: &str) -> Result<Vec<Thumbnail>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn support_layers_are_recorded_as_always_synchronised() {
+        assert!(
+            !PrinterConfig::default().support_synchronize_layers,
+            "the dialect's own default is off"
+        );
+        let on = PrinterConfig::parse("support_material_synchronize_layers = true\n")
+            .expect("it parses");
+        assert!(on.support_synchronize_layers);
+    }
+
+    #[test]
+    fn a_slicing_mode_is_read_by_name_and_refused_by_name() {
+        for (text, mode) in [
+            ("regular", SliceMode::Regular),
+            ("even_odd", SliceMode::EvenOdd),
+            ("close_holes", SliceMode::CloseHoles),
+            ("2", SliceMode::CloseHoles),
+            ("EvenOdd", SliceMode::EvenOdd),
+        ] {
+            let config = PrinterConfig::parse(&format!("slicing_mode = {text}\n"))
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+            assert_eq!(config.slicing_mode, mode, "{text}");
+        }
+        let error = PrinterConfig::parse("slicing_mode = spiral\n").unwrap_err();
+        assert!(
+            error.to_string().contains("spiral") && error.to_string().contains("close_holes"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn binary_gcode_is_a_switch_that_starts_off() {
+        assert!(!PrinterConfig::default().binary_gcode);
+        assert!(
+            PrinterConfig::parse("binary_gcode = true\n")
+                .expect("it parses")
+                .binary_gcode
+        );
+        assert!(
+            !PrinterConfig::parse("binary_gcode = 0\n")
+                .expect("it parses")
+                .binary_gcode
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_without_a_format_takes_the_profile_format() {
+        let config =
+            PrinterConfig::parse("thumbnails = 64x64, 300x300/QOI\nthumbnails_format = QOI\n")
+                .expect("the profile parses");
+        assert_eq!(config.thumbnails.len(), 2);
+        assert_eq!(config.thumbnails[0].format, None);
+        assert_eq!(config.thumbnails[1].format, Some(ThumbnailFormat::Qoi));
+        assert_eq!(config.thumbnails_format, ThumbnailFormat::Qoi);
+        let default = PrinterConfig::parse("thumbnails = 64x64\n").expect("it parses");
+        assert_eq!(default.thumbnails_format, ThumbnailFormat::Png);
+    }
+
+    #[test]
+    fn a_format_this_engine_cannot_write_is_refused_by_name() {
+        let error = PrinterConfig::parse("thumbnails_format = JPG\n").unwrap_err();
+        assert!(
+            error.to_string().contains("JPG") && error.to_string().contains("PNG, QOI"),
+            "{error}"
+        );
+        let error = PrinterConfig::parse("thumbnails = 64x64/BMP\n").unwrap_err();
+        assert!(error.to_string().contains("BMP"), "{error}");
+    }
+
+    #[test]
+    fn resin_is_refused_and_a_bed_texture_is_recorded() {
+        let error = PrinterConfig::parse("printer_technology = SLA\n").unwrap_err();
+        assert!(
+            error.to_string().contains("SLA") && error.to_string().contains("FFF"),
+            "{error}"
+        );
+        let config =
+            PrinterConfig::parse("printer_technology = FFF\nbed_custom_texture = /tmp/bed.png\n")
+                .expect("FFF parses");
+        assert_eq!(config.bed_custom_texture, "/tmp/bed.png");
+        assert!(PrinterConfig::parse("printer_technology = FDM\n").is_ok());
+    }
 
     #[test]
     fn a_settings_document_loads_as_a_profile() {

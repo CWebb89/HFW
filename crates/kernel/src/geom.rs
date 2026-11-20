@@ -279,6 +279,33 @@ impl Region {
         self.segments().iter().map(|(a, b)| a.dist(*b)).sum()
     }
 
+    /// The same region with every hole filled in.
+    ///
+    /// After the fill, what is left is the outermost boundaries: a hole becomes solid,
+    /// and anything that sat inside a hole is inside that solid too, so its ring would
+    /// only flip the even-odd parity back to a void. Keeping the rings no other ring
+    /// contains is therefore exactly the union of the outer boundaries, which is what a
+    /// printer does when it prints over the void.
+    pub fn with_holes_filled(mut self) -> Region {
+        let probes: Vec<V2> = self.rings.iter().map(|ring| ring[0]).collect();
+        let keep: Vec<bool> = (0..self.rings.len())
+            .map(|index| {
+                !self
+                    .rings
+                    .iter()
+                    .enumerate()
+                    .any(|(other, ring)| other != index && ring_contains(ring, probes[index]))
+            })
+            .collect();
+        let mut index = 0;
+        self.rings.retain(|_| {
+            let kept = keep[index];
+            index += 1;
+            kept
+        });
+        self
+    }
+
     /// Even-odd containment across all rings.
     pub fn contains(&self, p: V2) -> bool {
         self.rings.iter().filter(|r| ring_contains(r, p)).count() % 2 == 1

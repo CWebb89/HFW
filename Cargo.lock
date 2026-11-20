@@ -158,6 +158,7 @@ dependencies = [
  "hfw-engine",
  "hfw-font",
  "hfw-gcode",
+ "hfw-mesh",
  "hfw-plate",
  "hfw-text",
 ]
@@ -235,6 +236,7 @@ name = "hfw-mesh"
 version = "0.8.0"
 dependencies = [
  "hfw-geometry",
+ "hfw-kernel",
  "zip",
 ]
 
@@ -280,6 +282,7 @@ version = "0.8.0"
 dependencies = [
  "hfw-font",
  "hfw-geometry",
+ "hfw-kernel",
  "hfw-mesh",
 ]
 

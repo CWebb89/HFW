@@ -93,6 +93,28 @@ fn make(name: &str, cfg: &PrinterConfig) -> (Gcode, Job) {
     (gcode, job)
 }
 
+/// The file with its `; thumbnail` comment block taken out, which is what a
+/// binary container writes in its own blocks instead.
+fn without_thumbnail_block(text: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.starts_with("; thumbnail begin") {
+            inside = true;
+            continue;
+        }
+        if line.starts_with("; thumbnail end") {
+            inside = false;
+            continue;
+        }
+        if !inside {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn first_pos(text: &str, needle: &str) -> usize {
     text.find(needle)
         .unwrap_or_else(|| panic!("missing {needle}"))
@@ -2180,16 +2202,17 @@ fn a_thumbnail_block_carries_a_decodable_image() {
         "no thumbnails were requested"
     );
 
+    cfg.thumbnails_format = hfw_config::ThumbnailFormat::Qoi;
     cfg.thumbnails = vec![
         hfw_config::Thumbnail {
             width: 32,
             height: 32,
-            png: true,
+            format: Some(hfw_config::ThumbnailFormat::Png),
         },
         hfw_config::Thumbnail {
             width: 16,
             height: 16,
-            png: false,
+            format: None,
         },
     ];
     let gcode = generate(&job.layers, &cfg, None).expect("gcode builds");
@@ -2203,6 +2226,31 @@ fn a_thumbnail_block_carries_a_decodable_image() {
     );
     assert_eq!(gcode.text.matches("; thumbnail end").count(), 2);
     assert!(verify(&gcode.text, &cfg).ok());
+}
+
+#[test]
+fn a_binary_file_keeps_the_thumbnails_out_of_the_text() {
+    let mut cfg = voron();
+    let job = small_job(&cfg);
+    cfg.thumbnails = vec![hfw_config::Thumbnail {
+        width: 32,
+        height: 32,
+        format: Some(hfw_config::ThumbnailFormat::Png),
+    }];
+    let text_file = generate(&job.layers, &cfg, None).expect("gcode builds");
+    cfg.binary_gcode = true;
+    let binary_file = generate(&job.layers, &cfg, None).expect("gcode builds");
+
+    assert_eq!(text_file.thumbnails, binary_file.thumbnails);
+    assert_eq!(text_file.thumbnails.len(), 1);
+    assert_eq!(&text_file.thumbnails[0].bytes[..4], b"\x89PNG");
+    assert!(!binary_file.text.contains("thumbnail"));
+    assert_eq!(
+        binary_file.text,
+        without_thumbnail_block(&text_file.text),
+        "the container must not change the G-code, only where the image goes"
+    );
+    assert!(verify(&binary_file.text, &cfg).ok());
 }
 
 #[test]

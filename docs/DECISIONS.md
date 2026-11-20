@@ -1,9 +1,3 @@
-# Decisions
-
-`DECISION-<n>: options / choice / reason / how to reverse`.
-
----
-
 ## DECISION-1: which integer polygon boolean
 
 **Options**: (a) hand-written exact boolean in `hfw-geometry`; (b) `i_overlay`
@@ -260,6 +254,35 @@ emitted from the same rows if a compile-time check per key is ever wanted.
 
 ---
 
+## DECISION-18: a cap keeps the boundary's own vertices, so the capper bridges instead of sweeping
+
+**Date**: 2026-11-21.
+
+**Decision**: `crates/kernel/src/cap.rs` caps a region by bridging each hole into its
+boundary and clipping ears. It does not use a grid, a band sweep, or any decomposition that
+places a vertex on the boundary at a height of its own choosing.
+
+**Why**: a cap shares its boundary with the walls beside it. If the cap puts a vertex in
+the middle of a wall edge, the two meet at a T-junction: the mesh reports a boundary edge,
+a slicer can leave a crack, and `diagnostics()` says the half is not closed. A band sweep
+does exactly that — it cuts the region at every vertex height, so any wall edge spanning
+several bands gets subdivided. The first version of the cut caps was a sweep and every cut
+test failed on boundary edges.
+
+**Tradeoff**: bridging adds a slit, two coincident edges traversed in opposite directions,
+and ear clipping has to be careful around it: an ear that spans the slit lies outside the
+region while no ring point falls inside it, so the ear test also refuses a candidate whose
+interior any ring edge crosses. That check is O(n²) per ear, which is fine for caps.
+
+**Reverses**: swap `cap::triangulate` for a constrained Delaunay triangulator and the two
+callers (`text` for a glyph's face, `mesh` for a cut) do not change.
+
+# Decisions
+
+`DECISION-<n>: options / choice / reason / how to reverse`.
+
+---
+
 ## DECISION-17: text is a prism, not a boolean
 
 **Options**: (a) no text in the engine, as today; (b) read a font, then union its
@@ -305,7 +328,7 @@ application's panel disables.
 **Choice**: (c), `BACKLOG` in `tools/gen-settings-ledger.py`.
 
 **Reason**: parity is a measurable target, so the gap has to be enumerated rather than
-remembered. The settings half is already measured — 300 of 364 applied — and the
+remembered. The settings half is already measured — 308 of 372 applicable applied — and the
 backlog adds the part a setting cannot express: text, cut and hollow, nesting, AMF,
 internal bridges, a tiled field, modifier volumes, vendor placeholders, slicing modes,
 and a gated corpus driven through libslic3r's own API. `blocked` is not `declined`: a
@@ -453,3 +476,101 @@ Three rules fall out of it, each of which a test holds:
 each call it once. Dropping it means restoring a per-object vocabulary somewhere
 else, which is exactly what this decision replaced.
 
+
+## A bed mesh becomes the profile's outline, nothing new
+
+`bed_custom_model` does not add a second kind of bed. It slices the mesh halfway up its
+height, collapses the collinear vertices an unwelded mesh leaves, and writes the largest
+ring into `bed_shape` with the origin moved to the mesh's lower corner. Everything
+downstream already handles a polygon bed: the packer uses the outline's box, the writer's
+`bed_target` moves a part into a concave or round outline, `bed_contains` refuses corners
+off it, and the header names the shape. The alternative — a parallel "the model is the
+bed" path — would have duplicated all four and drifted from them.
+
+Reverses by deleting `apply_bed_model` and the profile key; a profile that spells
+`bed_shape` by hand keeps working exactly as it did, which is why the fixture is a *round*
+bed: it exercises the polygon route in a case a rectangle cannot express.
+
+Holes in a bed mesh are not holes in the printable area. `bed_shape` is one polygon, the
+same limit a hand-written outline has, and the ledger row says so rather than pretending
+otherwise.
+
+## Slicing mode: one path, two names, one real difference
+
+`even_odd` produces the same output as `regular` and the ledger says so out loud. Slice
+assembly already resolves a stack of contours by the even-odd rule — that is what building
+a `Region` from a cross-section means — so there is no second algorithm to select, and
+writing one that produces identical output would be a branch nobody can observe.
+
+`close_holes` is the real difference and it is one operation on the region: keep the rings
+no other ring contains. A hole is a ring inside another, so it goes; an island that sat
+inside a hole is inside the outer boundary too, so it goes as well, which is correct —
+once the void prints over, the island is part of the same solid. Measured on
+`fixtures/torus.stl`: 914.8 mm of filament against 831.5 mm in regular mode, verifier
+passing both.
+
+Reverses by dropping the enum and the field: nothing else reads it.
+
+## Support layer synchronisation is a property, not a switch
+
+`support_material_synchronize_layers` is recorded and changes nothing, because the thing it
+asks for is already true: this engine plans one layer schedule per job and builds support on
+that schedule, so a support layer starts and ends exactly where the object's layer does. The
+reference needs the option only because a multi-extruder preset can print support taller than
+the part it holds up; there is no second schedule here to coarsen. Turning it off therefore
+does not reintroduce the misalignment, and the ledger row says that rather than pretending a
+switch exists.
+
+## Travel routing was measured before it was extended
+
+`avoid_crossing_perimeters` gained a staged clearance (0.6, 0.35 and 0.15 bead) so a travel
+pressed between nested walls can still be routed, and a raster A* router for layers with more
+walls than the visibility graph can hold. Measured on `fixtures/stress_gear.stl`: 777
+crossings with the switch off, 757 with the graph; the staged clearance and the raster router
+took it to 759 and 758 at twice the emit time. Both were removed. The remaining crossings are
+geometric, not routing failures: a travel that starts inside a closed loop cannot leave
+without crossing it, and two islands printed in sequence need a route that does not exist at
+that layer. Closing those is layer-level planning, and the row stays `partial` until that
+exists. The measurement is in the ledger row so the next attempt starts from it.
+
+## Binary G-code: built from the specification
+
+`binary_gcode` writes the bgcode container. Its owner publishes a byte-level specification
+(`libbgcode/doc/specifications.md`): file header, block order, block header fields, per-type
+parameters, checksum. That is a document about bytes, not slicer code about sampling, which
+is what the clean-room rule protects — so `crates/gcode/src/bgcode.rs` was built from it, and
+`PROVENANCE.md` names it. No `libbgcode` or PrusaSlicer source was read.
+
+The alternative, deriving the layout from files the reference produced, was rejected: a
+hand-derived container that round-trips the fixture and corrupts a print is exactly the class
+of defect this repository exists to avoid. The specification was instead implemented twice —
+the writer/reader in Rust, and `scripts/bgcode-decode.py` written from the same document with
+no shared code — and the gate runs the second against the first: the Python decoder reads the
+file the engine wrote, and its text matches the ASCII file's byte for byte.
+
+What a file holds: a ten-byte header naming CRC32, INI metadata blocks (producer, machine,
+print totals, slicer), one block per thumbnail, and the G-code verbatim in a block of its
+own. Nothing is compressed and nothing is MeatPack-encoded; the specification allows both
+`Compression = 0` and `Encoding = 0`, so those are honest values rather than a placeholder,
+and a block that claims either is refused by name rather than decoded on a guess. MeatPack
+and Deflate stay a size optimisation to add if a printer asks for them.
+
+Two things the implementation settled, both worth knowing before extending it:
+
+- **A stored block's header is eight bytes, not twelve.** Type and compression are two bytes
+each, the uncompressed size is four, and the compressed size is the field the file leaves
+out when compression is 0. The writer first emitted all four fields; the Rust reader agreed
+with it because both were written from one reading, and the independent decoder caught the
+disagreement at the first block. That is the reason the second implementation exists.
+- **With compression 0 the checksum's coverage is unambiguous.** The specification places a
+  block checksum after the block but does not say whether it covers stored or uncompressed
+  bytes; while nothing is compressed those are the same bytes, so the question cannot bite.
+  It would the moment a compressed block were written, which is one more reason this writer
+  emits none.
+
+The text is stored as the ASCII writer produced it, thumbnails aside: the container changes
+where the images live and what a corrupt file fails on, never what the machine prints. On
+the cube with a 64x64 PNG and a 32x32 QOI, that is 175,440 bytes of container against
+176,794 bytes of text and the same G-code. The C ABI still returns the text
+(`hfw_gcode_text`); the container is the command line's, and the application gets it when it
+asks for bytes rather than a string.

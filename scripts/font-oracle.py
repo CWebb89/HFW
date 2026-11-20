@@ -8,7 +8,9 @@ of the em is the claim.
     .venv/bin/python scripts/font-oracle.py FONT TEXT SIZE_MM [--tolerance MM]
 
 Prints one JSON object: per character, the glyph's advance and ink box in millimetres,
-and the whole string's advance.
+the whole string's advance, and the pair kerning between each two characters that end up
+next to each other — measured as the difference between the string's advance and the sum
+of its parts, which is how the renderer's own shaper applies kerning, GPOS or legacy.
 """
 
 import json
@@ -40,12 +42,25 @@ def measure(font_path: str, text: str, size_mm: float, scale: int = 20) -> dict:
             "min_y": (ascent - bottom) / pixels_per_mm,
         }
         per_character.append({"character": character, "advance": advance, "ink": ink})
+    pairs = [
+        {
+            "left": left["character"],
+            "right": right["character"],
+            "kern": font.getlength(left["character"] + right["character"])
+            / pixels_per_mm
+            - left["advance"]
+            - right["advance"],
+        }
+        for left, right in zip(per_character, per_character[1:])
+    ]
     return {
         "font": font_path,
         "text": text,
         "size_mm": size_mm,
         "advance": sum(entry["advance"] for entry in per_character),
+        "string_advance": font.getlength(text) / pixels_per_mm,
         "characters": per_character,
+        "pairs": pairs,
     }
 
 

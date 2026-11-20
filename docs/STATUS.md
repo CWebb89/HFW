@@ -26,9 +26,9 @@ deciding whether to swap.
 
 | what | number | what it means | how it is measured |
 |---|---|---|---|
-| Settings coverage | **299 of 364** (82%) | of every setting the reference slicers define and a one-extruder machine can use, 299 change the output | `python3 tools/gen-settings-ledger.py --check` |
-| Single-extruder coverage | **299 of 307** (97%) | the same, ignoring the 57 rows that need a second extruder | same |
-| Automated gate | **82 sections, all passing** | every feature is exercised by running the real program and reading the real file | `fish scripts/test-hfw.fish` |
+| Settings coverage | **309 of 372** (83%) | of every setting the reference slicers define and a one-extruder machine can use, 309 change the output | `python3 tools/gen-settings-ledger.py --check` |
+| Single-extruder coverage | **309 of 316** (98%) | the same, ignoring the 57 rows that need a second extruder | same |
+| Automated gate | **86 sections, all passing** | every feature is exercised by running the real program and reading the real file | `fish scripts/test-hfw.fish` |
 
 Two more that matter when deciding whether to trust the output:
 
@@ -82,13 +82,42 @@ Two more that matter when deciding whether to trust the output:
   10 mm; `crates/text` extrudes an outline into a closed prism (volume checked against
   polygon area × height, hole preserved); `hfw-cli --text` slices it — the gate requires
   four layers, the letters' walls and a verifier pass. `docs/TEXT.md` lists what is left.
+- Cutting and splitting: `Mesh::cut` takes a plane and returns two closed halves, capping
+  the opening and any hole it passes through; `Mesh::parts` splits a mesh into its separate
+  shells. Both cross the ABI (`hfw_mesh_cut`, `hfw_mesh_part_count`, `hfw_mesh_part`) and are
+  measured by volume conservation and by `boundary_edges == 0` on each half. Hollowing is not
+  built: it needs a mesh offset, and the offsets in `kernel` are per-layer.
 - Parity backlog: `docs/PARITY-BACKLOG.md` (generated) and the surface's `capabilities`
   array — every capability libslic3r has and this engine does not, with a `state`
   (`unbuilt`, `blocked`, `excluded`), what closing it costs and what it waits on.
-  **300 of 364 settings applied**; 70 of the dialect's 383 are unapplied, 57 of those
-  need a second extruder or the filament loading path, and the remaining 13 are listed
-  by name. The ledger declines to score 19 rows as n/a, which is why its own unapplied
-  total reads 64 rather than 70. Support and seam painting left that list by being built:
+  **309 of 372 applicable settings applied**; 63 are unapplied, 57 of those need a second
+  extruder or the filament loading path, and the remaining 6 are listed by name. The 11
+  rows the ledger does not score are colour mixing, purge and wipe volumes — nothing a
+  single-extruder engine acts on. `crates/config` now parses `printer_technology`
+  (FFF/FDM accepted, SLA refused by name), `thumbnails_format` (PNG and QOI written, JPG
+  refused by name), `bed_custom_texture` (recorded; the panel draws it) and
+  `bed_custom_model` (a mesh is sliced halfway up its height and its largest ring becomes
+  `bed_shape`, so a round bed centres parts and refuses the ones that hang off it) and
+  `slicing_mode` (`close_holes` fills every void in a layer: 914.8 mm of filament on
+  `fixtures/torus.stl` against 831.5 mm, verifier passing both),
+  `support_material_synchronize_layers` (recorded; support already shares the object's one
+  layer schedule, so the boundaries always coincide) and `binary_gcode`.
+- Binary G-code: `crates/gcode/src/bgcode.rs` writes the bgcode container from the format
+  owner's byte-level specification — file header, INI metadata blocks, one block per
+  thumbnail, the G-code in a block of its own, CRC32 per block. The text is stored verbatim
+  and only the thumbnails move out of the header comment, so a 64x64 PNG and a 32x32 QOI on
+  the cube make a 175,440-byte container of a 176,794-byte text file with identical
+  G-code. `hfw-cli --check-gcode` decodes a container before verifying it, and
+  `scripts/bgcode-decode.py` is a second implementation written from the same document: it
+  reads the file the engine wrote and its text matches the ASCII file's, block for block.
+  Nothing is compressed and nothing is MeatPack-encoded; a block that claims either is
+  refused by name rather than decoded on a guess.
+- Travel routing, measured: on `fixtures/stress_gear.stl`, 777 travels cross a printed
+  perimeter with `avoid_crossing_perimeters` off and 757 with it on. The router already
+  orders a layer's paths by nearest entry and routes round the loops with a visibility
+  graph over offset rings; a raster router was built, measured at 758 crossings for twice
+  the emit time, and removed. What remains is a layer-level ordering problem, not a routing
+  one, and the row stays `partial` saying so. Support and seam painting left that list by being built:
   per-triangle channels consumed inside support generation and by the writer's seam
   chooser (`docs/PAINT.md`).
 - Project files: `Plate::to_project`/`from_project`/`save_project`/`open_project`,

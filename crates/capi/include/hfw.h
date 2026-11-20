@@ -542,6 +542,22 @@ HfwGcode *hfw_plate_slice(const HfwPlate *plate,
                           double first_layer_height,
                           double layer_height);
 
+/**
+ * Slices the plate, places it on the bed the profile describes, and returns
+ * G-code for it.
+ *
+ * The same call as `hfw_plate_slice` except that the plate is laid on the bed
+ * rather than printed where it sits: `hfw_plate_slice` keeps the coordinates the
+ * plate holds and this one moves it, which is what `hfw-cli --place` does. A
+ * plate that came from a document was placed by whoever laid it out; bare
+ * geometry with no document around it has no position to keep. Returns NULL on
+ * failure.
+ */
+HfwGcode *hfw_plate_slice_placed(const HfwPlate *plate,
+                                 const char *profile,
+                                 double first_layer_height,
+                                 double layer_height);
+
 /** Releases a plate, and with it every object on it. A NULL handle is ignored. */
 void hfw_plate_free(HfwPlate *plate);
 
