@@ -7,11 +7,12 @@ use hfw_capi::{
     hfw_abi_version, hfw_buffer_free, hfw_gcode_free, hfw_gcode_len, hfw_gcode_text,
     hfw_gcode_verified, hfw_job_cancel, hfw_job_poll, hfw_job_start, hfw_job_take_gcode,
     hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_free, hfw_mesh_from_bytes,
-    hfw_mesh_load_file, hfw_mesh_transform, hfw_mesh_triangle_count, hfw_mesh_volume,
-    hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free, hfw_plate_new,
-    hfw_plate_object_bounds, hfw_plate_object_clear_settings, hfw_plate_object_count,
-    hfw_plate_object_duplicate, hfw_plate_object_enabled, hfw_plate_object_mirror,
-    hfw_plate_object_name, hfw_plate_object_placement, hfw_plate_object_remove,
+    hfw_mesh_load_file, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_transform,
+    hfw_mesh_triangle_count, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
+    hfw_plate_free, hfw_plate_new, hfw_plate_object_bounds, hfw_plate_object_clear_settings,
+    hfw_plate_object_count, hfw_plate_object_duplicate, hfw_plate_object_enabled,
+    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_paint,
+    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_remove,
     hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_open_project, hfw_plate_preview_json,
     hfw_plate_project_bytes, hfw_plate_slice, hfw_slice_meshes, hfw_string_free, HfwBounds,
     HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED,
@@ -332,7 +333,7 @@ fn the_settings_surface_arrives_as_one_json_document() {
     assert!(named > 300, "only {named} settings in the surface");
     assert_eq!(
         text.matches("\"disposition\": \"out_of_scope\"").count(),
-        7,
+        6,
         "the panel cannot tell which features are unavailable"
     );
     assert_eq!(
@@ -718,4 +719,89 @@ fn a_plate_round_trips_through_a_project_file_and_still_prints_the_same() {
     unsafe { hfw_plate_free(reopened) };
     unsafe { hfw_buffer_free(bytes, len) };
     unsafe { hfw_plate_free(plate) };
+}
+
+#[test]
+fn paint_round_trips_through_the_mesh_and_the_plate_and_is_refused_when_wrong() {
+    let path = c_string(&fixture("cube.stl"));
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let triangles = unsafe { hfw_mesh_triangle_count(mesh) };
+
+    let mut states = vec![0u8; triangles];
+    states[3] = 1;
+    states[7] = 2;
+    assert_eq!(
+        unsafe { hfw_mesh_paint_set(mesh, 0, states.as_ptr(), states.len()) },
+        0,
+        "the states match the triangle count: {}",
+        last_error()
+    );
+    let mut read = vec![0u8; triangles];
+    let written = unsafe { hfw_mesh_paint_get(mesh, 0, read.as_mut_ptr(), read.len()) };
+    assert_eq!(
+        written as usize, triangles,
+        "one byte per triangle comes back"
+    );
+    assert_eq!(read, states, "the channel reads back what was written");
+
+    let short = [0u8; 3];
+    assert_eq!(
+        unsafe { hfw_mesh_paint_set(mesh, 0, short.as_ptr(), short.len()) },
+        -1,
+        "three states cannot describe a twelve-triangle cube"
+    );
+    assert!(
+        last_error().contains("3 states"),
+        "error was {}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_mesh_paint_set(mesh, 4, states.as_ptr(), states.len()) },
+        -1,
+        "there is no channel 4"
+    );
+
+    let profile = c_string(&profile());
+    let plate = hfw_plate_new();
+    assert!(!plate.is_null(), "plate failed: {}", last_error());
+    let id = unsafe { hfw_plate_add(plate, mesh) };
+    assert_ne!(id, 0, "add failed: {}", last_error());
+    assert_eq!(
+        unsafe { hfw_plate_object_paint(plate, id, 0, states.as_ptr(), states.len()) },
+        0,
+        "the object takes the states: {}",
+        last_error()
+    );
+    let mut object_read = vec![0u8; triangles];
+    let object_written = unsafe {
+        hfw_plate_object_paint_get(plate, id, 0, object_read.as_mut_ptr(), object_read.len())
+    };
+    assert_eq!(object_written as usize, triangles);
+    assert_eq!(
+        object_read, states,
+        "the object holds the paint it was given"
+    );
+
+    let mut len = 0usize;
+    let bytes = unsafe { hfw_plate_project_bytes(plate, &mut len) };
+    assert!(!bytes.is_null(), "save failed: {}", last_error());
+    let reopened = unsafe { hfw_plate_open_project(bytes.cast(), len, profile.as_ptr()) };
+    assert!(!reopened.is_null(), "open failed: {}", last_error());
+    let mut saved_read = vec![0u8; triangles];
+    let saved_written = unsafe {
+        hfw_plate_object_paint_get(reopened, 1, 0, saved_read.as_mut_ptr(), saved_read.len())
+    };
+    assert_eq!(
+        saved_written as usize, triangles,
+        "the project carried the paint"
+    );
+    assert_eq!(
+        saved_read, states,
+        "the reopened object is painted the same"
+    );
+
+    unsafe { hfw_plate_free(reopened) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(mesh) };
 }

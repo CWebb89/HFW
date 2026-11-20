@@ -206,6 +206,91 @@ impl SupportParams {
     }
 }
 
+/// A painted facet's footprint and the heights it covers, in printer coordinates
+/// and millimetres.
+#[derive(Clone, Debug)]
+pub struct PaintSpan {
+    /// The facet projected onto the bed.
+    pub footprint: Region,
+    /// Height of the facet's lowest point.
+    pub bottom: f64,
+    /// Height of the facet's highest point.
+    pub top: f64,
+}
+
+/// Painted support facets: where support must reach, and where it must not go.
+///
+/// Painting is an input to the seed decision, never a toolpath: an enforcer adds
+/// a seed on the layer under the facet it paints, and a blocker removes whatever
+/// the threshold or an enforcer put inside its footprint at or below its own top.
+/// Both then go through the same projection, fill and writer as unpainted support.
+///
+/// The two spans are read differently on purpose. An enforcer reaches *up* to the
+/// facet it paints, so it seeds the layers below the facet's lowest point. A
+/// blocker guards the space a tool must not print support into, and the facet a
+/// user paints is usually flat — a horizontal face has no height to occupy — so a
+/// blocker forbids its footprint on every layer at or below its highest point,
+/// which covers both "inside this printed volume" and "under this face".
+#[derive(Clone, Debug, Default)]
+pub struct PaintRegions {
+    /// Facets support has to reach.
+    pub enforcers: Vec<PaintSpan>,
+    /// Facets support may not occupy.
+    pub blockers: Vec<PaintSpan>,
+}
+
+impl PaintRegions {
+    /// True when neither channel holds a facet.
+    pub fn is_empty(&self) -> bool {
+        self.enforcers.is_empty() && self.blockers.is_empty()
+    }
+}
+
+/// Painted facets rasterised onto the mask grid, one mask per layer.
+struct PaintMasks {
+    enforcers: Vec<Vec<u64>>,
+    forbidden: Vec<Vec<u64>>,
+}
+
+impl PaintMasks {
+    fn build(paint: &PaintRegions, cache: &MaskCache, heights: &[f64]) -> PaintMasks {
+        let grid = *cache.grid();
+        let words = cache.words();
+        let mut bands = Vec::with_capacity(heights.len());
+        let mut z = 0.0f64;
+        for h in heights {
+            bands.push((z, z + h));
+            z += h;
+        }
+        let mut enforcers = vec![vec![0u64; words]; bands.len()];
+        let mut forbidden = vec![vec![0u64; words]; bands.len()];
+        for span in &paint.enforcers {
+            let mask = grid.packed(&span.footprint);
+            for (k, (_, top)) in bands.iter().enumerate() {
+                if *top <= span.bottom {
+                    or_into(&mut enforcers[k], &mask);
+                }
+            }
+        }
+        for span in &paint.blockers {
+            let mask = grid.packed(&span.footprint);
+            for (k, (_, top)) in bands.iter().enumerate() {
+                if *top <= span.top {
+                    or_into(&mut forbidden[k], &mask);
+                }
+            }
+        }
+        PaintMasks {
+            enforcers,
+            forbidden,
+        }
+    }
+}
+
+fn or_into(dst: &mut [u64], src: &[u64]) {
+    dst.iter_mut().zip(src).for_each(|(d, s)| *d |= *s);
+}
+
 /// Per-layer support bodies, ready to fill.
 #[derive(Clone, Debug)]
 pub struct Supports {
@@ -237,6 +322,17 @@ impl Supports {
         p: &SupportParams,
         heights: &[f64],
     ) -> Supports {
+        Supports::build_with_paint(regions, cache, p, heights, None)
+    }
+
+    /// Supports for every layer, with painted facets taken into account.
+    pub fn build_with_paint(
+        regions: &[Region],
+        cache: &MaskCache,
+        p: &SupportParams,
+        heights: &[f64],
+        paint: Option<&PaintRegions>,
+    ) -> Supports {
         let grid = *cache.grid();
         let height = mean_height(heights);
         if !p.validate() || regions.is_empty() || !(height.is_finite() && height > 0.0) {
@@ -245,10 +341,14 @@ impl Supports {
                 body: Body::Empty,
             };
         }
-        let seeds = seed_masks(regions, cache, p, heights);
+        let paint = paint.filter(|paint| !paint.is_empty());
+        let masks = paint.map(|paint| PaintMasks::build(paint, cache, heights));
+        let enforced = masks.as_ref().map(|m| m.enforcers.as_slice());
+        let forbidden = masks.as_ref().map(|m| m.forbidden.as_slice());
+        let seeds = seed_masks(regions, cache, p, heights, enforced);
         let body = match p.style {
-            Style::Normal => columns(regions, cache, p, &seeds, heights),
-            Style::Tree => Body::Tree(build_tree(cache, p, height, &seeds)),
+            Style::Normal => columns(regions, cache, p, &seeds, heights, forbidden),
+            Style::Tree => Body::Tree(build_tree(cache, p, height, &seeds, forbidden)),
         };
         Supports { grid, body }
     }
@@ -278,6 +378,7 @@ fn seed_masks(
     cache: &MaskCache,
     p: &SupportParams,
     heights: &[f64],
+    enforced: Option<&[Vec<u64>]>,
 ) -> Vec<Vec<u64>> {
     let grid = *cache.grid();
     let words = cache.words();
@@ -313,6 +414,11 @@ fn seed_masks(
     if p.first_layer_expansion > 0.0 && n > 0 {
         seeds[0] = dilate(&seeds[0], &grid.grid, p.first_layer_expansion, words);
     }
+    if let Some(enforced) = enforced {
+        for (seed, painted) in seeds.iter_mut().zip(enforced) {
+            or_into(seed, painted);
+        }
+    }
     let mut lowered = vec![vec![0u64; words]; n];
     for k in 0..n {
         let shift = (p.z_gap / height_at(heights, k)).round() as usize + 1;
@@ -330,6 +436,7 @@ fn columns(
     p: &SupportParams,
     seeds: &[Vec<u64>],
     heights: &[f64],
+    forbidden: Option<&[Vec<u64>]>,
 ) -> Body {
     let grid = *cache.grid();
     let words = cache.words();
@@ -341,7 +448,10 @@ fn columns(
     for k in (0..n).rev() {
         run.iter_mut().zip(&seeds[k]).for_each(|(r, s)| *r |= *s);
         let own = cache.own_bits(k);
-        let blocked = dilate(&own, &grid.grid, clearance, words);
+        let mut blocked = dilate(&own, &grid.grid, clearance, words);
+        if let Some(painted) = forbidden.and_then(|layers| layers.get(k)) {
+            or_into(&mut blocked, painted);
+        }
         let layer: Vec<u64> = run.iter().zip(&blocked).map(|(r, b)| r & !b).collect();
         run.clone_from(&layer);
         body[k] = layer;
@@ -512,7 +622,13 @@ fn fill_columns(
 /// `height * tan(branch_angle)` sideways, so a branch is always printable
 /// without support under itself. Contacts are sampled from the z-shifted seeds,
 /// so a tree grows in the same clearance envelope a column does.
-fn build_tree(cache: &MaskCache, p: &SupportParams, height: f64, seeds: &[Vec<u64>]) -> Tree {
+fn build_tree(
+    cache: &MaskCache,
+    p: &SupportParams,
+    height: f64,
+    seeds: &[Vec<u64>],
+    forbidden: Option<&[Vec<u64>]>,
+) -> Tree {
     let grid = *cache.grid();
     let g = grid.grid;
     let words = cache.words();
@@ -529,7 +645,10 @@ fn build_tree(cache: &MaskCache, p: &SupportParams, height: f64, seeds: &[Vec<u6
     let mut active: Vec<Node> = Vec::new();
     for k in (0..n).rev() {
         let own = cache.own_bits(k);
-        let blocked = dilate(&own, &g, clearance, words);
+        let mut blocked = dilate(&own, &g, clearance, words);
+        if let Some(painted) = forbidden.and_then(|layers| layers.get(k)) {
+            or_into(&mut blocked, painted);
+        }
         let mut next: Vec<Node> = Vec::with_capacity(active.len() + 8);
         for node in &active {
             let grown = Node {
@@ -1285,6 +1404,90 @@ mod tests {
         assert!(
             !get(&cantilever, &g, 16, 20),
             "a cantilever is not a bridge: it has one anchor"
+        );
+    }
+
+    #[test]
+    fn a_painted_enforcer_grows_support_and_a_blocker_removes_it() {
+        let regions = post_and_table(20, 10, 4.0, 30.0);
+        let cache = MaskCache::new(&regions, 0.2, 12);
+        let heights = flat(&regions, 0.2);
+        let grid = *cache.grid();
+        let quiet = SupportParams {
+            min_area: 1.0e6,
+            ..SupportParams::new(0.4)
+        };
+        let bare = Supports::build(&regions, &cache, &quiet, &heights);
+        assert!(
+            !cell(&columns(&bare).0[0], &grid, 20.0, 10.0),
+            "a minimum area nothing can reach seeds no support at all"
+        );
+
+        let enforced = PaintRegions {
+            enforcers: vec![PaintSpan {
+                footprint: square(18.0, 8.0, 22.0, 12.0),
+                bottom: 2.0,
+                top: 2.1,
+            }],
+            blockers: Vec::new(),
+        };
+        let grown = Supports::build_with_paint(&regions, &cache, &quiet, &heights, Some(&enforced));
+        assert!(
+            cell(&columns(&grown).0[0], &grid, 20.0, 10.0),
+            "a painted facet has support under it whatever the threshold seeded"
+        );
+
+        let p = SupportParams::new(0.4);
+        let natural = Supports::build(&regions, &cache, &p, &heights);
+        assert!(
+            cell(&columns(&natural).0[0], &grid, 20.0, 10.0),
+            "the table's far end has nothing under it and is supported"
+        );
+        let blocked = PaintRegions {
+            enforcers: Vec::new(),
+            blockers: vec![PaintSpan {
+                footprint: square(17.0, 0.0, 25.0, 20.0),
+                bottom: 0.0,
+                top: 4.0,
+            }],
+        };
+        let cleared = Supports::build_with_paint(&regions, &cache, &p, &heights, Some(&blocked));
+        assert!(
+            !cell(&columns(&cleared).0[0], &grid, 20.0, 10.0),
+            "a painted blocker removes support that would have been built there"
+        );
+        assert!(
+            cell(&columns(&cleared).0[0], &grid, 27.0, 10.0),
+            "a blocker removes support only inside its own footprint"
+        );
+    }
+
+    #[test]
+    fn an_enforcer_builds_tree_support_too() {
+        let regions = post_and_table(20, 10, 4.0, 30.0);
+        let cache = MaskCache::new(&regions, 0.2, 12);
+        let p = SupportParams {
+            style: Style::Tree,
+            min_area: 1.0e6,
+            ..SupportParams::new(0.4)
+        };
+        let heights = flat(&regions, 0.2);
+        let enforced = PaintRegions {
+            enforcers: vec![PaintSpan {
+                footprint: square(24.0, 14.0, 29.0, 19.0),
+                bottom: 2.0,
+                top: 2.1,
+            }],
+            blockers: Vec::new(),
+        };
+        let bare = Supports::build(&regions, &cache, &p, &heights);
+        let grown = Supports::build_with_paint(&regions, &cache, &p, &heights, Some(&enforced));
+        let count = |m: &Supports| -> usize { tree(m).layers.iter().map(|l| l.len()).sum() };
+        assert!(
+            count(&grown) > count(&bare),
+            "the painted facet added no tree: {} against {}",
+            count(&grown),
+            count(&bare)
         );
     }
 

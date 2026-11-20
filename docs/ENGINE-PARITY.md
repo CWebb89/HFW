@@ -51,7 +51,7 @@ listed here rather than left to be discovered during the swap:
 | # | Item | Why the app needs it |
 |---|------|----------------------|
 | 10 | The in-layer G-code channel and role-aware fan (next-layer's patch to libslic3r) | The calibration suite extrudes PA lines inside layer 1 through it; the fan role drives per-role cooling. The fan half is done — every feature has its own fan duty; the in-layer channel is not |
-| 11 | Support painting (`FacetsAnnotation` equivalent) and per-object layer-height profiles | Both are shipped UI that changes the slice (`--slice-features` measures 0 → 983 support moves and 125 → 187 layers). Variable layer height exists as a profile and as height bounds; painting and per-object profiles do not |
+| 11 | Support painting (`FacetsAnnotation` equivalent) and per-object layer-height profiles | Both are shipped UI that changes the slice (`--slice-features` measures 0 → 983 support moves and 125 → 187 layers). Variable layer height exists as a profile and as height bounds; per-object profiles do not. **Support paint is done** on the support channel: per-triangle enforcer and blocker states on a mesh or a plate object, reaching `supports::seed_masks` through the single slice funnel, carried in the project file, and measured by a plate test whose painted blocker removes every support line the bare slice built. Seam and tool paint are not started |
 
 ## Detail
 
@@ -169,8 +169,9 @@ what the gate and the plate tests assert.
 
 **What is still needed.** AMF; plate-wide settings in the project part (only the
 print-level per-object keys travel today, because those are the ones with an
-inverse); instances, so one mesh shared by four build items is stored once; and
-paint, which the plan puts out of scope.
+inverse); and instances, so one mesh shared by four build items is stored once.
+Paint travels as run lengths on the object's `support` channel since project version
+2, and a version 1 file still opens without it.
 
 **Check.** A multi-plate 3MF imports with the same object count, transforms and
 layer counts as libslic3r produces from the same file.
@@ -218,9 +219,10 @@ does for the two reference slicers.
 
 ## Out of scope
 
-Seven features the reference slicers ship and this engine will not build: painting,
-text embossing, cut and hollow, STEP import, SLA, MMU colour mixing, and a nesting
-arranger. The list, what each would cost, and the setting that stands in for it is
+Six features the reference slicers ship and this engine will not build: text
+embossing, cut and hollow, STEP import, SLA, MMU colour mixing, and a nesting
+arranger. Support painting used to be on that list and is now built — see item 11 and
+`docs/PAINT.md`. The list, what each would cost, and the setting that stands in for it is
 `docs/SCOPE.md`, generated from the same table that gives the application's panel its
 `capabilities` rows — so a control marked unavailable in the UI and a paragraph in
 this repository cannot disagree. The disposition is a product decision with stated

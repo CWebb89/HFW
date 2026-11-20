@@ -24,7 +24,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use hfw_engine::{
-    merge_stacks, run, Job, Mesh, MeshDiagnostics, MeshError, MeshTransform, PlateOrder, Settings,
+    merge_stacks, run, run_painted, Job, Mesh, MeshDiagnostics, MeshError, MeshTransform, Paint,
+    PlateOrder, Settings,
 };
 
 pub mod arrange;
@@ -88,6 +89,8 @@ pub enum PlateError {
         /// Bed the packer worked in.
         bed: (f64, f64),
     },
+    /// A paint channel does not hold one state per triangle.
+    Paint(MeshError),
 }
 
 impl fmt::Display for PlateError {
@@ -112,6 +115,7 @@ impl fmt::Display for PlateError {
                  spacing this plate uses",
                 bed.0, bed.1, footprint.0, footprint.1
             ),
+            PlateError::Paint(error) => write!(f, "{error}"),
         }
     }
 }
@@ -223,6 +227,7 @@ pub struct PlateObject {
     enabled: bool,
     positioned: bool,
     settings: Option<Settings>,
+    paint: Paint,
     overrides: BTreeSet<String>,
     ignored_overrides: BTreeSet<String>,
 }
@@ -312,6 +317,20 @@ impl PlateObject {
     /// Gives the object settings of its own.
     pub fn set_settings(&mut self, settings: Settings) {
         self.settings = Some(settings);
+    }
+
+    /// The painted states this object carries.
+    pub fn paint(&self) -> &Paint {
+        &self.paint
+    }
+
+    /// Replaces one paint channel, checking it against the object's triangles.
+    pub fn set_paint(&mut self, paint: Paint) -> Result<(), PlateError> {
+        paint
+            .validate(self.mesh.triangle_count())
+            .map_err(PlateError::Paint)?;
+        self.paint = paint;
+        Ok(())
     }
 
     /// Drops the object's own settings, so it prints with the plate's again.
@@ -475,6 +494,7 @@ impl Plate {
             enabled: true,
             positioned,
             settings: None,
+            paint: Paint::default(),
             overrides: BTreeSet::new(),
             ignored_overrides: BTreeSet::new(),
         });
@@ -734,12 +754,13 @@ impl Plate {
                 Some(object.placed_mesh()?)
             });
         }
-        let placed: Vec<(&Mesh, &Settings)> = objects
+        let placed: Vec<(&Mesh, Option<&Paint>, &Settings)> = objects
             .iter()
             .zip(&moved)
             .map(|(object, moved)| {
                 (
                     moved.as_ref().unwrap_or(&object.mesh),
+                    Some(&object.paint),
                     object.settings().unwrap_or(settings),
                 )
             })
@@ -754,7 +775,7 @@ impl Plate {
 /// This is the whole of "a plate becomes a job" — one implementation, used by
 /// [`Plate::slice`] and by callers that hold placed meshes and no document.
 pub fn slice_placed<'a>(
-    objects: impl IntoIterator<Item = (&'a Mesh, &'a Settings)>,
+    objects: impl IntoIterator<Item = (&'a Mesh, Option<&'a Paint>, &'a Settings)>,
     first_layer_height: f64,
     layer_height: f64,
     order: PlateOrder,
@@ -770,18 +791,18 @@ pub fn slice_placed<'a>(
 /// Progress is per object, in plate order, because that is where the time goes:
 /// the merge afterwards is linear in layers and cannot be interrupted usefully.
 pub fn slice_placed_with_progress<'a>(
-    objects: impl IntoIterator<Item = (&'a Mesh, &'a Settings)>,
+    objects: impl IntoIterator<Item = (&'a Mesh, Option<&'a Paint>, &'a Settings)>,
     first_layer_height: f64,
     layer_height: f64,
     order: PlateOrder,
     mut progress: impl FnMut(usize, usize) -> bool,
 ) -> Result<Job, PlateError> {
-    let objects: Vec<(&Mesh, &Settings)> = objects.into_iter().collect();
+    let objects: Vec<(&Mesh, Option<&Paint>, &Settings)> = objects.into_iter().collect();
     let total = objects.len();
     if order == PlateOrder::ByObject {
         let mut clearance: Option<Clearance> = None;
         let mut placed = Vec::with_capacity(objects.len());
-        for (index, (mesh, settings)) in objects.iter().enumerate() {
+        for (index, (mesh, _, settings)) in objects.iter().enumerate() {
             let own = Clearance::of(settings)?;
             clearance = Some(match clearance {
                 None => own,
@@ -813,14 +834,17 @@ pub fn slice_placed_with_progress<'a>(
     }
     let mut stacks = Vec::new();
     let mut diagnostics = MeshDiagnostics::default();
-    for (done, (mesh, settings)) in objects.into_iter().enumerate() {
+    for (done, (mesh, paint, settings)) in objects.into_iter().enumerate() {
         if !progress(done, total) {
             return Err(PlateError::Cancelled);
         }
         add_diagnostics(&mut diagnostics, mesh.diagnostics());
         stacks.push(
-            run(mesh, first_layer_height, layer_height, settings)
-                .map_err(|error| PlateError::Slice(error.to_string()))?,
+            match paint.filter(|paint| !paint.is_empty()) {
+                Some(paint) => run_painted(mesh, paint, first_layer_height, layer_height, settings),
+                None => run(mesh, first_layer_height, layer_height, settings),
+            }
+            .map_err(|error| PlateError::Slice(error.to_string()))?,
         );
     }
     if stacks.is_empty() {

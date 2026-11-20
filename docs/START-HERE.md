@@ -70,7 +70,7 @@ Slicing is not the only job a slicer application does. Today:
 | arranging objects on the bed | `libslic3r` |
 | preview data structures (`libvgcode`, `libpgcode`) | `libslic3r` |
 | reading and writing `.3mf` project files | `libslic3r` |
-| cut, hollow, text, paint | `libslic3r` |
+| cut, hollow, text | `libslic3r` |
 
 `tools/bootstrap` fetched PrusaSlicer once, applied seven small patches from
 `patches/`, and the application links it. That is why a fresh build is hours: the
@@ -85,7 +85,8 @@ list whose definition of done is:
 source: **43 of 303 files** under `src/` still reach into the C++ engine, sorted
 by the phase that removes each one. Zero rows left means the C++ engine is gone.
 Phases 0–6 build Rust replacements; phase 7 lists what simply will not be ported
-(paint, text, cut, hollow, STEP import, SLA, MMU colour mixing, nesting arranger)
+(text, cut, hollow, STEP import, SLA, MMU colour mixing, nesting arranger; support
+painting has since been built in HFW)
 — out by decision, not by neglect.
 
 One more reason the plan exists: while the binary links PrusaSlicer, next-layer is
@@ -279,9 +280,10 @@ phase 0 (landed) ─┬─ phase 1 C ABI ─┬─ phase 2 document model ─┬
    grew the write side; `crates/plate/src/project.rs` owns the project part) so read
    and write cannot drift. Landed: a saved plate reopens and slices to the same
    bytes.
-7. **Optional features** — paint, text, cut/hollow, STEP, SLA, MMU and a nesting
-   arranger are declined in writing rather than left undone: `docs/SCOPE.md`, and
-   the surface's `capabilities` rows the panel renders as unavailable.
+7. **Optional features** — text, cut/hollow, STEP, SLA, MMU and a nesting arranger
+   are declined in writing rather than left undone: `docs/SCOPE.md`, and the surface's
+   `capabilities` rows the panel renders as unavailable. Support paint was on that list
+   and is now built (`docs/PAINT.md`), with seam and tool paint staged behind it.
 
 ### What must be ported over before `upstream/` can go
 
@@ -295,7 +297,7 @@ means the application loses a capability it advertises.
 | `patches/0003`, `0005` | per-role fan speeds | the engine's cooling stage |
 | `patches/0006` | the in-layer extrusion channel the application's own G-code uses | the engine's writer |
 | `libslic3r` | plate document, settings, arrange, preview input, `.3mf` read/write, tile/transform | phases 1–6 above |
-| `libslic3r` | paint, text, cut, hollow, STEP import, SLA, MMU colour, nesting arranger | **phase 7: not ported, marked unavailable in the interface** |
+| `libslic3r` | text, cut, hollow, STEP import, SLA, MMU colour, nesting arranger | **phase 7: not ported, marked unavailable in the interface** |
 | reference dialect | 7 unapplied algorithms (`avoid_crossing_perimeters`, `ensure_vertical_shell_thickness`, `fill_pattern`, `max_volumetric_extrusion_rate_slope_negative`/`_positive`, `slicing_mode`, `support_material_style`) and `wipe_tower_acceleration` | the engine, `SETTINGS-GAPS.md` says what each costs |
 | reference dialect | 57 multi-material settings | the toolchanger work, not before |
 

@@ -27,11 +27,13 @@ pub use hfw_infill::{
 };
 pub use hfw_mesh::{
     load_3mf_objects, three_mf_metadata, Mesh, MeshDiagnostics, MeshError, MeshRepairReport,
-    MeshTransform, ModelObject,
+    MeshTransform, ModelObject, Paint, PAINT_SUPPORT_BLOCKER, PAINT_SUPPORT_ENFORCER,
+    PAINT_SUPPORT_NONE,
 };
 pub use hfw_slicing::{
     slice_mesh, SliceError as SlicingError, SliceLayer as Slice, MAX_CLOSE_GAPS,
 };
+pub use hfw_support::{PaintRegions, PaintSpan};
 pub use hfw_support::{
     Style as SupportStyle, SupportParams as SupportSettings, SupportPattern as SupportFill,
 };
@@ -525,6 +527,8 @@ pub enum EngineError {
     /// column that would stand through it. Neither can be dropped to satisfy the
     /// other, so the combination is refused rather than half printed.
     VaseWithSupport,
+    /// A painted state the engine does not know.
+    Paint(String),
 }
 
 impl From<SliceError> for EngineError {
@@ -548,6 +552,7 @@ impl std::fmt::Display for EngineError {
                 f,
                 "spiral vase mode cannot carry support; clear one of the two"
             ),
+            EngineError::Paint(message) => write!(f, "paint: {message}"),
         }
     }
 }
@@ -774,9 +779,94 @@ fn ironing_covers(target: IroningTarget, topmost: bool) -> bool {
     }
 }
 
+/// Slices `mesh` and plans beads for every layer, with painted facets taken into
+/// account.
+///
+/// The paint is converted to support footprints before the mesh goes through
+/// preparation, so a repair that reorders triangles cannot invalidate the states
+/// the caller supplied.
+pub fn run_painted(
+    mesh: &Mesh,
+    paint: &Paint,
+    first_layer_height: f64,
+    layer_height: f64,
+    settings: &Settings,
+) -> Result<Job, EngineError> {
+    let support_paint = support_paint(mesh, paint)?;
+    run_with_paint(
+        mesh,
+        support_paint.as_ref(),
+        first_layer_height,
+        layer_height,
+        settings,
+    )
+}
+
+/// Painted facets as the support generator consumes them.
+///
+/// A facet's footprint is its own projection onto the bed, and its span is the
+/// height band between its lowest and highest vertex. An enforcer seeds the layer
+/// under that band; a blocker forbids support inside it.
+pub fn support_paint(mesh: &Mesh, paint: &Paint) -> Result<Option<PaintRegions>, EngineError> {
+    paint.validate(mesh.triangle_count())?;
+    if paint.support.is_empty() {
+        return Ok(None);
+    }
+    let mut enforcers = Vec::new();
+    let mut blockers = Vec::new();
+    for (index, state) in paint.support.iter().enumerate() {
+        if *state == PAINT_SUPPORT_NONE {
+            continue;
+        }
+        let points = mesh.triangle_vertices(index);
+        let ring: Vec<hfw_kernel::V2> = points
+            .iter()
+            .map(|point| {
+                let [x, y, _] = point.to_mm();
+                hfw_kernel::V2::new(x, y)
+            })
+            .collect();
+        let footprint = Region::new(vec![ring]);
+        if footprint.rings.is_empty() {
+            continue;
+        }
+        let heights: Vec<f64> = points.iter().map(|point| point.to_mm()[2]).collect();
+        let low = heights.iter().copied().fold(f64::INFINITY, f64::min);
+        let high = heights.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let span = PaintSpan {
+            footprint,
+            bottom: low,
+            top: high,
+        };
+        match *state {
+            PAINT_SUPPORT_ENFORCER => enforcers.push(span),
+            PAINT_SUPPORT_BLOCKER => blockers.push(span),
+            other => {
+                return Err(EngineError::Paint(format!(
+                    "triangle {index} has support state {other}, which is not one of none, enforcer or blocker"
+                )))
+            }
+        }
+    }
+    Ok(Some(PaintRegions {
+        enforcers,
+        blockers,
+    }))
+}
+
 /// Slices `mesh` and plans beads for every layer.
 pub fn run(
     mesh: &Mesh,
+    first_layer_height: f64,
+    layer_height: f64,
+    settings: &Settings,
+) -> Result<Job, EngineError> {
+    run_with_paint(mesh, None, first_layer_height, layer_height, settings)
+}
+
+fn run_with_paint(
+    mesh: &Mesh,
+    support_paint: Option<&PaintRegions>,
     first_layer_height: f64,
     layer_height: f64,
     settings: &Settings,
@@ -842,7 +932,13 @@ pub fn run(
                 .iter()
                 .map(|s| (s.print_z - s.bottom_z) as f64 / 1e6)
                 .collect();
-            let masks = hfw_support::Supports::build(&regions, cache, sp, &heights);
+            let masks = hfw_support::Supports::build_with_paint(
+                &regions,
+                cache,
+                sp,
+                &heights,
+                support_paint,
+            );
             support_ms = t.elapsed().as_secs_f64() * 1e3;
             Some(masks)
         }

@@ -18,7 +18,7 @@
 //! poses, and a reader that expected a pose would need to know our transform
 //! convention to place a part.
 
-use hfw_engine::{Mesh, PlateOrder, Settings};
+use hfw_engine::{Mesh, Paint, PlateOrder, Settings};
 use hfw_mesh::{archive_parts, model_part_xml, objects_from_3mf_text};
 
 use crate::{ObjectId, Plate, PlateError};
@@ -27,7 +27,13 @@ use crate::{ObjectId, Plate, PlateError};
 pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 
 /// Version of the project part's own format.
-pub const PROJECT_VERSION: u32 = 1;
+///
+/// Version 2 added per-object paint. Version 1 files still open: they simply
+/// carry no paint.
+pub const PROJECT_VERSION: u32 = 2;
+
+/// Oldest project format this reader accepts.
+const OLDEST_PROJECT_VERSION: u32 = 1;
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -113,6 +119,10 @@ impl Plate {
                 for (key, value) in &saved.settings {
                     plate.set_object_setting(id, key, value)?;
                 }
+                let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
+                object.set_paint(Paint {
+                    support: saved.support.clone(),
+                })?;
             }
         }
         Ok(plate)
@@ -154,6 +164,7 @@ struct SavedObject {
     index: usize,
     enabled: bool,
     settings: Vec<(String, String)>,
+    support: Vec<u8>,
 }
 
 fn project_part(plate: &Plate) -> Result<String, PlateError> {
@@ -178,6 +189,12 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
                 escape(&value)
             ));
         }
+        if !object.paint.support.is_empty() {
+            xml.push_str(&format!(
+                "    <paint channel=\"support\" runs=\"{}\"/>\n",
+                encode_runs(&object.paint.support)
+            ));
+        }
         xml.push_str("  </object>\n");
     }
     xml.push_str("</hfwProject>\n");
@@ -186,10 +203,13 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
 
 fn parse_project(xml: &str) -> Result<Vec<SavedObject>, PlateError> {
     let version = attribute_in(xml, "hfwProject", "version").unwrap_or_default();
-    if version != PROJECT_VERSION.to_string() {
+    let version: u32 = version
+        .parse()
+        .map_err(|_| PlateError::Slice(format!("the project part states version {version:?}")))?;
+    if !(OLDEST_PROJECT_VERSION..=PROJECT_VERSION).contains(&version) {
         return Err(PlateError::Slice(format!(
             "this project was written by version {version} of the format and this engine reads \
-             version {PROJECT_VERSION}"
+             versions {OLDEST_PROJECT_VERSION} to {PROJECT_VERSION}"
         )));
     }
     let mut saved = Vec::new();
@@ -209,14 +229,61 @@ fn parse_project(xml: &str) -> Result<Vec<SavedObject>, PlateError> {
                 .ok_or_else(|| PlateError::Slice("a setting has no value".to_owned()))?;
             settings.push((unescape(&key), unescape(&value)));
         }
+        let mut support = Vec::new();
+        for paint in elements(&block, "paint") {
+            let channel = attribute_in(&paint, "paint", "channel")
+                .ok_or_else(|| PlateError::Slice("a paint block has no channel".to_owned()))?;
+            if channel != "support" {
+                continue;
+            }
+            let runs = attribute_in(&paint, "paint", "runs")
+                .ok_or_else(|| PlateError::Slice("a paint block has no runs".to_owned()))?;
+            support = decode_runs(&runs)?;
+        }
         saved.push(SavedObject {
             index,
             enabled: enabled.trim() != "0",
             settings,
+            support,
         });
     }
     saved.sort_by_key(|saved| saved.index);
     Ok(saved)
+}
+
+/// Packs a state vector as run lengths, `state:count` separated by commas.
+///
+/// A painted object is mostly one state — several thousand triangles at `0`
+/// between the two ears of a painted overhang — so runs keep the project part
+/// readable and short enough to diff by eye.
+fn encode_runs(states: &[u8]) -> String {
+    let mut out = String::new();
+    let mut index = 0;
+    while index < states.len() {
+        let state = states[index];
+        let mut count = 1;
+        while index + count < states.len() && states[index + count] == state {
+            count += 1;
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        out.push_str(&format!("{state}:{count}"));
+        index += count;
+    }
+    out
+}
+
+fn decode_runs(text: &str) -> Result<Vec<u8>, PlateError> {
+    let bad = || PlateError::Slice(format!("the project's paint runs are malformed: {text}"));
+    let mut states = Vec::new();
+    for run in text.split(',') {
+        let (state, count) = run.split_once(':').ok_or_else(bad)?;
+        let state: u8 = state.trim().parse().map_err(|_| bad())?;
+        let count: usize = count.trim().parse().map_err(|_| bad())?;
+        states.extend(std::iter::repeat_n(state, count));
+    }
+    Ok(states)
 }
 
 fn elements(xml: &str, name: &str) -> Vec<String> {
@@ -390,8 +457,8 @@ mod tests {
             .iter()
             .map(|(name, content)| {
                 if name == PROJECT_PART {
-                    let xml =
-                        String::from_utf8_lossy(content).replace("version=\"1\"", "version=\"9\"");
+                    let xml = String::from_utf8_lossy(content)
+                        .replace(&format!("version=\"{PROJECT_VERSION}\""), "version=\"9\"");
                     (name.as_str(), xml.into_bytes())
                 } else {
                     (name.as_str(), content.clone())
@@ -403,7 +470,10 @@ mod tests {
         match refused {
             Err(PlateError::Slice(message)) => {
                 assert!(message.contains("version 9"), "message was `{message}`");
-                assert!(message.contains("version 1"), "message was `{message}`");
+                assert!(
+                    message.contains("versions 1 to 2"),
+                    "the refusal names the range it reads: `{message}`"
+                );
             }
             other => panic!("{other:?}"),
         }

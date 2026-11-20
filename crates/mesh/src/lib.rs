@@ -64,6 +64,49 @@ pub struct Triangle(
     pub [u32; 3],
 );
 
+/// What a painted support facet asks for.
+///
+/// The numbers are the ABI's, so a C caller's byte is this byte.
+pub const PAINT_SUPPORT_NONE: u8 = 0;
+/// Support has to reach this facet.
+pub const PAINT_SUPPORT_ENFORCER: u8 = 1;
+/// Support may not occupy the space under this facet.
+pub const PAINT_SUPPORT_BLOCKER: u8 = 2;
+
+/// Per-triangle paint states, indexed by the mesh's own triangle order.
+///
+/// One vector per channel; a channel shorter than the triangle count means "no
+/// state anywhere", so an object that was never painted costs nothing. Channels
+/// are added as consumers land: support today, seam and tool when they are
+/// consumed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Paint {
+    /// Support states, one of the `PAINT_SUPPORT_*` constants per triangle.
+    pub support: Vec<u8>,
+}
+
+impl Paint {
+    /// Checks every channel against a triangle count.
+    pub fn validate(&self, triangles: usize) -> Result<(), MeshError> {
+        let channels = [("support", &self.support)];
+        for (name, states) in channels {
+            if !states.is_empty() && states.len() != triangles {
+                return Err(MeshError::PaintLength {
+                    channel: name,
+                    states: states.len(),
+                    triangles,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// True when no channel carries a state.
+    pub fn is_empty(&self) -> bool {
+        self.support.is_empty()
+    }
+}
+
 /// An indexed triangle mesh.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Mesh {
@@ -118,6 +161,15 @@ pub enum MeshError {
     Geometry(GeometryError),
     /// Checked integer arithmetic exceeded the supported intermediate range.
     ArithmeticOverflow,
+    /// A paint channel does not hold one state per triangle.
+    PaintLength {
+        /// Channel name, as the ABI names it.
+        channel: &'static str,
+        /// States supplied.
+        states: usize,
+        /// Triangles in the mesh.
+        triangles: usize,
+    },
 }
 
 impl From<GeometryError> for MeshError {
@@ -147,6 +199,14 @@ impl fmt::Display for MeshError {
             Self::ArithmeticOverflow => {
                 formatter.write_str("mesh arithmetic overflowed the supported integer range")
             }
+            Self::PaintLength {
+                channel,
+                states,
+                triangles,
+            } => write!(
+                formatter,
+                "paint channel {channel} has {states} states for {triangles} triangles"
+            ),
         }
     }
 }

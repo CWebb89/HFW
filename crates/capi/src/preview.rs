@@ -104,7 +104,7 @@ mod tests {
         let path = format!("{}/../../fixtures/cube.stl", env!("CARGO_MANIFEST_DIR"));
         let mesh = hfw_engine::Mesh::load_stl(&path).expect("the fixture loads");
         let settings = hfw_engine::Settings::default();
-        let objects = [(&mesh, &settings)];
+        let objects = [(&mesh, None, &settings)];
         hfw_plate::slice_placed(objects, 0.2, 0.2, hfw_engine::PlateOrder::ByLayer)
             .expect("the cube slices")
     }

@@ -95,7 +95,7 @@ mod tests {
             "the surface has no capabilities"
         );
         let listed = text.matches("\"disposition\": \"out_of_scope\"").count();
-        assert_eq!(listed, 7, "{listed} out-of-scope capabilities");
+        assert_eq!(listed, 6, "{listed} out-of-scope capabilities");
         assert_eq!(text.matches("\"panel\": \"unavailable\"").count(), listed);
         assert_eq!(text.matches("\"title\":").count(), listed);
         assert_eq!(text.matches("\"instead\":").count(), listed);

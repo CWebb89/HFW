@@ -37,7 +37,7 @@ mod job;
 mod preview;
 
 use hfw_config::PrinterConfig;
-use hfw_engine::{Job, Mesh, MeshTransform, PlateOrder, Settings};
+use hfw_engine::{Job, Mesh, MeshTransform, Paint, PlateOrder, Settings};
 use hfw_plate::{ObjectId, Plate, PlateObject};
 
 /// Version of the surface this library exports.
@@ -85,6 +85,7 @@ impl Default for HfwTransform {
 /// An opaque mesh owned by this library.
 pub struct HfwMesh {
     mesh: Mesh,
+    paint: Paint,
 }
 
 /// An opaque plate document owned by this library.
@@ -133,12 +134,31 @@ unsafe fn text_of(value: *const c_char, what: &str) -> Result<String, String> {
         .map_err(|_| format!("{what} is not valid UTF-8"))
 }
 
+/// Borrows one paint channel's states out of a C array.
+unsafe fn paint_states(states: *const u8, len: usize) -> Result<Vec<u8>, String> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if states.is_null() {
+        return Err("paint states is null".to_owned());
+    }
+    Ok(unsafe { std::slice::from_raw_parts(states, len) }.to_vec())
+}
+
 /// Borrows the mesh behind a handle.
 unsafe fn mesh_of<'a>(handle: *const HfwMesh) -> Result<&'a HfwMesh, String> {
     if handle.is_null() {
         return Err("mesh handle is null".to_owned());
     }
     Ok(unsafe { &*handle })
+}
+
+/// Borrows the mesh behind a handle, writable.
+unsafe fn mesh_mut<'a>(handle: *mut HfwMesh) -> Result<&'a mut HfwMesh, String> {
+    if handle.is_null() {
+        return Err("mesh handle is null".to_owned());
+    }
+    Ok(unsafe { &mut *handle })
 }
 
 /// Borrows the plate behind a handle.
@@ -245,9 +265,13 @@ fn slice_meshes(
     let (first, layer) = heights_of(&cfg, first_layer_height, layer_height);
     let mut meshes = Vec::with_capacity(handles.len());
     for handle in handles {
-        meshes.push(unsafe { mesh_of(*handle) }?.mesh.clone());
+        let mesh = unsafe { mesh_of(*handle) }?;
+        meshes.push((mesh.mesh.clone(), mesh.paint.clone()));
     }
-    let objects: Vec<(&Mesh, &Settings)> = meshes.iter().map(|mesh| (mesh, &settings)).collect();
+    let objects: Vec<(&Mesh, Option<&Paint>, &Settings)> = meshes
+        .iter()
+        .map(|(mesh, paint)| (mesh, Some(paint), &settings))
+        .collect();
     let job = hfw_plate::slice_placed(objects, first, layer, order_of(&cfg))
         .map_err(|error| error.to_string())?;
     write_job(&job, &cfg)
@@ -750,7 +774,12 @@ pub unsafe extern "C" fn hfw_mesh_load_file(path: *const c_char) -> *mut HfwMesh
     report(
         unsafe { text_of(path, "path") }.and_then(|path| {
             Mesh::load_model(Path::new(&path))
-                .map(|mesh| Box::into_raw(Box::new(HfwMesh { mesh })))
+                .map(|mesh| {
+                    Box::into_raw(Box::new(HfwMesh {
+                        mesh,
+                        paint: Paint::default(),
+                    }))
+                })
                 .map_err(|error| error.to_string())
         }),
         ptr::null_mut(),
@@ -774,7 +803,10 @@ pub unsafe extern "C" fn hfw_mesh_from_bytes(bytes: *const u8, len: usize) -> *m
         }
         let data = unsafe { std::slice::from_raw_parts(bytes, len) };
         let mesh = Mesh::from_stl_bytes(data).map_err(|error| error.to_string())?;
-        Ok(Box::into_raw(Box::new(HfwMesh { mesh })))
+        Ok(Box::into_raw(Box::new(HfwMesh {
+            mesh,
+            paint: Paint::default(),
+        })))
     };
     report(build(), ptr::null_mut())
 }
@@ -803,7 +835,10 @@ pub unsafe extern "C" fn hfw_mesh_transform(
                 translation_mm: transform.translation_mm,
             })
             .map_err(|error| error.to_string())?;
-        Ok(Box::into_raw(Box::new(HfwMesh { mesh: moved })))
+        Ok(Box::into_raw(Box::new(HfwMesh {
+            mesh: moved,
+            paint: source.paint.clone(),
+        })))
     };
     report(build(), ptr::null_mut())
 }
@@ -842,6 +877,84 @@ pub unsafe extern "C" fn hfw_mesh_triangle_count(mesh: *const HfwMesh) -> usize 
         Ok(source.mesh.triangle_count())
     };
     report(count(), 0)
+}
+
+/// Painted support: no state on this facet.
+pub const HFW_PAINT_SUPPORT: i32 = 0;
+
+/// Writes one paint channel onto `mesh`.
+///
+/// `states` points at `len` bytes, one per triangle in the mesh's own triangle
+/// order, each of them 0 (none), 1 (enforcer) or 2 (blocker). A `len` of zero
+/// clears the channel. Returns 0 on success and -1 when the handle is null, the
+/// length is not the triangle count, or a state is not one of the three.
+///
+/// # Safety
+///
+/// `mesh` must be a live handle writable for the call, and `states` must point at
+/// `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_paint_set(
+    mesh: *mut HfwMesh,
+    channel: c_int,
+    states: *const u8,
+    len: usize,
+) -> c_int {
+    let set = || -> Result<c_int, String> {
+        let target = unsafe { mesh_mut(mesh) }?;
+        let states = unsafe { paint_states(states, len)? };
+        match channel {
+            HFW_PAINT_SUPPORT => {
+                target.paint.support = states;
+                target
+                    .paint
+                    .validate(target.mesh.triangle_count())
+                    .map_err(|error| error.to_string())?;
+                Ok(0)
+            }
+            other => Err(format!("paint channel {other} does not exist")),
+        }
+    };
+    report(set(), -1)
+}
+
+/// Reads one paint channel back off `mesh`.
+///
+/// `out` receives one byte per triangle, in the mesh's own order, and `len` states
+/// how many bytes `out` can hold. Returns the number of bytes written on success,
+/// and -1 when the handle is null, the channel does not exist, or `len` is not the
+/// triangle count.
+///
+/// # Safety
+///
+/// `mesh` must be a live handle, and `out` must point at `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_paint_get(
+    mesh: *const HfwMesh,
+    channel: c_int,
+    out: *mut u8,
+    len: usize,
+) -> isize {
+    let get = || -> Result<isize, String> {
+        let source = unsafe { mesh_of(mesh) }?;
+        let states = match channel {
+            HFW_PAINT_SUPPORT => &source.paint.support,
+            other => return Err(format!("paint channel {other} does not exist")),
+        };
+        let triangles = source.mesh.triangle_count();
+        if states.len() != triangles {
+            return Ok(0);
+        }
+        if states.len() > len || (!states.is_empty() && out.is_null()) {
+            return Err(format!(
+                "{len} bytes were offered for {} triangles",
+                states.len()
+            ));
+        }
+        unsafe { std::ptr::copy_nonoverlapping(states.as_ptr(), out, states.len()) };
+        Ok(states.len() as isize)
+    };
+    report(get(), -1)
 }
 
 /// Returns the mesh's enclosed volume in cubic millimetres, or NaN for a null
@@ -1193,6 +1306,98 @@ pub unsafe extern "C" fn hfw_plate_object_clear_settings(plate: *mut HfwPlate, i
             .map_err(|error| error.to_string())
     };
     report(clear(), -1)
+}
+
+/// Writes one paint channel onto object `id`.
+///
+/// `states` points at `len` bytes, one per triangle of the object's geometry, each
+/// of them 0 (none), 1 (enforcer) or 2 (blocker); a `len` of zero clears the
+/// channel. The states are indexed in the mesh's own triangle order, which
+/// placement, rotation and baking all preserve. Returns 0 on success and -1 when
+/// the object is not on the plate, the length is not the triangle count, or a
+/// state is not one of the three.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call, and `states` must point at
+/// `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_paint(
+    plate: *mut HfwPlate,
+    id: u64,
+    channel: c_int,
+    states: *const u8,
+    len: usize,
+) -> c_int {
+    let set = || -> Result<c_int, String> {
+        if channel != HFW_PAINT_SUPPORT {
+            return Err(format!("paint channel {channel} does not exist"));
+        }
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let states = unsafe { paint_states(states, len)? };
+        let object = unsafe { &mut *plate }
+            .plate
+            .object_mut(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        let mut paint = object.paint().clone();
+        paint.support = states;
+        object
+            .set_paint(paint)
+            .map(|()| 0)
+            .map_err(|error| error.to_string())
+    };
+    report(set(), -1)
+}
+
+/// Reads one paint channel back off object `id`.
+///
+/// `out` receives one byte per triangle, in the object's mesh order, and `len`
+/// states how many bytes `out` can hold. Returns the number of bytes written on
+/// success, and -1 when the object is not on the plate, the channel does not exist,
+/// or the buffer is too small.
+///
+/// # Safety
+///
+/// `plate` must be a live handle, and `out` must point at `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_paint_get(
+    plate: *const HfwPlate,
+    id: u64,
+    channel: c_int,
+    out: *mut u8,
+    len: usize,
+) -> isize {
+    let get = || -> Result<isize, String> {
+        if channel != HFW_PAINT_SUPPORT {
+            return Err(format!("paint channel {channel} does not exist"));
+        }
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let object = unsafe { &*plate }
+            .plate
+            .object(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        let states = &object.paint().support;
+        if states.is_empty() {
+            return Ok(0);
+        }
+        if states.len() > len || out.is_null() {
+            return Err(format!(
+                "{len} bytes were offered for {} triangles",
+                states.len()
+            ));
+        }
+        unsafe { std::ptr::copy_nonoverlapping(states.as_ptr(), out, states.len()) };
+        Ok(states.len() as isize)
+    };
+    report(get(), -1)
 }
 
 /// Writes object `id`'s bounds on the bed, in millimetres, into `out`.

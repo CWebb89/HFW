@@ -18,14 +18,6 @@
  ],
  "capabilities": [
   {
-   "id": "paint",
-   "title": "Painting supports, seams and brim",
-   "panel": "unavailable",
-   "note": "Placement comes from settings, not from the mouse: supports from support_material and its threshold angle, seams from seam_position, brim from brim_type and brim_width.",
-   "instead": "support_material, support_threshold_angle, seam_position, brim_type",
-   "disposition": "out_of_scope"
-  },
-  {
    "id": "text",
    "title": "Text embossing and font loading",
    "panel": "unavailable",

@@ -260,7 +260,7 @@ emitted from the same rows if a compile-time check per key is ever wanted.
 
 ---
 
-## DECISION-16: seven features are declined in writing, from one table
+## DECISION-16: six features are declined in writing, from one table
 
 **Options**: (a) leave them unmentioned and let the absence speak; (b) build them;
 (c) name them as out of scope in one table that generates both the document and the
@@ -269,23 +269,26 @@ rows the application's panel renders as unavailable.
 **Choice**: (c) — `CAPABILITIES` in `tools/gen-settings-ledger.py`, which writes
 `docs/SCOPE.md` and the surface's `capabilities` array in the same run.
 
-**Reason**: (a) is how a rewrite quietly becomes a decade — every one of the seven is
-a project, and an unmentioned gap is discovered by a user who assumes it exists. (b)
-is out of the question: paint and text alone want a mesh-editing kernel, and STEP
-wants an OCCT-class one, which is precisely the dependency this engine exists to not
-have. (c) makes "unavailable" a fact the UI reads rather than a paragraph someone
-remembers, and it costs one table.
+**Reason**: (a) is how a rewrite quietly becomes a decade — every one of them is a
+project, and an unmentioned gap is discovered by a user who assumes it exists. (b) is
+out of the question: text alone wants a mesh-editing kernel, and STEP wants an
+OCCT-class one, which is precisely the dependency this engine exists to not have. (c)
+makes "unavailable" a fact the UI reads rather than a paragraph someone remembers, and
+it costs one table.
 
-The reason it is cheap is that none of the seven has a setting today: the engine does
-not parse `single_extruder_multi_material` or `wipe_tower`, so asking for one is
-refused by name rather than silently ignored — which is the failure mode this
-decision exists to prevent, and the ledger is the instrument that proves it.
+The reason it is cheap is that none of them has a setting today: the engine does not
+parse `single_extruder_multi_material` or `wipe_tower`, so asking for one is refused
+by name rather than silently ignored — which is the failure mode this decision exists
+to prevent, and the ledger is the instrument that proves it.
 
-**How to reverse**: any one of the seven becomes a project against HFW's own
-geometry, never a return to `upstream/`. Removing its row demotes the panel control
-to available only once the feature slices and verifies. If paint or text turn out to
-matter — they are the two users notice — that is a new crate with its own provenance
-row, and `docs/SCOPE.md` loses a line.
+**How to reverse**: any one of them becomes a project against HFW's own geometry,
+never a return to `upstream/`. Removing its row demotes the panel control to available
+only once the feature slices and verifies. Paint is the first to go through that door:
+support paint is a per-triangle channel in `crates/mesh`, consumed inside
+`supports::seed_masks` and carried in the project file, so its row is gone from
+`docs/SCOPE.md` while seam and tool paint remain unbuilt (`docs/PAINT.md`). If text
+turns out to matter — it is the other one users notice — it is a new crate with its
+own provenance row, and `docs/SCOPE.md` loses a line.
 
 ## DECISION-15: a project file is a 3MF with our own side part, and settings are written by inverting the parser
 

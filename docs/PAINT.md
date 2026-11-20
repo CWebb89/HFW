@@ -89,20 +89,16 @@ int32_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
    file can carry it; nothing consumes it until a second extruder is real. That is
    recorded as `n/a` in the settings ledger rather than claimed as done.
 
-## What this costs
+## What it costs from here
 
-Support paint touches `seed_masks` (overhang seeds from layers), the mask cache and
-the two support styles (columns and tree), so it is a supported feature with a
-geometry path behind it, not a mapping — the same order of work as an infill
-pattern. Seam paint touches the writer's seam chooser. Tool paint is a plate-level
-change to how stacks are assigned to extruders and cannot start until the machine
-side exists.
+Seam paint touches the writer's seam chooser. Tool paint is a plate-level change to how
+stacks are assigned to extruders, and it cannot start until the machine side exists.
 
 ## What this does not do
 
 - **It does not make HFW a painting application.** Brush geometry, the cursor ray,
   the brush radius and the undo stack stay in the application; the engine owns the
   states and what they mean to the toolpath.
-- **It does not paint text, cut or hollow.** Those are declined in
+- **It does not paint text, cut or hollow.** Those are still declined in
   `crates/config/assets/settings-surface.json` under `capabilities`, and a paint
   channel does not change that.

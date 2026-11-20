@@ -15,6 +15,19 @@ fn plate() -> Plate {
     Plate::new(Settings::default())
 }
 
+/// A post under a wide table: the reason support exists.
+fn table() -> Mesh {
+    let post = Mesh::box_mm(4.0, 20.0, 20.0).expect("a box builds");
+    let top = Mesh::box_mm(30.0, 20.0, 5.0)
+        .expect("a box builds")
+        .transformed(MeshTransform {
+            translation_mm: [0.0, 0.0, 20.0],
+            ..MeshTransform::default()
+        })
+        .expect("the table lifts");
+    Mesh::merged(&[post, top]).expect("the two boxes merge")
+}
+
 #[test]
 fn an_object_keeps_its_name_and_identity_across_the_removal_of_its_neighbours() {
     let mut plate = plate();
@@ -392,6 +405,107 @@ fn two_objects_within_the_toolheads_radius_are_refused() {
     plate
         .slice(0.2, 0.2, PlateOrder::ByLayer)
         .expect("the same plate prints layer by layer, where nothing passes between the parts");
+}
+
+#[test]
+fn a_painted_blocker_removes_the_support_a_bare_slice_builds() {
+    let mut settings = Settings::default();
+    settings.support = Some(hfw_engine::SupportSettings::new(settings.wall.w));
+    let mut plate = Plate::new(settings);
+    let id = plate.add("table", table()).expect("the table adds");
+    let bare = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the table slices");
+    let supports = |job: &hfw_engine::Job| -> usize {
+        job.layers
+            .iter()
+            .flat_map(|layer| layer.paths.iter())
+            .filter(|line| line.kind == hfw_engine::PathKind::Support)
+            .count()
+    };
+    assert!(supports(&bare) > 0, "the table's overhang needs support");
+
+    let mesh = plate.object(id).expect("added").mesh();
+    let triangles = mesh.triangle_count();
+    let states: Vec<u8> = (0..triangles)
+        .map(|index| {
+            let low = mesh
+                .triangle_vertices(index)
+                .iter()
+                .map(|point| point.to_mm()[2])
+                .fold(f64::INFINITY, f64::min);
+            if low >= 20.0 {
+                2
+            } else {
+                0
+            }
+        })
+        .collect();
+    plate
+        .object_mut(id)
+        .expect("added")
+        .set_paint(hfw_engine::Paint { support: states })
+        .expect("the states match the triangles");
+    let blocked = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the painted table slices");
+    assert_eq!(
+        supports(&blocked),
+        0,
+        "every support line under a painted blocker is gone"
+    );
+}
+
+#[test]
+fn paint_survives_a_project_round_trip() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let triangles = plate.object(id).expect("added").mesh().triangle_count();
+    let mut states = vec![0u8; triangles];
+    states[0] = 1;
+    states[triangles - 1] = 2;
+    plate
+        .object_mut(id)
+        .expect("added")
+        .set_paint(hfw_engine::Paint { support: states })
+        .expect("the states match the triangles");
+
+    let bytes = plate.to_project().expect("the plate writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the plate opens");
+    let object = reopened
+        .objects()
+        .first()
+        .expect("the project holds the object");
+    let support = &object.paint().support;
+    assert_eq!(
+        support.len(),
+        triangles,
+        "one state per triangle comes back"
+    );
+    assert_eq!(support[0], 1, "the enforcer on the first triangle survives");
+    assert_eq!(
+        support[triangles - 1],
+        2,
+        "the blocker on the last triangle survives"
+    );
+    assert_eq!(support[1], 0, "and the untouched triangles are untouched");
+}
+
+#[test]
+fn a_paint_channel_of_the_wrong_length_is_refused() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let refused = plate
+        .object_mut(id)
+        .expect("added")
+        .set_paint(hfw_engine::Paint {
+            support: vec![0u8; 3],
+        })
+        .expect_err("three states cannot describe a cube");
+    assert!(
+        refused.to_string().contains("3 states"),
+        "the refusal names the mismatch: {refused}"
+    );
 }
 
 #[test]

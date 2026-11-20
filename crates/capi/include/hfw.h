@@ -96,6 +96,31 @@ int32_t hfw_mesh_bounds(const HfwMesh *mesh, HfwBounds *out);
 /** Returns the triangle count, or 0 for a NULL handle. */
 size_t hfw_mesh_triangle_count(const HfwMesh *mesh);
 
+/** Painted support: no state on this facet. There are no other channels yet. */
+#define HFW_PAINT_SUPPORT 0
+
+/**
+ * Writes one paint channel onto `mesh`.
+ *
+ * `states` points at `len` bytes, one per triangle in the mesh's own order, each
+ * 0 (none), 1 (enforcer) or 2 (blocker). A `len` of 0 clears the channel.
+ *
+ * Returns 0 on success, -1 when the handle is NULL, the length is not the triangle
+ * count, or a state is outside the three.
+ */
+int32_t hfw_mesh_paint_set(HfwMesh *mesh, int32_t channel, const uint8_t *states,
+                           size_t len);
+
+/**
+ * Reads one paint channel back off `mesh`.
+ *
+ * `out` holds `len` bytes; the return value is the number of bytes written, 0 when
+ * the channel was never painted, and -1 when the handle is NULL, the channel does
+ * not exist, or `len` is smaller than the triangle count.
+ */
+ptrdiff_t hfw_mesh_paint_get(const HfwMesh *mesh, int32_t channel, uint8_t *out,
+                           size_t len);
+
 /** Returns the enclosed volume in cubic millimetres, or NaN for a NULL handle. */
 double hfw_mesh_volume(const HfwMesh *mesh);
 
@@ -214,6 +239,30 @@ int32_t hfw_plate_object_set(HfwPlate *plate, uint64_t id, const char *key,
 
 /** Drops object `id`'s own settings, so it prints with the plate's again. */
 int32_t hfw_plate_object_clear_settings(HfwPlate *plate, uint64_t id);
+
+/**
+ * Writes one paint channel onto object `id`.
+ *
+ * `states` points at `len` bytes, one per triangle of the object's geometry, each
+ * 0 (none), 1 (enforcer) or 2 (blocker); a `len` of 0 clears the channel. Placement,
+ * rotation and baking preserve the triangle order, so states stay valid across
+ * them.
+ *
+ * Returns 0 on success, -1 when the object is not on the plate, the length is not
+ * the triangle count, or a state is outside the three.
+ */
+int32_t hfw_plate_object_paint(HfwPlate *plate, uint64_t id, int32_t channel,
+                               const uint8_t *states, size_t len);
+
+/**
+ * Reads one paint channel back off object `id`.
+ *
+ * Returns the number of bytes written, 0 when the channel was never painted, and
+ * -1 when the object is not on the plate, the channel does not exist, or `len` is
+ * smaller than the triangle count.
+ */
+ptrdiff_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
+                                   int32_t channel, uint8_t *out, size_t len);
 
 /**
  * Removes object `id` from the plate. Every other object keeps its id.
