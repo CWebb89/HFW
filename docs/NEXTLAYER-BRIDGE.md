@@ -224,6 +224,11 @@ profile, the profile decides every setting the job prints with and the document 
 objects, their overrides, their volumes, their layer heights, the timeline and the
 strokes; without one, the plate is sliced on the settings it carries.
 
+The ABI carries both placements: `hfw_plate_slice` is the one that keeps the document's
+coordinates and `hfw_plate_slice_placed` is the one that centres it, so an application
+that holds a plate in memory never has to write a file to get the command line's
+`--place`.
+
 `hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
 called `hfw_plate_slice` for the first hour of its life, before the document existed
 and the name was needed for the real thing; nothing outside this repository has been
