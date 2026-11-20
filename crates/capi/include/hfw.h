@@ -54,9 +54,11 @@ uint32_t hfw_abi_version(void);
  * engine uses, its location, type, default, unit and whether the value changes
  * the G-code (`applied`, `partial`, `missing` or `n/a`), so a settings panel can
  * hide or disable everything that is not `applied`. Its `capabilities` array lists
- * the features this engine declines — paint, text, cut and hollow, STEP, SLA, MMU,
- * a nesting arranger — with `disposition`, `panel`, `note` and the setting to use
- * instead, so a panel shows those controls as unavailable and says why.
+ * the features this engine declines — text, cut and hollow, STEP, SLA, MMU, a
+ * nesting arranger — with `disposition`, `panel`, `note` and the setting to use
+ * instead, so a panel shows those controls as unavailable and says why. Painting is
+ * not on that list: it is an ABI of its own below, and the channels it carries are
+ * read by the support generator and the seam placer.
  */
 const char *hfw_settings_surface_json(void);
 

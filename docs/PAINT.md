@@ -19,7 +19,17 @@ Three independent channels, each a per-triangle state on the object's mesh
 
 The app paints by ray-casting from the cursor into the mesh and writing the hit
 triangle's state, with a brush radius in millimetres. Painting survives a project
-save (the 3MF carries the states) and reaches the slicer through the project file.
+save (the 3MF carries the states) and, since 2026-11-20, reaches the slicer as well:
+`next-layer`'s `writePlateFile` reduces each channel to one state per facet and calls
+`hfw_plate_object_paint` before writing the plate file, which is what makes the brush
+change a toolpath.
+
+**The reduction is the one real loss.** The app's paint is finer than a facet -- the
+brush splits the triangles it touches and paints the pieces -- while HFW holds one
+state per triangle, so a facet takes the state that covers most of its area
+(`next-layer`'s `paintFacetStates`). An edge painted across a facet lands on the whole
+facet; a facet grazed at one corner keeps no paint. Closing that gap means HFW holding
+split facets, which is the same problem as slicing a mesh HFW did not build.
 
 ## The model
 
