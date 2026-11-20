@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use hfw_config::PrinterConfig;
-use hfw_engine::{PlateOrder, Settings};
+use hfw_engine::Settings;
 use hfw_plate::Plate;
 
-use crate::{write_job, HfwGcode};
+use crate::{order_of, write_job, HfwGcode};
 
 /// Where the job has got to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,19 +158,13 @@ fn run(
     settings.apply_printer(&cfg);
     let (first, layer) = crate::heights_of(&cfg, first_layer_height, layer_height);
     let job = plate
-        .slice_using_with_progress(
-            &settings,
-            first,
-            layer,
-            PlateOrder::ByLayer,
-            |done, total| {
-                let mut state = state.lock();
-                state.progress.done = done;
-                state.progress.total = total;
-                drop(state);
-                !cancel.load(Ordering::Relaxed)
-            },
-        )
+        .slice_using_with_progress(&settings, first, layer, order_of(&cfg), |done, total| {
+            let mut state = state.lock();
+            state.progress.done = done;
+            state.progress.total = total;
+            drop(state);
+            !cancel.load(Ordering::Relaxed)
+        })
         .map_err(|error| {
             if matches!(error, hfw_plate::PlateError::Cancelled) {
                 Outcome::Cancelled

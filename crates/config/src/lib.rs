@@ -871,6 +871,15 @@ pub struct PrinterConfig {
     /// to run until a profile states it: guessing would drive the gantry through
     /// a finished part.
     pub gantry_height: f64,
+    /// Radius of the toolhead around the nozzle, in millimetres.
+    ///
+    /// This is the distance two objects printed one at a time have to keep
+    /// between them: the head crosses the bed at the height of the part being
+    /// printed, so while the second object's first layers go down it is at the
+    /// first object's own height, next to it. Zero means unmeasured, and
+    /// `print_sequence = by object` refuses rather than putting the carriage
+    /// through a finished part.
+    pub extruder_clearance_radius: f64,
     /// Nozzle temperature held after the print, in degrees Celsius; 0 leaves the
     /// nozzle as the end G-code finds it.
     pub idle_temp: f64,
@@ -1258,6 +1267,7 @@ impl Default for PrinterConfig {
             skirt_height: 1,
             print_sequence: PrintSequence::ByLayer,
             gantry_height: 0.0,
+            extruder_clearance_radius: 0.0,
             idle_temp: 0.0,
             deretract_speed: 0.0,
             retract_restart_extra: 0.0,

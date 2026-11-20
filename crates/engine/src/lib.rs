@@ -150,6 +150,19 @@ pub struct Settings {
     /// cross-section, while infill and support share a mask cache that is
     /// deliberately small and would have to be duplicated per thread.
     pub threads: usize,
+    /// Height the toolhead can pass over a finished object, in millimetres; zero
+    /// means unmeasured.
+    ///
+    /// Carried here so the sequential check runs inside the one function that
+    /// turns a plate into a job, whatever front end asked for it.
+    pub gantry_height: f64,
+    /// Radius of the toolhead around the nozzle, in millimetres; zero means
+    /// unmeasured.
+    ///
+    /// The gap two objects printed one at a time must keep between them, because
+    /// the head is beside a finished part while the next one's first layers go
+    /// down.
+    pub extruder_clearance_radius: f64,
 }
 
 impl Settings {
@@ -188,6 +201,8 @@ impl Settings {
             one_perimeter_top: String::new(),
             nozzle: 0.4,
             threads: 0,
+            gantry_height: 0.0,
+            extruder_clearance_radius: 0.0,
         }
     }
 }
@@ -241,6 +256,8 @@ impl Settings {
         } else {
             cfg.top_one_perimeter_type.clone()
         };
+        self.gantry_height = cfg.gantry_height;
+        self.extruder_clearance_radius = cfg.extruder_clearance_radius;
         self.measure_overhang =
             cfg.overhangs && (cfg.dynamic_overhang_speeds || cfg.dynamic_fan_speeds);
         if cfg.wall_transition_angle > 0.0 {

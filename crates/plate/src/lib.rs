@@ -124,6 +124,95 @@ impl From<MeshError> for PlateError {
     }
 }
 
+/// What the toolhead needs from a plate before it can be printed one object at a
+/// time.
+///
+/// Both numbers come from the printer profile, and zero means unmeasured — the
+/// two checks below are the reason a profile has to state them, and guessing
+/// either one drives the machine through a finished part.
+#[derive(Clone, Copy, Debug)]
+pub struct Clearance {
+    /// Height the toolhead can pass over a finished object, in millimetres.
+    pub gantry_height: f64,
+    /// Radius of the toolhead around the nozzle, in millimetres.
+    pub head_radius: f64,
+}
+
+impl Clearance {
+    /// The clearance `settings` state, or the reason they cannot be used.
+    pub fn of(settings: &Settings) -> Result<Clearance, PlateError> {
+        if settings.gantry_height <= 0.0 {
+            return Err(PlateError::Slice(
+                "print_sequence = by object needs gantry_height in the profile: the toolhead has \
+                 to pass over a finished object, and guessing that height would drive it through one"
+                    .to_owned(),
+            ));
+        }
+        if settings.extruder_clearance_radius <= 0.0 {
+            return Err(PlateError::Slice(
+                "print_sequence = by object needs extruder_clearance_radius in the profile: the \
+                 head is beside a finished object while the next one's first layers go down, and \
+                 guessing its width would drive it through one"
+                    .to_owned(),
+            ));
+        }
+        Ok(Clearance {
+            gantry_height: settings.gantry_height,
+            head_radius: settings.extruder_clearance_radius,
+        })
+    }
+}
+
+/// One object as the sequential check sees it: `(min_x, min_y, max_x, max_y)` on
+/// the bed.
+pub type BedBounds = (f64, f64, f64, f64);
+
+/// An object offered to [`check_sequential`]: its name, the space it takes on the
+/// bed, and how tall it is in millimetres.
+pub type SequentialObject<'a> = (&'a str, BedBounds, f64);
+
+/// Refuses a plate the toolhead cannot print one object at a time.
+///
+/// Two collisions, two rules. The gantry spans X, so it clears a finished object
+/// only while the nozzle is at least `gantry_height` away from that object's top:
+/// at the first layer the gantry's underside sits at `gantry_height`, so every
+/// object has to be no taller than that or the gantry sweeps through it. The head
+/// itself sits around the nozzle, so while the next object's low layers are being
+/// printed it is at the height of the one already finished, right beside it: the
+/// two have to be at least `head_radius` apart in the bed plane.
+///
+/// Each entry is a name, the object's bounds on the bed as `(min_x, min_y, max_x,
+/// max_y)` and its height in millimetres. Both rules are conservative by
+/// construction — they refuse a plate that might collide and never accept one
+/// that can — so a plate that fails here is not made safe by trying harder.
+pub fn check_sequential<'a>(
+    clearance: Clearance,
+    objects: impl IntoIterator<Item = SequentialObject<'a>>,
+) -> Result<(), PlateError> {
+    let objects: Vec<SequentialObject<'_>> = objects.into_iter().collect();
+    for (index, (name, _, height)) in objects.iter().enumerate() {
+        if *height > clearance.gantry_height {
+            return Err(PlateError::Slice(format!(
+                "{name} is {height:.1} mm tall and print_sequence = by object cannot pass the \
+                 head over it (gantry_height is {:.1} mm)",
+                clearance.gantry_height
+            )));
+        }
+        for (other, bounds, _) in &objects[index + 1..] {
+            let (a, b) = (objects[index].1, *bounds);
+            let gap = (b.0 - a.2).max(a.0 - b.2).max((b.1 - a.3).max(a.1 - b.3));
+            if gap < clearance.head_radius {
+                return Err(PlateError::Slice(format!(
+                    "{name} and {other} are {gap:.1} mm apart and print_sequence = by object \
+                     needs {:.1} mm between them, the toolhead's own radius",
+                    clearance.head_radius
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One body on the plate: what it is called, where it is, and how it prints.
 #[derive(Clone, Debug)]
 pub struct PlateObject {
@@ -628,6 +717,15 @@ impl Plate {
         if objects.is_empty() {
             return Err(PlateError::NothingEnabled);
         }
+        if order == PlateOrder::ByObject {
+            let clearance = Clearance::of(settings)?;
+            let mut placed = Vec::with_capacity(objects.len());
+            for object in &objects {
+                let (low, high) = object.z_bounds()?;
+                placed.push((object.name(), object.bounds()?, high - low));
+            }
+            check_sequential(clearance, placed)?;
+        }
         let mut moved: Vec<Option<Mesh>> = Vec::with_capacity(objects.len());
         for object in &objects {
             moved.push(if is_identity(&object.placement) {
@@ -680,6 +778,39 @@ pub fn slice_placed_with_progress<'a>(
 ) -> Result<Job, PlateError> {
     let objects: Vec<(&Mesh, &Settings)> = objects.into_iter().collect();
     let total = objects.len();
+    if order == PlateOrder::ByObject {
+        let mut clearance: Option<Clearance> = None;
+        let mut placed = Vec::with_capacity(objects.len());
+        for (index, (mesh, settings)) in objects.iter().enumerate() {
+            let own = Clearance::of(settings)?;
+            clearance = Some(match clearance {
+                None => own,
+                Some(so_far) => Clearance {
+                    gantry_height: so_far.gantry_height.min(own.gantry_height),
+                    head_radius: so_far.head_radius.max(own.head_radius),
+                },
+            });
+            let (min_x, min_y, max_x, max_y) = mesh
+                .xy_bounds_mm()
+                .ok_or_else(|| PlateError::NoGeometry(format!("object {}", index + 1)))?;
+            let (low, high) = mesh
+                .z_bounds()
+                .ok_or_else(|| PlateError::NoGeometry(format!("object {}", index + 1)))?;
+            placed.push((
+                format!("object {}", index + 1),
+                (min_x, min_y, max_x, max_y),
+                (high - low) as f64 / 1_000_000.0,
+            ));
+        }
+        if let Some(clearance) = clearance {
+            check_sequential(
+                clearance,
+                placed
+                    .iter()
+                    .map(|(name, bounds, height)| (name.as_str(), *bounds, *height)),
+            )?;
+        }
+    }
     let mut stacks = Vec::new();
     let mut diagnostics = MeshDiagnostics::default();
     for (done, (mesh, settings)) in objects.into_iter().enumerate() {

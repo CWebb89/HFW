@@ -1272,11 +1272,6 @@ fn label_objects(job: &mut Job, plate: &[PlatePart]) {
 
 /// Plans a plate in `by object` order: one whole object, then the next.
 ///
-/// Each object is sliced and planned on its own, so its layer stack starts at the
-/// bed with its own first layer, brim and cooling. Two things are checked before
-/// any planning happens, because both are collisions if wrong: every object has
-/// to be shorter than the toolhead's clearance over a finished part, and every
-/// pair has to be far enough apart for the head to travel between them.
 /// Plans a plate object by object and assembles the file in `order`.
 ///
 /// This is the path taken whenever an object carries its own settings, and
@@ -1284,10 +1279,10 @@ fn label_objects(job: &mut Job, plate: &[PlatePart]) {
 /// its own, so its own wall count, infill density or support decision applies to
 /// it alone; the stacks are then interleaved by layer, or concatenated.
 ///
-/// By-object order is checked first, because both checks are collisions if wrong:
-/// every object has to be shorter than the toolhead's clearance over a finished
-/// part, and every pair has to be far enough apart for the head to pass between
-/// them.
+/// By-object order is checked first, because both rules there are collisions if
+/// wrong, and the check itself lives in `hfw_plate::check_sequential` so this path
+/// and the C ABI cannot disagree about what is safe. Nothing is planned before it
+/// passes: a refused plate produces no G-code at all.
 fn plate_job(
     o: &Options,
     plate: &[PlatePart],
@@ -1297,41 +1292,20 @@ fn plate_job(
     order: PlateOrder,
 ) -> Result<Job, String> {
     if order == PlateOrder::ByObject {
-        let cfg = o
-            .profile_config
-            .as_ref()
-            .ok_or_else(|| "print_sequence = by object needs --profile".to_owned())?;
-        if cfg.gantry_height <= 0.0 {
-            return Err(
-                "print_sequence = by object needs gantry_height in the profile: the toolhead has \
-                 to pass over a finished object, and guessing that height would drive it through one"
-                    .to_owned(),
-            );
+        if o.profile_config.is_none() {
+            return Err("print_sequence = by object needs --profile".to_owned());
         }
-        let spacing = o.spacing.unwrap_or(PLATE_SPACING_MM);
-        for (index, part) in plate.iter().enumerate() {
+        let clearance = hfw_plate::Clearance::of(&o.settings).map_err(|error| error.to_string())?;
+        let mut placed = Vec::with_capacity(plate.len());
+        for part in plate {
             let height = part
                 .mesh
                 .z_bounds()
                 .map(|(low, high)| (high - low) as f64 / 1_000_000.0)
                 .unwrap_or(0.0);
-            if height > cfg.gantry_height {
-                return Err(format!(
-                    "{} is {height:.1} mm tall and print_sequence = by object cannot pass the \
-                     head over it (gantry_height is {:.1} mm)",
-                    part.name, cfg.gantry_height
-                ));
-            }
-            for other in &plate[index + 1..] {
-                if !far_enough_apart(part.bounds, other.bounds, spacing) {
-                    return Err(format!(
-                        "{} and {} are closer than {spacing:.1} mm; the toolhead needs that gap \
-                         to pass between them",
-                        part.name, other.name
-                    ));
-                }
-            }
+            placed.push((part.name.as_str(), part.bounds, height));
         }
+        hfw_plate::check_sequential(clearance, placed).map_err(|error| error.to_string())?;
     }
 
     let mut stacks = Vec::with_capacity(plate.len());

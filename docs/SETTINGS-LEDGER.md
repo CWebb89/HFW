@@ -54,9 +54,9 @@ Tier n/a — not applicable to a Klipper FDM target (SLA, colour mixing, Bambu f
 
 - settings in the engine's FDM table: **383**
 - applicable to a Klipper FDM target: **364**
-- `applied` in HFW today: **299** (82%)
+- `applied` in HFW today: **300** (82%)
 - `partial`: **6**
-- `missing`: **59**
+- `missing`: **58**
 - `n/a` (excluded with reason): **19**
 - legacy-table names not in the modern table: **214**
 - names Orca profiles use that are not engine settings: **236**
@@ -539,7 +539,7 @@ falls to zero.
 | `toolchange_gcode` | 0e | missing |  | str | "" |  | Printer |
 | `autoemit_temperature_commands` | 0p | applied |  | bool | true |  | Printer |
 
-### Printer_General (17 settings, 5 missing)
+### Printer_General (17 settings, 4 missing)
 
 | Setting | Tier | Status | HFW key | Type | Default | Unit | Location |
 |---|---|---|---|---|---|---|---|
@@ -552,7 +552,7 @@ falls to zero.
 | `use_relative_e_distances` | 0e | applied | relative_e | bool | false |  | Printer |
 | `variable_layer_height` | 0e | applied |  | bool | true |  | Printer |
 | `extruder_clearance_height` | 0m | missing |  | double | 20. | mm | Printer |
-| `extruder_clearance_radius` | 0m | missing |  | double | 20. | mm | Printer |
+| `extruder_clearance_radius` | 0m | applied |  | double | 20. | mm | Printer |
 | `max_print_height` | 0m | applied | max_z | double | 200. | mm | Printer |
 | `z_offset` | 0m | applied |  | double | 0. | mm | Printer |
 | `thumbnails` | 0p | applied |  | str | "" |  | Printer |

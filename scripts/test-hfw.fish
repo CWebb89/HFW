@@ -1436,7 +1436,13 @@ grep -q 'needs gantry_height' "$tmp/seq-none.log"
  or fail 'the refusal did not say what was missing'
 printf 'gantry_height = 100\n' >>"$tmp/sequence.cfg"
 $bin fixtures/cube.stl fixtures/cube.stl --profile "$tmp/sequence.cfg" --layer-height 0.2 \
-    --out-dir "$tmp/seq" --gcode "$tmp/seq.gcode" >"$tmp/seq.log" 2>&1
+    --out-dir "$tmp/seq-head" --gcode "$tmp/seq-head.gcode" >"$tmp/seq-head.log" 2>&1
+ and fail 'by object printed without a toolhead radius to clear'
+grep -q 'needs extruder_clearance_radius' "$tmp/seq-head.log"
+ or fail 'the second refusal did not say what was missing'
+printf 'extruder_clearance_radius = 20\n' >>"$tmp/sequence.cfg"
+$bin fixtures/cube.stl fixtures/cube.stl --profile "$tmp/sequence.cfg" --layer-height 0.2 \
+    --spacing 30 --out-dir "$tmp/seq" --gcode "$tmp/seq.gcode" >"$tmp/seq.log" 2>&1
  or fail 'the by-object plate failed to slice'
 grep -q 'verify RESULT PASS' "$tmp/seq.log"; or fail 'the by-object file failed verification'
 grep -q 'printed one object at a time' "$tmp/seq.log"; or fail 'the run did not report by-object order'

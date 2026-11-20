@@ -880,6 +880,7 @@ impl PrinterConfig {
                 }
             }
             "gantry_height" => self.gantry_height = number(key, value)?,
+            "extruder_clearance_radius" => self.extruder_clearance_radius = number(key, value)?,
             "complete_objects" => {
                 self.print_sequence = if boolean(key, value)? {
                     PrintSequence::ByObject

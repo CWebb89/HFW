@@ -326,3 +326,98 @@ fn setting_a_key_on_one_object_records_it_as_an_override() {
     assert_eq!(object.overrides().count(), 0);
     assert!(object.settings().is_none());
 }
+
+/// Settings a profile states when it knows the toolhead.
+fn clearanced() -> Settings {
+    Settings {
+        gantry_height: 45.0,
+        extruder_clearance_radius: 20.0,
+        ..Settings::default()
+    }
+}
+
+fn placed(translation_x: f64) -> Mesh {
+    let mesh = cube();
+    mesh.transformed(MeshTransform {
+        translation_mm: [translation_x, 0.0, 0.0],
+        ..MeshTransform::default()
+    })
+    .expect("a cube moves")
+}
+
+#[test]
+fn an_unmeasured_toolhead_is_refused_rather_than_guessed() {
+    let mut plate = Plate::new(Settings::default());
+    plate.add("first", cube()).expect("a cube adds");
+    plate.add("second", placed(60.0)).expect("a cube adds");
+    let refused = plate
+        .slice(0.2, 0.2, PlateOrder::ByObject)
+        .err()
+        .expect("an unmeasured gantry is refused");
+    assert!(
+        refused.to_string().contains("gantry_height"),
+        "the refusal names the missing setting: {refused}"
+    );
+
+    let half = Settings {
+        extruder_clearance_radius: 0.0,
+        ..clearanced()
+    };
+    let mut plate = Plate::new(half);
+    plate.add("first", cube()).expect("a cube adds");
+    plate.add("second", placed(60.0)).expect("a cube adds");
+    let refused = plate
+        .slice(0.2, 0.2, PlateOrder::ByObject)
+        .err()
+        .expect("an unmeasured head is refused");
+    assert!(
+        refused.to_string().contains("extruder_clearance_radius"),
+        "the refusal names the missing setting: {refused}"
+    );
+}
+
+#[test]
+fn two_objects_within_the_toolheads_radius_are_refused() {
+    let mut plate = Plate::new(clearanced());
+    plate.add("first", cube()).expect("a cube adds");
+    plate.add("second", placed(25.0)).expect("a cube adds");
+    let refused = plate
+        .slice(0.2, 0.2, PlateOrder::ByObject)
+        .err()
+        .expect("a 5 mm gap is inside a 20 mm radius");
+    assert!(
+        refused.to_string().contains("first and second"),
+        "the refusal names both objects: {refused}"
+    );
+    plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the same plate prints layer by layer, where nothing passes between the parts");
+}
+
+#[test]
+fn two_objects_clear_of_the_toolheads_radius_are_accepted() {
+    let mut plate = Plate::new(clearanced());
+    plate.add("first", cube()).expect("a cube adds");
+    plate.add("second", placed(45.0)).expect("a cube adds");
+    plate
+        .slice(0.2, 0.2, PlateOrder::ByObject)
+        .expect("a 25 mm gap clears a 20 mm radius");
+}
+
+#[test]
+fn an_object_taller_than_the_gantry_clearance_is_refused() {
+    let settings = Settings {
+        gantry_height: 10.0,
+        ..clearanced()
+    };
+    let mut plate = Plate::new(settings);
+    plate.add("tall", cube()).expect("a cube adds");
+    let refused = plate
+        .slice(0.2, 0.2, PlateOrder::ByObject)
+        .err()
+        .expect("a 20 mm object cannot pass under a 10 mm gantry");
+    assert!(
+        refused.to_string().contains("tall is 20.0 mm"),
+        "the refusal gives the height and the clearance: {refused}"
+    );
+}

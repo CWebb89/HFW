@@ -373,7 +373,7 @@ pub const ENGINE_NAMES: &[&str] = &[
     "z_offset",
 ];
 
-/// Dialect spellings that mean an engine setting: Orca/Bambu name -> engine name (147).
+/// Dialect spellings that mean an engine setting: Orca/Bambu name -> engine name (146).
 pub const RENAMES: &[(&str, &str)] = &[
     ("additional_fan_full_speed_layer", "full_fan_speed_layer"),
     (
@@ -408,7 +408,6 @@ pub const RENAMES: &[(&str, &str)] = &[
         "extruder_clearance_height_to_rod",
         "extruder_clearance_height",
     ),
-    ("extruder_clearance_radius", "extruder_clearance_radius"),
     ("extruder_offset", "extruder_offset"),
     ("fan_cooling_layer_time", "fan_below_layer_time"),
     ("fan_max_speed", "max_fan_speed"),
@@ -917,7 +916,7 @@ pub const PARTIAL: &[(&str, &str)] = &[
     ),
 ];
 
-/// Key names this crate's own profiles use (316), accepted as-is.
+/// Key names this crate's own profiles use (317), accepted as-is.
 pub const NATIVE: &[&str] = &[
     "arc_fitting",
     "arc_fitting_tolerance",
@@ -983,6 +982,7 @@ pub const NATIVE: &[&str] = &[
     "external_perimeters_first",
     "extra_perimeters",
     "extra_perimeters_on_overhangs",
+    "extruder_clearance_radius",
     "fan_always_on",
     "fan_below_layer_time",
     "fan_speed",

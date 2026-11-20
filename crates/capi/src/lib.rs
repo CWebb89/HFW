@@ -220,6 +220,19 @@ pub(crate) fn write_job(job: &Job, profile: &PrinterConfig) -> Result<HfwGcode, 
     })
 }
 
+/// The order this profile prints a plate in.
+///
+/// One reader for every path: a command line, a synchronous slice and a job
+/// thread all ask this, so `print_sequence = by object` means the same thing to
+/// all three instead of being honoured by one and ignored by the rest.
+fn order_of(cfg: &PrinterConfig) -> PlateOrder {
+    if cfg.print_sequence == hfw_config::PrintSequence::ByObject {
+        PlateOrder::ByObject
+    } else {
+        PlateOrder::ByLayer
+    }
+}
+
 fn slice_meshes(
     handles: &[*const HfwMesh],
     profile: &str,
@@ -235,7 +248,7 @@ fn slice_meshes(
         meshes.push(unsafe { mesh_of(*handle) }?.mesh.clone());
     }
     let objects: Vec<(&Mesh, &Settings)> = meshes.iter().map(|mesh| (mesh, &settings)).collect();
-    let job = hfw_plate::slice_placed(objects, first, layer, PlateOrder::ByLayer)
+    let job = hfw_plate::slice_placed(objects, first, layer, order_of(&cfg))
         .map_err(|error| error.to_string())?;
     write_job(&job, &cfg)
 }
@@ -252,7 +265,7 @@ fn plan_plate(
     settings.apply_printer(&cfg);
     let (first, layer) = heights_of(&cfg, first_layer_height, layer_height);
     let job = plate
-        .slice_using(&settings, first, layer, PlateOrder::ByLayer)
+        .slice_using(&settings, first, layer, order_of(&cfg))
         .map_err(|error| error.to_string())?;
     Ok((job, cfg))
 }

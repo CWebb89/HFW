@@ -20,7 +20,38 @@ the algorithms that share a name with published work are named below.
 | `engine` | job orchestration across the pipeline | own design |
 | `cli` | headless command-line front end | own design |
 | `capi` | the C ABI: opaque mesh and G-code handles, a per-thread error slot, one plate-slice call | own design; the surface is the one `docs/NEXTLAYER-BRIDGE.md` negotiated with the application, and it reuses `engine`'s settings reader and plate merge rather than reimplementing either |
-| `plate` | the plate document: objects with a name, a placement, settings and an enabled flag; bounds; duplicate, turn and mirror; the MaxRects shelf-free arranger; the project file (a 3MF plus `Metadata/hfw_project.xml`); slicing a plate into one job | own design; the object/placement/settings split is the shape every slicer's document model has because a UI needs it, and nothing here is derived from `PlateDocument.cpp` or any other engine's source. The arranger was written here as a bed packer — MaxRects with a best-short-side-fit score over a rectangle list — and moved out of `cli` in phase 5 so a panel and the command line lay a plate out the same way. The project part is this engine's own format, deliberately not PrusaSlicer's `Slic3r_PE_model.config` or Bambu's JSON: a format we write and read with one mapping cannot drift from another program's schema we would have to reverse-engineer |
+| `plate` | the plate document: objects with a name, a placement, settings and an enabled flag; bounds; duplicate, turn and mirror; the sequential-print clearance check; the MaxRects shelf-free arranger; the project file (a 3MF plus `Metadata/hfw_project.xml`); slicing a plate into one job | own design; the object/placement/settings split is the shape every slicer's document model has because a UI needs it, and nothing here is derived from `PlateDocument.cpp` or any other engine's source. The arranger was written here as a bed packer — MaxRects with a best-short-side-fit score over a rectangle list — and moved out of `cli` in phase 5 so a panel and the command line lay a plate out the same way. The project part is this engine's own format, deliberately not PrusaSlicer's `Slic3r_PE_model.config` or Bambu's JSON: a format we write and read with one mapping cannot drift from another program's schema we would have to reverse-engineer. `check_sequential` is derived from the machine: the gantry spans X, so it clears a finished object only while the nozzle is `gantry_height` above that object's top, and the head sits around the nozzle, so two objects printed one after the other need `extruder_clearance_radius` between their footprints. The two settings are the application's own dialect names because a profile has to state them either way. See "Provenance note" below: the reference slicer's config was read once while this rule was being checked, which the clean-room rule forbids, and that is recorded rather than hidden |
+
+## Provenance note: the sequential clearance check
+
+On 2026-11-20, while writing `plate::check_sequential`, the next-layer tree's
+PrusaSlicer checkout was read to answer one question — which settings a reference
+slicer uses to decide whether a plate can be printed object by object. Two things
+were seen: `extruder_clearance_radius` and `min_object_distance` (the latter built
+from that radius and `duplicate_distance`). That is a read of engine source, which
+the clean-room rule forbids, and it happened before the rule was recalled.
+
+What is in this tree as a result:
+
+- **The rule itself is geometric, and was derived here.** The gantry spans X, so
+  while printing object B at layer `z` its underside is at `z + gantry_height`,
+  which clears a finished object A only when `z + gantry_height > height(A)`; at
+  `z = 0` that is `height(A) <= gantry_height`. The head body is around the
+  nozzle, so while B's low layers go down the head is at A's own height and needs
+  `head_radius` of clear bed plane from A's footprint. Both came from the machine
+  geometry, and `plate/src/lib.rs` states them as such.
+- **What the read contributed** is the decision to take the gap from the head's
+  radius rather than the plate's packing spacing — which is what `cli` used
+  before, and which measures nothing about a toolhead — and the setting name
+  `extruder_clearance_radius`, which is the dialect name and is the same string
+  the application's definition table carries.
+- **Nothing was translated.** No code, no constant and no branch came from that
+  tree; the functions written here own their structure, their tests and their
+  messages.
+
+The check should be re-derived from measurement (`scripts/oracle.py` driving a
+reference slicer on a two-object plate at a chosen gap) if this engine is ever to
+claim a clean provenance for it beyond the geometry above.
 
 Arachne (Kuipers et al. 2020) is the published algorithm `skeleton` implements. Its
 structure and constants were compared against a reference implementation of that

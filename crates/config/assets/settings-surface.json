@@ -5,9 +5,9 @@
  "counts": {
   "settings": 383,
   "applicable": 364,
-  "applied": 299,
+  "applied": 300,
   "partial": 6,
-  "missing": 59,
+  "missing": 58,
   "not_applicable": 19
  },
  "statuses": [
@@ -947,7 +947,7 @@
    "name": "extruder_clearance_radius",
    "hfw": "",
    "tier": "0m",
-   "status": "missing",
+   "status": "applied",
    "type": "double",
    "default": "20.",
    "unit": "mm",
