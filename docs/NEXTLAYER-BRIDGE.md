@@ -100,6 +100,10 @@ hfw_plate_object_enabled(*HfwPlate, id, i32) -> i32
 hfw_plate_object_remove(*HfwPlate, id) -> i32
 hfw_plate_object_bounds(const *HfwPlate, id, *HfwBounds) -> i32
 hfw_plate_bounds(const *HfwPlate, *HfwBounds) -> i32
+hfw_plate_object_add_volume(*HfwPlate, id, kind, const *HfwMesh) -> i32
+hfw_plate_object_remove_volume(*HfwPlate, id, index) -> i32
+hfw_plate_object_volume_count(const *HfwPlate, id) -> ptrdiff_t
+hfw_plate_object_volume_kind(const *HfwPlate, id, index, *i32) -> i32
 hfw_plate_slice(const *HfwPlate, profile_path, first_layer_height, layer_height) -> *mut HfwGcode
 hfw_plate_free(*HfwPlate)
 
@@ -116,6 +120,14 @@ enabled flag. Moving an object does not rewrite its triangles —
 `hfw_plate_object_bake` is the call that folds the placement in, for a caller whose
 own transform stack has finished composing. Object ids are what a view holds, so
 `hfw_plate_object_remove` leaves every other id valid.
+
+A volume is geometry attached to an object, sharing its placement so a move takes
+it along: `HFW_VOLUME_PART` and `HFW_VOLUME_NEGATIVE` change the layer's outline
+(the first unites, the second subtracts, both before walls are planned, so a hole
+gets walls of its own), and `HFW_VOLUME_SUPPORT_BLOCKER`/`_ENFORCER` act over the
+volume's whole height through the same mask a painted facet uses. A *modifier*
+volume — one carrying settings of its own — is not in the ABI, because a layer under
+one carries two settings at once and the planner does not yet split a layer.
 
 `hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
 called `hfw_plate_slice` for the first hour of its life, before the document existed

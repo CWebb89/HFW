@@ -9,13 +9,15 @@ use hfw_capi::{
     hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_free, hfw_mesh_from_bytes,
     hfw_mesh_load_file, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_transform,
     hfw_mesh_triangle_count, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
-    hfw_plate_free, hfw_plate_new, hfw_plate_object_bounds, hfw_plate_object_clear_settings,
-    hfw_plate_object_count, hfw_plate_object_duplicate, hfw_plate_object_enabled,
-    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_paint,
-    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_remove,
-    hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_open_project, hfw_plate_preview_json,
-    hfw_plate_project_bytes, hfw_plate_slice, hfw_slice_meshes, hfw_string_free, HfwBounds,
-    HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED,
+    hfw_plate_free, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
+    hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
+    hfw_plate_object_enabled, hfw_plate_object_mirror, hfw_plate_object_name,
+    hfw_plate_object_paint, hfw_plate_object_paint_get, hfw_plate_object_placement,
+    hfw_plate_object_remove, hfw_plate_object_remove_volume, hfw_plate_object_rotate,
+    hfw_plate_object_set, hfw_plate_object_volume_count, hfw_plate_object_volume_kind,
+    hfw_plate_open_project, hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_slice,
+    hfw_slice_meshes, hfw_string_free, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED,
+    HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -821,4 +823,70 @@ fn paint_round_trips_through_the_mesh_and_the_plate_and_is_refused_when_wrong() 
     unsafe { hfw_plate_free(reopened) };
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(mesh) };
+}
+
+#[test]
+fn a_volume_crosses_the_abi_and_its_kind_reads_back() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!cube.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(id, 0);
+    assert_eq!(unsafe { hfw_plate_object_volume_count(plate, id) }, 0);
+
+    let cutter = unsafe { hfw_mesh_from_bytes(std::ptr::null(), 0) };
+    assert!(cutter.is_null(), "an empty mesh is refused");
+
+    let face_path = c_string(&fixture("cube.stl"));
+    let cutter = unsafe { hfw_mesh_load_file(face_path.as_ptr()) };
+    assert_eq!(
+        unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_NEGATIVE, cutter) },
+        0,
+        "the volume attaches: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_object_volume_count(plate, id) }, 1);
+
+    let mut kind = -1;
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_kind(plate, id, 0, &mut kind) },
+        0
+    );
+    assert_eq!(kind, HFW_VOLUME_NEGATIVE, "the kind reads back");
+
+    let mut beyond = -1;
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_kind(plate, id, 9, &mut beyond) },
+        -1,
+        "a volume that does not exist is refused"
+    );
+    assert!(
+        last_error().contains("has no volume 9"),
+        "the refusal says which: {}",
+        last_error()
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_object_add_volume(plate, id, 7, cutter) },
+        -1,
+        "an unknown kind is refused"
+    );
+    assert!(
+        last_error().contains("volume kind 7 does not exist"),
+        "the refusal lists the kinds: {}",
+        last_error()
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_object_remove_volume(plate, id, 0) },
+        0,
+        "the volume detaches: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_object_volume_count(plate, id) }, 0);
+
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
+    unsafe { hfw_mesh_free(cutter) };
 }

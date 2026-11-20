@@ -94,6 +94,16 @@ int32_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
    out of scope today (`docs/SCOPE.md`). Nothing carries it yet, because a channel
    nothing consumes is a field a panel could write and no stage would read.
 
+## Volumes are the same mechanism where they overlap
+
+A support blocker or enforcer *volume* is a set of painted facets that were painted
+by drawing a box rather than by clicking on a face: `hfw_engine::volume_support_paint`
+turns one into the same `PaintRegions` a painted facet produces, and the two are
+merged before support is seeded. The difference is that a volume acts over its whole
+height and its whole footprint, because that is what "this block of space" means.
+Part and negative volumes are not paint at all — they act on the layer's outline
+through `hfw_kernel::difference_rings` and `union_rings`, before anything reads it.
+
 ## What it costs from here
 
 Tool paint is a plate-level change to how stacks are assigned to extruders, and it

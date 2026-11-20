@@ -267,6 +267,52 @@ int32_t hfw_plate_object_paint(HfwPlate *plate, uint64_t id, int32_t channel,
 ptrdiff_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
                                    int32_t channel, uint8_t *out, size_t len);
 
+/** A volume that adds material to its object. */
+#define HFW_VOLUME_PART 0
+/** A volume that removes material from its object. */
+#define HFW_VOLUME_NEGATIVE 1
+/** A volume support may not enter, over the volume's whole height. */
+#define HFW_VOLUME_SUPPORT_BLOCKER 2
+/** A volume support has to reach, over the volume's whole height. */
+#define HFW_VOLUME_SUPPORT_ENFORCER 3
+
+/**
+ * Attaches a volume to object `id`, in the object's own coordinates, and copies the
+ * geometry.
+ *
+ * The volume shares the object's placement, so moving the part moves what it cuts
+ * and what it forbids support in. A negative volume's cross-section is subtracted
+ * from every layer before walls, infill and skin are planned, so the hole it cuts
+ * gets walls of its own; a part volume is united the same way.
+ *
+ * Returns 0 on success, -1 when the object is not on the plate, `mesh` is null, the
+ * geometry has no triangles, or `kind` is not one of the four.
+ */
+int32_t hfw_plate_object_add_volume(HfwPlate *plate, uint64_t id, int32_t kind,
+                                   const HfwMesh *mesh);
+
+/**
+ * Detaches volume `index` from object `id`, counted from zero.
+ *
+ * Returns 0 on success, -1 when the object is not on the plate or it has no volume
+ * at that index.
+ */
+int32_t hfw_plate_object_remove_volume(HfwPlate *plate, uint64_t id, size_t index);
+
+/**
+ * How many volumes object `id` carries, or -1 when it is not on the plate.
+ */
+ptrdiff_t hfw_plate_object_volume_count(const HfwPlate *plate, uint64_t id);
+
+/**
+ * Writes which kind of volume `index` of object `id` is into `out`.
+ *
+ * Returns 0 on success, -1 when the object is not on the plate, `out` is null, or
+ * the object has no volume at that index.
+ */
+int32_t hfw_plate_object_volume_kind(const HfwPlate *plate, uint64_t id, size_t index,
+                                     int32_t *out);
+
 /**
  * Removes object `id` from the plate. Every other object keeps its id.
  *

@@ -36,7 +36,7 @@ own history. "Green" means the check below runs and passes today.
 | # | Item | Blocks the swap because | State |
 |---|------|------------------------|-------|
 | 1 | Settings intake: PrusaSlicer-format profile inheritance, or a translation layer with measured coverage | Users' existing machines and presets must work | **green for intake, one blocker left.** `--bundle` indexes a vendor profile tree or a sectioned vendor file, resolves `inherits` across it, picks one machine, one process and one filament (preferring the machine's own vendor), and reports every key as applied/partial/unknown. Orca's whole shipped library — 1463 machines, 3277 processes, 6650 filaments — indexes in under a second. **Blocker: `machine_start_gcode` placeholders.** A real machine preset is templated with `[bed_temperature_initial_layer_single]`, `{during_print_exhaust_fan_speed_num[current_extruder]}` and the like; this engine substitutes a small set of its own and leaves the rest literal, so the verifier rejects the file. Intake now names those placeholders up front instead of after the G-code is written.
-| 2 | Per-object and per-region overrides | next-layer exposes 136 of them per object | **partial.** Five keys per object (density, pattern, walls, width, support). No region volumes, no per-object height ranges |
+| 2 | Per-object and per-region overrides | next-layer exposes 136 of them per object | **partial.** Five keys per object (density, pattern, walls, width, support), and volumes are geometry only. No region volumes with settings of their own, no per-object height ranges |
 | 3 | Arrange: centring, `--arrange`, build-volume collision | Plates and multi-object jobs are core UI | **green.** A MaxRects packer places every unpositioned object in the gap it wastes least, turns one a quarter turn when that is what makes it fit, centres the arrangement on the bed, and refuses a plate that cannot fit before slicing rather than after planning it. A plate a file already positioned keeps its own layout, and the remaining objects are laid out beside it |
 | 4 | Acceleration, junction deviation, honest time estimate | A kinematic estimate is optimistic by 2–3× on short moves | **green.** Burst-free trapezoidal planner with one junction of lookahead: per-move acceleration, junction deviation (Marlin's `M205 J`, or Klipper's `square_corner_velocity` converted the way `klippy/toolhead.py` converts it), and a classic-jerk model for a Marlin profile that sets no deviation. On the two prints whose real duration is recorded, the planned estimate lands within 4% (cube 16.2 min against 16 printed, sphere 21.8 against 21) where the kinematic sum was 5–6% low. A profile that states no acceleration still gets the kinematic number, and the file's header says which one it got |
 | 5 | 3MF/AMF import with plates and instances | Most downloaded models are 3MF | **green for 3MF.** ZIP, unit, components, per-item transforms and a project's own settings file. No AMF |
@@ -99,10 +99,17 @@ setting that is silently accepted and ignored fails this check.
 
 ### 2. Per-object and per-region overrides
 
-**Today.** Not modelled. The toolpath model has one settings set per slice.
+**Today.** Overrides are keyed by object instance and hold five keys; volumes are
+geometry with a kind, not a second settings set. `VolumeKind` carries part,
+negative, support-blocker and support-enforcer — the four kinds whose whole job is
+`hfw_kernel`'s ring booleans or the support generator's mask. A **modifier** volume
+is the kind that is missing, and it is missing because it cannot be a boolean: a
+layer under a modifier carries two settings at once, which needs the plan split into
+regions, each with its own walls, infill and skin, merged back into one layer. That
+is a change to the planner, not to the document.
 
-**What is needed.** Overrides keyed by object instance, plus region modifiers and
-height ranges. A "region" is an extra volume with its own settings.
+**What is needed.** Overrides keyed by object instance (done), plus region modifiers
+and height ranges. A "region" is an extra volume with its own settings.
 
 **Check.** The same two assertions next-layer already measures against
 libslic3r: a 0.30 mm per-object layer height must reduce the layer count from

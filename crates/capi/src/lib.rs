@@ -37,7 +37,7 @@ mod job;
 mod preview;
 
 use hfw_config::PrinterConfig;
-use hfw_engine::{Job, Mesh, MeshTransform, Paint, PlateOrder, Settings};
+use hfw_engine::{Job, Mesh, MeshTransform, Paint, PlateOrder, Settings, VolumeKind};
 use hfw_plate::{ObjectId, Plate, PlateObject};
 
 /// Version of the surface this library exports.
@@ -269,9 +269,9 @@ fn slice_meshes(
         let mesh = unsafe { mesh_of(*handle) }?;
         meshes.push((mesh.mesh.clone(), mesh.paint.clone()));
     }
-    let objects: Vec<(&Mesh, Option<&Paint>, &Settings)> = meshes
+    let objects: Vec<hfw_plate::PlacedObject> = meshes
         .iter()
-        .map(|(mesh, paint)| (mesh, Some(paint), &settings))
+        .map(|(mesh, paint)| hfw_plate::PlacedObject::new(mesh, Some(paint), &settings))
         .collect();
     let job = hfw_plate::slice_placed(objects, first, layer, order_of(&cfg))
         .map_err(|error| error.to_string())?;
@@ -1579,4 +1579,170 @@ pub unsafe extern "C" fn hfw_gcode_free(gcode: *mut HfwGcode) {
         return;
     }
     drop(unsafe { Box::from_raw(gcode) });
+}
+
+/// A volume that adds material to its object.
+pub const HFW_VOLUME_PART: c_int = 0;
+/// A volume that removes material from its object.
+pub const HFW_VOLUME_NEGATIVE: c_int = 1;
+/// A volume support may not enter.
+pub const HFW_VOLUME_SUPPORT_BLOCKER: c_int = 2;
+/// A volume support has to reach.
+pub const HFW_VOLUME_SUPPORT_ENFORCER: c_int = 3;
+
+fn volume_kind(kind: c_int) -> Result<VolumeKind, String> {
+    match kind {
+        HFW_VOLUME_PART => Ok(VolumeKind::Part),
+        HFW_VOLUME_NEGATIVE => Ok(VolumeKind::Negative),
+        HFW_VOLUME_SUPPORT_BLOCKER => Ok(VolumeKind::SupportBlocker),
+        HFW_VOLUME_SUPPORT_ENFORCER => Ok(VolumeKind::SupportEnforcer),
+        other => Err(format!(
+            "volume kind {other} does not exist: it is one of 0 part, 1 negative, 2 support \
+             blocker or 3 support enforcer"
+        )),
+    }
+}
+
+fn volume_code(kind: VolumeKind) -> c_int {
+    match kind {
+        VolumeKind::Part => HFW_VOLUME_PART,
+        VolumeKind::Negative => HFW_VOLUME_NEGATIVE,
+        VolumeKind::SupportBlocker => HFW_VOLUME_SUPPORT_BLOCKER,
+        VolumeKind::SupportEnforcer => HFW_VOLUME_SUPPORT_ENFORCER,
+    }
+}
+
+/// Attaches a volume to object `id`, in the object's own coordinates.
+///
+/// The volume shares the object's placement, so moving the part moves what it cuts
+/// and what it forbids support in. `kind` is one of `HFW_VOLUME_PART`,
+/// `HFW_VOLUME_NEGATIVE`, `HFW_VOLUME_SUPPORT_BLOCKER` or
+/// `HFW_VOLUME_SUPPORT_ENFORCER`; the mesh is copied, so the caller keeps its own.
+/// Returns 0 on success and -1 when the object is not on the plate, `mesh` is null,
+/// or the geometry has no triangles.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call and `mesh` a live read-only
+/// handle for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_add_volume(
+    plate: *mut HfwPlate,
+    id: u64,
+    kind: c_int,
+    mesh: *const HfwMesh,
+) -> c_int {
+    let add = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        if mesh.is_null() {
+            return Err("mesh handle is null".to_owned());
+        }
+        let kind = volume_kind(kind)?;
+        let geometry = unsafe { &*mesh }.mesh.clone();
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        unsafe { &mut *plate }
+            .plate
+            .object_mut(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?
+            .add_volume(kind, geometry)
+            .map(|()| 0)
+            .map_err(|error| error.to_string())
+    };
+    report(add(), -1)
+}
+
+/// Detaches volume `index` from object `id`, counted from zero.
+///
+/// Returns 0 on success and -1 when the object is not on the plate or it has no
+/// volume at that index.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_remove_volume(
+    plate: *mut HfwPlate,
+    id: u64,
+    index: usize,
+) -> c_int {
+    let remove = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        unsafe { &mut *plate }
+            .plate
+            .object_mut(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?
+            .remove_volume(index)
+            .map(|()| 0)
+            .map_err(|error| error.to_string())
+    };
+    report(remove(), -1)
+}
+
+/// How many volumes object `id` carries, or -1 when it is not on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_count(plate: *const HfwPlate, id: u64) -> isize {
+    let count = || -> Result<isize, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let object = unsafe { &*plate }
+            .plate
+            .object(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        Ok(object.volumes().len() as isize)
+    };
+    report(count(), -1)
+}
+
+/// Writes which kind of volume `index` of object `id` is into `out`.
+///
+/// Returns 0 on success and -1 when the object is not on the plate, `out` is null,
+/// or the object has no volume at that index.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` must be writable for one `int32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_kind(
+    plate: *const HfwPlate,
+    id: u64,
+    index: usize,
+    out: *mut c_int,
+) -> c_int {
+    let kind = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        if out.is_null() {
+            return Err("output pointer is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let object = unsafe { &*plate }
+            .plate
+            .object(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        let volume = object.volumes().get(index).ok_or_else(|| {
+            format!(
+                "object {id} has no volume {index}: it has {}",
+                object.volumes().len()
+            )
+        })?;
+        unsafe { *out = volume_code(volume.kind()) };
+        Ok(0)
+    };
+    report(kind(), -1)
 }

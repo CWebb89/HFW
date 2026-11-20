@@ -657,6 +657,33 @@ struct WallPass {
     stats: hfw_walls::Stats,
 }
 
+/// A second body of geometry attached to an object.
+///
+/// Volumes are how a document says "this part, plus this block subtracted, plus
+/// support that must not grow here". They are geometry and nothing else: a
+/// modifier volume's per-region *settings* are a separate feature, because a
+/// layer carrying two settings is two planned regions, not one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VolumeKind {
+    /// Adds material: the volume's cross-section is united with the object's.
+    Part,
+    /// Removes material: the volume's cross-section is subtracted.
+    Negative,
+    /// Forbids support inside the volume's footprint, over its height.
+    SupportBlocker,
+    /// Requires support under the volume's footprint, over its height.
+    SupportEnforcer,
+}
+
+/// A volume with the mesh it is made of.
+#[derive(Clone, Copy, Debug)]
+pub struct Volume<'a> {
+    /// The geometry, already placed in the object's frame.
+    pub mesh: &'a Mesh,
+    /// What the volume does.
+    pub kind: VolumeKind,
+}
+
 /// A sliced and planned job.
 pub struct Job {
     /// Mesh diagnostics of the mesh that was actually sliced.
@@ -805,12 +832,27 @@ pub fn run_painted(
     layer_height: f64,
     settings: &Settings,
 ) -> Result<Job, EngineError> {
-    let support = support_paint(mesh, paint)?;
-    let seam = seam_paint(mesh, paint)?;
+    run_with_paint(mesh, paint, &[], first_layer_height, layer_height, settings)
+}
+
+/// Slices `mesh` with its painted facets and its volumes, and plans the beads.
+///
+/// Volume geometry enters at the cross-section: a part volume is united with the
+/// layer's outline and a negative one subtracted from it, before anything reads the
+/// outline. That is the only point where a volume can act on walls, infill, skin and
+/// brim at once, and it is why a hole cut by a negative volume gets walls of its own.
+pub fn run_with_volumes(
+    mesh: &Mesh,
+    paint: &Paint,
+    volumes: &[Volume<'_>],
+    first_layer_height: f64,
+    layer_height: f64,
+    settings: &Settings,
+) -> Result<Job, EngineError> {
     run_with_paint(
         mesh,
-        support.as_ref(),
-        seam,
+        paint,
+        volumes,
         first_layer_height,
         layer_height,
         settings,
@@ -908,17 +950,99 @@ pub fn run(
     layer_height: f64,
     settings: &Settings,
 ) -> Result<Job, EngineError> {
-    run_with_paint(mesh, None, None, first_layer_height, layer_height, settings)
+    run_with_paint(
+        mesh,
+        &Paint::default(),
+        &[],
+        first_layer_height,
+        layer_height,
+        settings,
+    )
+}
+
+/// Volumes as the support generator consumes them.
+///
+/// A support volume acts over its whole height and inside its whole footprint, so it
+/// is a painted span whose footprint is the volume's projection onto the bed: the
+/// same shape a painted facet produces, which is why the two are merged rather than
+/// kept apart downstream.
+fn volume_support_paint(volumes: &[Volume<'_>]) -> Result<PaintRegions, EngineError> {
+    let mut regions = PaintRegions::default();
+    for volume in volumes {
+        let states = match volume.kind {
+            VolumeKind::SupportEnforcer => PAINT_SUPPORT_ENFORCER,
+            VolumeKind::SupportBlocker => PAINT_SUPPORT_BLOCKER,
+            VolumeKind::Part | VolumeKind::Negative => continue,
+        };
+        let paint = Paint {
+            support: vec![states; volume.mesh.triangle_count()],
+            seam: Vec::new(),
+        };
+        if let Some(painted) = support_paint(volume.mesh, &paint)? {
+            regions.extend(painted);
+        }
+    }
+    Ok(regions)
+}
+
+/// Applies part and negative volumes to every layer's outline.
+///
+/// The volumes are sliced with the object's own schedule, so a volume's cross-section
+/// is taken at exactly the plane the object's is. A layer where a volume produces
+/// nothing is left alone; a layer where the volume's mesh fails to close is skipped
+/// with the rest of the job still slicing, because a volume that grazes a plane is
+/// the same degenerate case a small feature is.
+fn apply_volumes(
+    regions: &mut [Region],
+    schedule: &LayerSchedule,
+    volumes: &[Volume<'_>],
+    settings: &Settings,
+) -> Result<(), EngineError> {
+    for volume in volumes {
+        if !matches!(volume.kind, VolumeKind::Part | VolumeKind::Negative) {
+            continue;
+        }
+        let slices = hfw_slicing::slice_mesh_layers_with(
+            volume.mesh,
+            schedule,
+            hfw_slicing::SliceOptions {
+                close_gaps: settings.close_gaps,
+            },
+        );
+        for (index, slice) in slices.iter().enumerate() {
+            let Ok(slice) = slice else {
+                continue;
+            };
+            let body = region_from_contours(&slice.contours);
+            if body.rings.is_empty() || index >= regions.len() {
+                continue;
+            }
+            let rings = match volume.kind {
+                VolumeKind::Part => hfw_kernel::union_rings(&regions[index].rings, &body.rings),
+                _ => hfw_kernel::difference_rings(&regions[index].rings, &body.rings),
+            };
+            regions[index] = Region::new(rings);
+        }
+    }
+    Ok(())
 }
 
 fn run_with_paint(
     mesh: &Mesh,
-    support_paint: Option<&PaintRegions>,
-    seam_paint: Option<SeamPaint>,
+    paint: &Paint,
+    volumes: &[Volume<'_>],
     first_layer_height: f64,
     layer_height: f64,
     settings: &Settings,
 ) -> Result<Job, EngineError> {
+    let mut support_regions = support_paint(mesh, paint)?.unwrap_or_default();
+    support_regions.extend(volume_support_paint(volumes)?);
+    let support_paint = if support_regions.is_empty() {
+        None
+    } else {
+        Some(&support_regions)
+    };
+    let seam_paint = seam_paint(mesh, paint)?;
     if settings.spiral_vase && settings.support.is_some() {
         return Err(EngineError::VaseWithSupport);
     }
@@ -944,6 +1068,8 @@ fn run_with_paint(
     }
 
     let step = settings.every.max(1);
+
+    apply_volumes(&mut regions, &schedule, volumes, settings)?;
 
     let t_offset = std::time::Instant::now();
     compensate_all(&mut regions, settings)?;

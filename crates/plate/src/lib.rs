@@ -24,8 +24,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use hfw_engine::{
-    merge_stacks, run, run_painted, Job, Mesh, MeshDiagnostics, MeshError, MeshTransform, Paint,
-    PlateOrder, Settings,
+    merge_stacks, run_with_volumes, Job, Mesh, MeshDiagnostics, MeshError, MeshTransform, Paint,
+    PlateOrder, Settings, Volume, VolumeKind,
 };
 
 pub mod arrange;
@@ -91,6 +91,8 @@ pub enum PlateError {
     },
     /// A paint channel does not hold one state per triangle.
     Paint(MeshError),
+    /// A volume could not be attached or removed.
+    Volume(String),
 }
 
 impl fmt::Display for PlateError {
@@ -104,6 +106,7 @@ impl fmt::Display for PlateError {
             }
             PlateError::NoSuchObject(id) => write!(f, "no object on the plate has id {id}"),
             PlateError::Setting(error) => write!(f, "{error}"),
+            PlateError::Volume(message) => write!(f, "{message}"),
             PlateError::Cancelled => write!(f, "the job was cancelled"),
             PlateError::DoesNotFit {
                 object,
@@ -228,8 +231,32 @@ pub struct PlateObject {
     positioned: bool,
     settings: Option<Settings>,
     paint: Paint,
+    volumes: Vec<PlateVolume>,
     overrides: BTreeSet<String>,
     ignored_overrides: BTreeSet<String>,
+}
+
+/// A second body attached to an object: geometry plus what it does.
+///
+/// The volume shares the object's placement, so moving a part moves what was cut
+/// out of it and what it is not allowed to grow support on. That is the whole
+/// reason a volume belongs to an object rather than to the plate.
+#[derive(Clone, Debug)]
+pub struct PlateVolume {
+    kind: VolumeKind,
+    mesh: Mesh,
+}
+
+impl PlateVolume {
+    /// What this volume does to the object.
+    pub fn kind(&self) -> VolumeKind {
+        self.kind
+    }
+
+    /// The volume's geometry, in the object's own frame.
+    pub fn mesh(&self) -> &Mesh {
+        &self.mesh
+    }
 }
 
 impl PlateObject {
@@ -330,6 +357,38 @@ impl PlateObject {
             .validate(self.mesh.triangle_count())
             .map_err(PlateError::Paint)?;
         self.paint = paint;
+        Ok(())
+    }
+
+    /// The volumes attached to this object, in the order they were added.
+    pub fn volumes(&self) -> &[PlateVolume] {
+        &self.volumes
+    }
+
+    /// Attaches a volume to this object.
+    ///
+    /// Later volumes act after earlier ones, which only changes the result when two
+    /// volumes disagree: a part volume added after a negative one puts the material
+    /// back where the second one covers it.
+    pub fn add_volume(&mut self, kind: VolumeKind, mesh: Mesh) -> Result<(), PlateError> {
+        if mesh.triangle_count() == 0 {
+            return Err(PlateError::Volume(
+                "a volume has no triangles, so it would change nothing".to_owned(),
+            ));
+        }
+        self.volumes.push(PlateVolume { kind, mesh });
+        Ok(())
+    }
+
+    /// Removes one volume, counted in the order [`Self::volumes`] returns them.
+    pub fn remove_volume(&mut self, index: usize) -> Result<(), PlateError> {
+        if index >= self.volumes.len() {
+            return Err(PlateError::Volume(format!(
+                "volume {index} does not exist: this object has {}",
+                self.volumes.len()
+            )));
+        }
+        self.volumes.remove(index);
         Ok(())
     }
 
@@ -495,6 +554,7 @@ impl Plate {
             positioned,
             settings: None,
             paint: Paint::default(),
+            volumes: Vec::new(),
             overrides: BTreeSet::new(),
             ignored_overrides: BTreeSet::new(),
         });
@@ -747,25 +807,74 @@ impl Plate {
             check_sequential(clearance, placed)?;
         }
         let mut moved: Vec<Option<Mesh>> = Vec::with_capacity(objects.len());
+        let mut moved_volumes: Vec<Vec<Option<Mesh>>> = Vec::with_capacity(objects.len());
         for object in &objects {
-            moved.push(if is_identity(&object.placement) {
+            let identity = is_identity(&object.placement);
+            moved.push(if identity {
                 None
             } else {
                 Some(object.placed_mesh()?)
             });
+            let mut volumes = Vec::with_capacity(object.volumes().len());
+            for volume in object.volumes() {
+                volumes.push(if identity {
+                    None
+                } else {
+                    Some(
+                        volume
+                            .mesh()
+                            .transformed(object.placement)
+                            .map_err(|error| PlateError::Transform(error.to_string()))?,
+                    )
+                });
+            }
+            moved_volumes.push(volumes);
         }
-        let placed: Vec<(&Mesh, Option<&Paint>, &Settings)> = objects
+        let placed: Vec<PlacedObject> = objects
             .iter()
             .zip(&moved)
-            .map(|(object, moved)| {
-                (
-                    moved.as_ref().unwrap_or(&object.mesh),
-                    Some(&object.paint),
-                    object.settings().unwrap_or(settings),
-                )
+            .zip(&moved_volumes)
+            .map(|((object, moved), volumes)| PlacedObject {
+                mesh: moved.as_ref().unwrap_or(&object.mesh),
+                paint: Some(&object.paint),
+                settings: object.settings().unwrap_or(settings),
+                volumes: object
+                    .volumes()
+                    .iter()
+                    .zip(volumes)
+                    .map(|(volume, moved)| Volume {
+                        mesh: moved.as_ref().unwrap_or(volume.mesh()),
+                        kind: volume.kind(),
+                    })
+                    .collect(),
             })
             .collect();
         slice_placed_with_progress(placed, first_layer_height, layer_height, order, progress)
+    }
+}
+
+/// One object as the slicer takes it: placed geometry, the paint on it, the
+/// settings it prints with, and the volumes attached to it.
+pub struct PlacedObject<'a> {
+    /// Geometry, already placed on the bed.
+    pub mesh: &'a Mesh,
+    /// Per-triangle paint, or `None` when nothing is painted.
+    pub paint: Option<&'a Paint>,
+    /// The settings this object prints with.
+    pub settings: &'a Settings,
+    /// Volumes attached to it, already placed in its frame.
+    pub volumes: Vec<Volume<'a>>,
+}
+
+impl<'a> PlacedObject<'a> {
+    /// An object with no volumes attached.
+    pub fn new(mesh: &'a Mesh, paint: Option<&'a Paint>, settings: &'a Settings) -> Self {
+        PlacedObject {
+            mesh,
+            paint,
+            settings,
+            volumes: Vec::new(),
+        }
     }
 }
 
@@ -775,7 +884,7 @@ impl Plate {
 /// This is the whole of "a plate becomes a job" — one implementation, used by
 /// [`Plate::slice`] and by callers that hold placed meshes and no document.
 pub fn slice_placed<'a>(
-    objects: impl IntoIterator<Item = (&'a Mesh, Option<&'a Paint>, &'a Settings)>,
+    objects: impl IntoIterator<Item = PlacedObject<'a>>,
     first_layer_height: f64,
     layer_height: f64,
     order: PlateOrder,
@@ -791,19 +900,20 @@ pub fn slice_placed<'a>(
 /// Progress is per object, in plate order, because that is where the time goes:
 /// the merge afterwards is linear in layers and cannot be interrupted usefully.
 pub fn slice_placed_with_progress<'a>(
-    objects: impl IntoIterator<Item = (&'a Mesh, Option<&'a Paint>, &'a Settings)>,
+    objects: impl IntoIterator<Item = PlacedObject<'a>>,
     first_layer_height: f64,
     layer_height: f64,
     order: PlateOrder,
     mut progress: impl FnMut(usize, usize) -> bool,
 ) -> Result<Job, PlateError> {
-    let objects: Vec<(&Mesh, Option<&Paint>, &Settings)> = objects.into_iter().collect();
+    let objects: Vec<PlacedObject> = objects.into_iter().collect();
     let total = objects.len();
     if order == PlateOrder::ByObject {
         let mut clearance: Option<Clearance> = None;
         let mut placed = Vec::with_capacity(objects.len());
-        for (index, (mesh, _, settings)) in objects.iter().enumerate() {
-            let own = Clearance::of(settings)?;
+        for (index, object) in objects.iter().enumerate() {
+            let mesh = object.mesh;
+            let own = Clearance::of(object.settings)?;
             clearance = Some(match clearance {
                 None => own,
                 Some(so_far) => Clearance {
@@ -834,16 +944,21 @@ pub fn slice_placed_with_progress<'a>(
     }
     let mut stacks = Vec::new();
     let mut diagnostics = MeshDiagnostics::default();
-    for (done, (mesh, paint, settings)) in objects.into_iter().enumerate() {
+    for (done, object) in objects.into_iter().enumerate() {
         if !progress(done, total) {
             return Err(PlateError::Cancelled);
         }
-        add_diagnostics(&mut diagnostics, mesh.diagnostics());
+        add_diagnostics(&mut diagnostics, object.mesh.diagnostics());
+        let paint = object.paint.cloned().unwrap_or_default();
         stacks.push(
-            match paint.filter(|paint| !paint.is_empty()) {
-                Some(paint) => run_painted(mesh, paint, first_layer_height, layer_height, settings),
-                None => run(mesh, first_layer_height, layer_height, settings),
-            }
+            run_with_volumes(
+                object.mesh,
+                &paint,
+                &object.volumes,
+                first_layer_height,
+                layer_height,
+                object.settings,
+            )
             .map_err(|error| PlateError::Slice(error.to_string()))?,
         );
     }

@@ -1,7 +1,7 @@
 //! The document model, exercised the way a front end would use it.
 
 use hfw_engine::{Mesh, MeshTransform, PlateOrder, Settings};
-use hfw_plate::{Plate, PlateError};
+use hfw_plate::{ObjectId, Plate, PlateError};
 
 fn fixture(name: &str) -> String {
     format!("{}/../../fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -547,5 +547,141 @@ fn an_object_taller_than_the_gantry_clearance_is_refused() {
     assert!(
         refused.to_string().contains("tall is 20.0 mm"),
         "the refusal gives the height and the clearance: {refused}"
+    );
+}
+
+/// The volume of the object's paths, as a proxy for "there is material here".
+fn path_count(job: &hfw_engine::Job) -> usize {
+    job.layers
+        .iter()
+        .map(|layer| layer.paths.len())
+        .sum::<usize>()
+}
+
+#[test]
+fn a_negative_volume_cuts_a_hole_that_gets_walls_of_its_own() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let bare = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the cube slices");
+    let cutter = Mesh::box_mm(6.0, 6.0, 40.0)
+        .expect("a box builds")
+        .transformed(MeshTransform {
+            translation_mm: [7.0, 7.0, 0.0],
+            ..MeshTransform::default()
+        })
+        .expect("the cutter moves into the cube's middle");
+    plate
+        .object_mut(id)
+        .expect("added")
+        .add_volume(hfw_engine::VolumeKind::Negative, cutter)
+        .expect("the volume attaches");
+    let cut = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the cut cube slices");
+    assert!(
+        path_count(&cut) > path_count(&bare),
+        "a hole adds a wall around itself: {} paths against {}",
+        path_count(&cut),
+        path_count(&bare)
+    );
+    let inner = cut
+        .layers
+        .iter()
+        .flat_map(|layer| layer.paths.iter())
+        .any(|line| matches!(line.kind, hfw_engine::PathKind::Side(index) if index > 0));
+    assert!(inner, "the hole's wall is planned as a wall, not as infill");
+}
+
+#[test]
+fn a_part_volume_adds_where_the_object_has_nothing() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let bare = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the cube slices");
+    let addition = Mesh::box_mm(5.0, 5.0, 30.0)
+        .expect("a box builds")
+        .transformed(MeshTransform {
+            translation_mm: [25.0, 5.0, 0.0],
+            ..MeshTransform::default()
+        })
+        .expect("the box moves onto the bed beside the cube");
+    plate
+        .object_mut(id)
+        .expect("added")
+        .add_volume(hfw_engine::VolumeKind::Part, addition)
+        .expect("the volume attaches");
+    let grown = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the grown cube slices");
+    assert!(
+        path_count(&grown) > path_count(&bare),
+        "the added body prints: {} paths against {}",
+        path_count(&grown),
+        path_count(&bare)
+    );
+}
+
+#[test]
+fn a_support_blocker_volume_removes_the_support_a_bare_slice_builds() {
+    let mut settings = Settings::default();
+    settings.support = Some(hfw_engine::SupportSettings::new(settings.wall.w));
+    let mut plate = Plate::new(settings);
+    let id = plate.add("table", table()).expect("the table adds");
+    let supports = |job: &hfw_engine::Job| -> usize {
+        job.layers
+            .iter()
+            .flat_map(|layer| layer.paths.iter())
+            .filter(|line| line.kind == hfw_engine::PathKind::Support)
+            .count()
+    };
+    let bare = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the table slices");
+    assert!(supports(&bare) > 0, "the table's overhang needs support");
+    let blocker = Mesh::box_mm(40.0, 40.0, 20.0).expect("a box builds");
+    plate
+        .object_mut(id)
+        .expect("added")
+        .add_volume(hfw_engine::VolumeKind::SupportBlocker, blocker)
+        .expect("the volume attaches");
+    let blocked = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the blocked table slices");
+    assert_eq!(
+        supports(&blocked),
+        0,
+        "a blocker under the whole table leaves nowhere for support to stand"
+    );
+}
+
+#[test]
+fn volumes_survive_a_project_round_trip() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let cutter = Mesh::box_mm(6.0, 6.0, 40.0)
+        .expect("a box builds")
+        .transformed(MeshTransform {
+            translation_mm: [7.0, 7.0, 0.0],
+            ..MeshTransform::default()
+        })
+        .expect("the cutter moves into the cube's middle");
+    plate
+        .object_mut(id)
+        .expect("added")
+        .add_volume(hfw_engine::VolumeKind::Negative, cutter)
+        .expect("the volume attaches");
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    let object = reopened.object(ObjectId::from_number(1).expect("one is an id"));
+    let object = object.expect("the cube is back");
+    assert_eq!(object.volumes().len(), 1, "the volume came back");
+    assert_eq!(object.volumes()[0].kind(), hfw_engine::VolumeKind::Negative);
+    assert_eq!(
+        object.volumes()[0].mesh().triangle_count(),
+        12,
+        "with its geometry"
     );
 }

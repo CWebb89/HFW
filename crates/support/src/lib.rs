@@ -244,6 +244,12 @@ impl PaintRegions {
     pub fn is_empty(&self) -> bool {
         self.enforcers.is_empty() && self.blockers.is_empty()
     }
+
+    /// Folds another set of painted facets into this one.
+    pub fn extend(&mut self, other: PaintRegions) {
+        self.enforcers.extend(other.enforcers);
+        self.blockers.extend(other.blockers);
+    }
 }
 
 /// Painted facets rasterised onto the mask grid, one mask per layer.
