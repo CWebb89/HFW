@@ -104,6 +104,13 @@ hfw_plate_object_add_volume(*HfwPlate, id, kind, const *HfwMesh) -> i32
 hfw_plate_object_remove_volume(*HfwPlate, id, index) -> i32
 hfw_plate_object_volume_count(const *HfwPlate, id) -> ptrdiff_t
 hfw_plate_object_volume_kind(const *HfwPlate, id, index, *i32) -> i32
+hfw_plate_set_in_layer(*HfwPlate, const f64 *zs, const usize *counts,
+                       const f64 *widths, const f64 *heights, const f64 *speeds,
+                       const usize *starts, const f64 *points,
+                       const char *const *prefixes, count) -> i32
+hfw_plate_in_layer_count(const *HfwPlate) -> ptrdiff_t
+hfw_plate_in_layer_get(const *HfwPlate, index, *f64 z, *f64 width, *f64 height,
+                       *f64 speed, *f64 points, capacity, char *prefix, len) -> i32
 hfw_plate_set_markers(*HfwPlate, const i32 *kinds, const double *zs,
                       const char *const *texts, count) -> i32
 hfw_plate_marker_count(const *HfwPlate) -> ptrdiff_t
@@ -150,6 +157,14 @@ A typed marker takes its command from the printer profile (`pause_print_gcode`,
 whose text is written verbatim. A tool-change marker is not in the set: HFW has one
 extruder and no per-tool filament, so emitting `T{n}` would name a tool the engine
 cannot know exists.
+
+In-layer strokes are the calibration channel: beads printed inside a layer that the
+model does not describe, because no slice can produce them and each band is printed at
+its own width, height and speed on purpose. They are written as real beads — travel,
+extrude, retract — so E, position and the time estimate agree with the rest of the
+file, under `;TYPE:Custom`, the label both reference slicers use. `prefixes` is G-code
+written immediately before a stroke, which is how a temperature band changes the nozzle
+temperature at the moment it starts drawing.
 
 `hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
 called `hfw_plate_slice` for the first hour of its life, before the document existed

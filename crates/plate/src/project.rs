@@ -18,7 +18,9 @@
 //! poses, and a reader that expected a pose would need to know our transform
 //! convention to place a part.
 
-use hfw_engine::{Marker, MarkerKind, Mesh, Paint, PlateOrder, Settings, VolumeKind};
+use hfw_engine::{
+    InLayerPolyline, Marker, MarkerKind, Mesh, Paint, PlateOrder, Settings, VolumeKind,
+};
 use hfw_mesh::{archive_parts, model_part_xml, objects_from_3mf_text};
 
 use crate::{ObjectId, Plate, PlateError};
@@ -29,9 +31,9 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 /// Version of the project part's own format.
 ///
 /// Version 2 added per-object paint, version 3 volumes, version 4 per-object layer
-/// heights, version 5 the plate's timeline markers. Older files still open: they
-/// simply carry none of what they predate.
-pub const PROJECT_VERSION: u32 = 5;
+/// heights, version 5 the plate's timeline markers, version 6 its in-layer strokes.
+/// Older files still open: they simply carry none of what they predate.
+pub const PROJECT_VERSION: u32 = 6;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -168,6 +170,7 @@ impl Plate {
             }
         }
         plate.set_markers(extras.markers)?;
+        plate.set_in_layer_polylines(extras.in_layer)?;
         Ok(plate)
     }
 
@@ -293,6 +296,23 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
             escape(&marker.text)
         ));
     }
+    for stroke in plate.in_layer_polylines() {
+        let points: Vec<String> = stroke
+            .points
+            .iter()
+            .map(|p| format!("{:.4} {:.4}", p.x, p.y))
+            .collect();
+        xml.push_str(&format!(
+            "  <inLayer z=\"{:.6}\" width=\"{:.6}\" height=\"{:.6}\" speed=\"{:.4}\" \
+             points=\"{}\" prefix=\"{}\"/>\n",
+            stroke.z,
+            stroke.line_width,
+            stroke.layer_height,
+            stroke.speed,
+            points.join(","),
+            escape(&stroke.prefix)
+        ));
+    }
     xml.push_str("</hfwProject>\n");
     Ok(xml)
 }
@@ -324,6 +344,7 @@ struct SavedProject {
     objects: Vec<SavedObject>,
     volumes: Vec<SavedVolume>,
     markers: Vec<Marker>,
+    in_layer: Vec<InLayerPolyline>,
 }
 
 /// Where one volume came from: which object owns it, which model-part object holds
@@ -438,10 +459,50 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
             text,
         });
     }
+    let number = |field: &str, text: &str| -> Result<f64, PlateError> {
+        text.trim().parse().map_err(|_| {
+            PlateError::Slice(format!(
+                "an in-layer stroke's {field} is not a number: {text:?}"
+            ))
+        })
+    };
+    let mut in_layer = Vec::new();
+    for stroke in elements(xml, "inLayer") {
+        let field = |name: &str| {
+            attribute_in(&stroke, "inLayer", name)
+                .ok_or_else(|| PlateError::Slice(format!("an in-layer stroke has no {name}")))
+        };
+        let mut points = Vec::new();
+        for pair in field("points")?.split(',') {
+            let mut xy = pair.split_whitespace();
+            let (Some(x), Some(y), None) = (xy.next(), xy.next(), xy.next()) else {
+                return Err(PlateError::Slice(format!(
+                    "an in-layer stroke's point {pair:?} is not `x y`"
+                )));
+            };
+            let point = |text: &str, axis: &str| -> Result<f64, PlateError> {
+                text.parse().map_err(|_| {
+                    PlateError::Slice(format!(
+                        "an in-layer stroke's {axis} is not a number: {text:?}"
+                    ))
+                })
+            };
+            points.push(hfw_kernel::V2::new(point(x, "x")?, point(y, "y")?));
+        }
+        in_layer.push(InLayerPolyline {
+            z: number("z", &field("z")?)?,
+            points,
+            line_width: number("width", &field("width")?)?,
+            layer_height: number("height", &field("height")?)?,
+            speed: number("speed", &field("speed")?)?,
+            prefix: attribute_in(&stroke, "inLayer", "prefix").unwrap_or_default(),
+        });
+    }
     Ok(SavedProject {
         objects: saved,
         volumes,
         markers,
+        in_layer,
     })
 }
 
@@ -665,7 +726,7 @@ mod tests {
             Err(PlateError::Slice(message)) => {
                 assert!(message.contains("version 9"), "message was `{message}`");
                 assert!(
-                    message.contains("versions 1 to 5"),
+                    message.contains("versions 1 to 6"),
                     "the refusal names the range it reads: `{message}`"
                 );
             }

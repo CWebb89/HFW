@@ -313,6 +313,40 @@ ptrdiff_t hfw_plate_object_volume_count(const HfwPlate *plate, uint64_t id);
 int32_t hfw_plate_object_volume_kind(const HfwPlate *plate, uint64_t id, size_t index,
                                      int32_t *out);
 
+/**
+ * Sets the plate's in-layer strokes: beads printed inside a layer that the model does
+ * not describe. This is the calibration channel -- a temperature tower's labels, a flow
+ * test's lines.
+ *
+ * `count` strokes are described by parallel arrays: the print Z of the layer each
+ * belongs to, the number of points it has, its line width, layer height and speed.
+ * `points` holds every stroke's vertices back to back as interleaved x, y plate
+ * coordinates, `starts` where each stroke begins in `points`, and `prefixes` the
+ * G-code written before each stroke, verbatim (a temperature band changes the nozzle
+ * temperature just before it draws). A `count` of 0 clears the strokes.
+ *
+ * Returns 0 on success, -1 when the counts do not agree, a stroke has fewer than two
+ * points, a width, height or speed is not positive, or a Z is not above the bed.
+ */
+int32_t hfw_plate_set_in_layer(HfwPlate *plate, const double *zs, const size_t *counts,
+                               const double *widths, const double *heights, const double *speeds,
+                               const size_t *starts, const double *points,
+                               const char *const *prefixes, size_t count);
+
+/** Number of in-layer strokes on the plate, or -1 when the handle is null. */
+ptrdiff_t hfw_plate_in_layer_count(const HfwPlate *plate);
+
+/**
+ * Reads stroke `index` back: its Z, its point count in `points`, its width, height and
+ * speed. `points` receives up to `capacity` points as interleaved x, y and `prefix` up
+ * to `len` bytes of its G-code including the terminator; either may be NULL to skip
+ * it. Returns 0 on success, -1 when the index is past the end or `capacity` is too
+ * small for the stroke.
+ */
+int32_t hfw_plate_in_layer_get(const HfwPlate *plate, size_t index, double *z, double *width,
+                               double *height, double *speed, double *points, size_t capacity,
+                               char *prefix, size_t len);
+
 /** A marker that writes its own G-code at its height. */
 #define HFW_MARKER_CUSTOM 0
 /** A marker that stops the print, with the profile's `pause_print_gcode`. */

@@ -20,6 +20,7 @@ use hfw_toolpath::{evaluate, evaluate_full, extruded_volume, PlannedLayer};
 use hfw_walls::BrimSide;
 
 pub use hfw_geometry::{Contour as SliceContour, Point2};
+pub use hfw_kernel::V2;
 mod settings_key;
 pub use hfw_infill::{
     infill_layer, InfillParams, InfillParams as InfillSettings, IroningTarget, MaskCache,
@@ -41,7 +42,7 @@ pub use hfw_toolpath::{
     evaluate as evaluate_perimeter, evaluate_full as evaluate_all, line_volume, JobTotals, Metrics,
     PlannedLayer as PlannedSlice, MANIFEST_HEADER,
 };
-pub use hfw_toolpath::{Marker, MarkerError, MarkerKind};
+pub use hfw_toolpath::{InLayerPolyline, Marker, MarkerError, MarkerKind};
 pub use hfw_toolpath::{Painted, SeamPaint};
 pub use hfw_walls::{
     generate as generate_walls, Kind as PathKind, Line as Path, WallMode as Mode, WallParams,
@@ -711,6 +712,13 @@ pub struct Job {
     /// plate, not to the profile: two plates on one printer can pause at different
     /// heights. The writer emits them at the layer that reaches their Z.
     pub markers: Vec<Marker>,
+    /// Strokes the plate prints inside a layer that the model does not describe:
+    /// calibration bands and their labels, earliest layer first.
+    ///
+    /// These are plate data like the markers beside them: they exist because the user
+    /// asked for a test, not because the profile says so, and the writer prints them as
+    /// real beads at the end of the layer they belong to.
+    pub in_layer: Vec<InLayerPolyline>,
     /// Seam paint, one entry per object label a path can carry.
     ///
     /// Empty when nothing on the plate was painted. The writer indexes it by
@@ -753,6 +761,7 @@ pub fn merge_stacks(mut stacks: Vec<Job>, order: PlateOrder, diagnostics: MeshDi
         worst_layer: 0,
         skipped: Vec::new(),
         markers: Vec::new(),
+        in_layer: Vec::new(),
         seam_paint: Vec::new(),
     };
     let mut sequence: Vec<(usize, usize)> = Vec::new();
@@ -1469,6 +1478,7 @@ fn run_with_paint(
         worst_layer,
         skipped,
         markers: Vec::new(),
+        in_layer: Vec::new(),
         seam_paint: match seam_paint {
             Some(paint) => vec![paint],
             None => Vec::new(),

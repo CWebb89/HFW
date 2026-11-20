@@ -34,10 +34,10 @@ macro_rules! outln {
 use hfw_config::PrinterConfig;
 use hfw_config::{Bundle, Intake, IntakeReport, Kind, Preset, PrintSequence, ProjectSettings};
 use hfw_engine::{
-    evaluate_all, evaluate_perimeter, infill_pattern, run, slice_plane, InfillPattern, Job,
-    JobTotals, Marker, MarkerKind, MaskCache, Mesh, MeshDiagnostics, MeshRepairReport,
-    MeshTransform, Metrics, Mode, PlannedSlice, PlateOrder, Settings, SupportSettings,
-    SupportStyle, MANIFEST_HEADER,
+    evaluate_all, evaluate_perimeter, infill_pattern, run, slice_plane, InLayerPolyline,
+    InfillPattern, Job, JobTotals, Marker, MarkerKind, MaskCache, Mesh, MeshDiagnostics,
+    MeshRepairReport, MeshTransform, Metrics, Mode, PlannedSlice, PlateOrder, Settings,
+    SupportSettings, SupportStyle, MANIFEST_HEADER, V2,
 };
 
 const USAGE: &str = "\
@@ -144,6 +144,10 @@ Printer:
   --list-bundle               Name every preset in --bundle and stop.
   --flow <f>                  Extrusion multiplier 0.5..1.5, overriding the
                               profile. 1.0 prints the geometric volume.
+  --in-layer <path>           Strokes printed inside a layer that the model does not
+                              describe: one `<z> <width> <height> <speed> x y x y ...`
+                              per line, with `| <gcode>` written first. Calibration
+                              bands and their labels.
   --markers <path>            The plate's timeline: one `<kind> <z> = <gcode>` per
                               line, kinds `custom`, `pause` and `colour`. Only a
                                 custom marker carries G-code; a pause and a colour
@@ -237,6 +241,7 @@ struct Options {
     pause_at: Vec<f64>,
     colour_change_at: Vec<f64>,
     markers: Vec<Marker>,
+    in_layer: Vec<InLayerPolyline>,
     json: bool,
     json_paths: bool,
     /// Where the intake report goes as JSON, one entry per key the preset stated.
@@ -294,6 +299,7 @@ impl Options {
             pause_at: Vec::new(),
             colour_change_at: Vec::new(),
             markers: Vec::new(),
+            in_layer: Vec::new(),
             json: false,
             json_paths: false,
             intake_json: None,
@@ -713,6 +719,10 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 let value = next_value(&mut arguments, "--colour-change-at")?;
                 o.colour_change_at =
                     heights(&value).map_err(|e| format!("--colour-change-at: {e}"))?;
+            }
+            "--in-layer" => {
+                let path = PathBuf::from(next_value(&mut arguments, "--in-layer")?);
+                o.in_layer = read_in_layer(&path)?;
             }
             "--markers" => {
                 let path = PathBuf::from(next_value(&mut arguments, "--markers")?);
@@ -1154,6 +1164,62 @@ fn seat_on_bed(parts: &mut [PlatePart]) -> Result<(), String> {
 /// 1 sparse_infill_density = 50%
 /// 2 wall_loops = 4
 /// ```
+/// Reads the plate's in-layer strokes: one `<z> <width> <height> <speed> x y [x y ...]`
+/// per line, with `|` and the rest of the line after it written as G-code before the
+/// stroke.
+///
+/// These are beads printed inside a layer that the model does not describe, so they
+/// carry their own width, height and speed — each band of a test is printed differently
+/// on purpose — and the points are plate coordinates in millimetres.
+fn read_in_layer(path: &Path) -> Result<Vec<InLayerPolyline>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut strokes = Vec::new();
+    for (line_number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let where_ = || format!("{} line {}", path.display(), line_number + 1);
+        let (numbers, prefix) = match line.split_once('|') {
+            Some((numbers, prefix)) => (numbers, prefix.trim().to_owned()),
+            None => (line, String::new()),
+        };
+        let mut fields = numbers.split_whitespace();
+        let mut next = |what: &str| -> Result<f64, String> {
+            let text = fields
+                .next()
+                .ok_or_else(|| format!("{}: no {what}", where_()))?;
+            text.parse()
+                .map_err(|_| format!("{}: {what} {text:?} is not a number", where_()))
+        };
+        let z = next("z")?;
+        let line_width = next("width")?;
+        let layer_height = next("height")?;
+        let speed = next("speed")?;
+        let mut points = Vec::new();
+        while let Some(x) = fields.next() {
+            let y = fields
+                .next()
+                .ok_or_else(|| format!("{}: point {x:?} has no y", where_()))?;
+            let number = |text: &str, axis: &str| -> Result<f64, String> {
+                text.parse()
+                    .map_err(|_| format!("{}: {axis} {text:?} is not a number", where_()))
+            };
+            points.push(V2::new(number(x, "x")?, number(y, "y")?));
+        }
+        strokes.push(InLayerPolyline {
+            z,
+            points,
+            line_width,
+            layer_height,
+            speed,
+            prefix,
+        });
+    }
+    InLayerPolyline::sorted(strokes).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 /// Reads the plate's timeline: one `<kind> <z> = <gcode>` per line.
 ///
 /// The kinds are `custom`, `pause` and `colour` (`color` is taken too). Only a custom
@@ -1829,9 +1895,17 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
     let object = std::path::Path::new(o.inputs.first().map(String::as_str).unwrap_or("plate"))
         .file_stem()
         .and_then(|s| s.to_str());
-    let written =
-        hfw_gcode::generate_with_markers(&job.layers, cfg, object, &job.seam_paint, &o.markers)
-            .map_err(|error| error.to_string())?;
+    let written = hfw_gcode::generate_with_extras(
+        &job.layers,
+        cfg,
+        object,
+        &hfw_gcode::Extras {
+            seam_paint: &job.seam_paint,
+            markers: &o.markers,
+            in_layer: &o.in_layer,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     let path = output_path(cfg, o, path)?;
     fs::write(&path, &written.text)
         .map_err(|error| format!("could not write {}: {error}", path.display()))?;

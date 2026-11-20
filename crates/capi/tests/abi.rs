@@ -9,17 +9,18 @@ use hfw_capi::{
     hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_free, hfw_mesh_from_bytes,
     hfw_mesh_load_file, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_transform,
     hfw_mesh_triangle_count, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
-    hfw_plate_free, hfw_plate_marker_count, hfw_plate_marker_get, hfw_plate_new,
-    hfw_plate_object_add_volume, hfw_plate_object_bounds, hfw_plate_object_clear_settings,
-    hfw_plate_object_count, hfw_plate_object_duplicate, hfw_plate_object_enabled,
-    hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mirror,
-    hfw_plate_object_name, hfw_plate_object_paint, hfw_plate_object_paint_get,
-    hfw_plate_object_placement, hfw_plate_object_remove, hfw_plate_object_remove_volume,
-    hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_volume_count,
-    hfw_plate_object_volume_kind, hfw_plate_open_project, hfw_plate_preview_json,
-    hfw_plate_project_bytes, hfw_plate_set_markers, hfw_plate_slice, hfw_slice_meshes,
-    hfw_string_free, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE,
-    HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_VOLUME_NEGATIVE,
+    hfw_plate_free, hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count,
+    hfw_plate_marker_get, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
+    hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
+    hfw_plate_object_enabled, hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get,
+    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_paint,
+    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_remove,
+    hfw_plate_object_remove_volume, hfw_plate_object_rotate, hfw_plate_object_set,
+    hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_open_project,
+    hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers,
+    hfw_plate_slice, hfw_slice_meshes, hfw_string_free, HfwBounds, HfwJobProgress, HfwTransform,
+    HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE,
+    HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -1028,5 +1029,138 @@ fn plate_markers_cross_the_abi_sorted_and_read_back() {
         "an empty list clears the timeline"
     );
     assert_eq!(unsafe { hfw_plate_marker_count(plate) }, 0);
+    unsafe { hfw_plate_free(plate) };
+}
+
+#[test]
+fn in_layer_strokes_cross_the_abi_and_read_back() {
+    let plate = hfw_plate_new();
+    let zs = [0.2f64];
+    let counts = [3usize];
+    let widths = [0.5f64];
+    let heights = [0.2f64];
+    let speeds = [25.0f64];
+    let starts = [0usize];
+    let points = [10.0f64, 10.0, 20.0, 10.0, 20.0, 20.0];
+    let prefix = c_string("M104 S240");
+    let prefixes = [prefix.as_ptr()];
+    assert_eq!(
+        unsafe {
+            hfw_plate_set_in_layer(
+                plate,
+                zs.as_ptr(),
+                counts.as_ptr(),
+                widths.as_ptr(),
+                heights.as_ptr(),
+                speeds.as_ptr(),
+                starts.as_ptr(),
+                points.as_ptr(),
+                prefixes.as_ptr(),
+                1,
+            )
+        },
+        0,
+        "the stroke is accepted: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_in_layer_count(plate) }, 1);
+
+    let mut z = 0.0f64;
+    let mut width = 0.0f64;
+    let mut height = 0.0f64;
+    let mut speed = 0.0f64;
+    let mut out = [0.0f64; 6];
+    let mut text = [0 as c_char; 32];
+    assert_eq!(
+        unsafe {
+            hfw_plate_in_layer_get(
+                plate,
+                0,
+                &mut z,
+                &mut width,
+                &mut height,
+                &mut speed,
+                out.as_mut_ptr(),
+                3,
+                text.as_mut_ptr(),
+                text.len(),
+            )
+        },
+        0,
+        "the stroke reads back: {}",
+        last_error()
+    );
+    assert_eq!((z, width, height, speed), (0.2, 0.5, 0.2, 25.0));
+    assert_eq!(out, [10.0, 10.0, 20.0, 10.0, 20.0, 20.0]);
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(text.as_ptr()) }
+            .to_str()
+            .unwrap(),
+        "M104 S240"
+    );
+    assert_eq!(
+        unsafe {
+            hfw_plate_in_layer_get(
+                plate,
+                0,
+                &mut z,
+                &mut width,
+                &mut height,
+                &mut speed,
+                out.as_mut_ptr(),
+                2,
+                text.as_mut_ptr(),
+                text.len(),
+            )
+        },
+        -1,
+        "a buffer too small for the stroke is refused"
+    );
+
+    let single = [0usize];
+    let broken = [0.0f64, 0.0];
+    assert_eq!(
+        unsafe {
+            hfw_plate_set_in_layer(
+                plate,
+                zs.as_ptr(),
+                single.as_ptr(),
+                widths.as_ptr(),
+                heights.as_ptr(),
+                speeds.as_ptr(),
+                starts.as_ptr(),
+                broken.as_ptr(),
+                prefixes.as_ptr(),
+                1,
+            )
+        },
+        -1,
+        "a stroke with one point is refused"
+    );
+    assert_eq!(
+        unsafe { hfw_plate_in_layer_count(plate) },
+        1,
+        "the refused list changed nothing"
+    );
+
+    assert_eq!(
+        unsafe {
+            hfw_plate_set_in_layer(
+                plate,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            )
+        },
+        0,
+        "an empty list clears the strokes"
+    );
+    assert_eq!(unsafe { hfw_plate_in_layer_count(plate) }, 0);
     unsafe { hfw_plate_free(plate) };
 }

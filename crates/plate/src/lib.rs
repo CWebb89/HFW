@@ -24,8 +24,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use hfw_engine::{
-    merge_stacks, run_with_volumes, Job, Marker, Mesh, MeshDiagnostics, MeshError, MeshTransform,
-    Paint, PlateOrder, Settings, Volume, VolumeKind,
+    merge_stacks, run_with_volumes, InLayerPolyline, Job, Marker, Mesh, MeshDiagnostics, MeshError,
+    MeshTransform, Paint, PlateOrder, Settings, Volume, VolumeKind,
 };
 
 pub mod arrange;
@@ -518,6 +518,7 @@ pub struct Plate {
     settings: Settings,
     objects: Vec<PlateObject>,
     markers: Vec<Marker>,
+    in_layer: Vec<InLayerPolyline>,
     next_id: u64,
 }
 
@@ -528,6 +529,7 @@ impl Plate {
             settings,
             objects: Vec::new(),
             markers: Vec::new(),
+            in_layer: Vec::new(),
             next_id: 0,
         }
     }
@@ -547,6 +549,26 @@ impl Plate {
     pub fn set_markers(&mut self, markers: Vec<Marker>) -> Result<(), PlateError> {
         self.markers =
             Marker::sorted(markers).map_err(|error| PlateError::Slice(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Strokes the plate prints inside a layer that the model does not describe,
+    /// earliest layer first.
+    pub fn in_layer_polylines(&self) -> &[InLayerPolyline] {
+        &self.in_layer
+    }
+
+    /// Replaces the plate's in-layer strokes, sorted by Z.
+    ///
+    /// This is the calibration channel: a temperature tower's labels, a flow test's
+    /// lines. A stroke with one point, a non-positive width, height or speed, or a Z
+    /// off the bed is refused here rather than printed as a bead with no length.
+    pub fn set_in_layer_polylines(
+        &mut self,
+        strokes: Vec<InLayerPolyline>,
+    ) -> Result<(), PlateError> {
+        self.in_layer = InLayerPolyline::sorted(strokes)
+            .map_err(|error| PlateError::Slice(error.to_string()))?;
         Ok(())
     }
 
@@ -924,6 +946,7 @@ impl Plate {
         let mut job =
             slice_placed_with_progress(placed, first_layer_height, layer_height, order, progress)?;
         job.markers = self.markers.clone();
+        job.in_layer = self.in_layer.clone();
         Ok(job)
     }
 }

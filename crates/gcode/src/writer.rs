@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use hfw_config::{Flavor, PrintSequence, PrinterConfig, Seam};
 use hfw_kernel::{Bounds, V2};
 use hfw_toolpath::PlannedLayer;
-use hfw_toolpath::{Marker, MarkerKind, Painted, SeamPaint};
+use hfw_toolpath::{InLayerPolyline, Marker, MarkerKind, Painted, SeamPaint};
 use hfw_walls::{Kind, Line};
 
 use crate::error::GcodeError;
@@ -40,6 +40,10 @@ pub enum Feature {
     Sparse,
     /// Slow, near-zero-flow pass that flattens a top surface.
     Ironing,
+    /// A stroke the plate prints inside a layer that the model does not describe: a
+    /// calibration band or its label. The label is the one both reference slicers use
+    /// for custom G-code, so a viewer groups it the way its own slicer would.
+    Custom,
 }
 
 impl Feature {
@@ -59,6 +63,7 @@ impl Feature {
             Feature::TopSolid => "Top surface",
             Feature::Sparse => "Sparse infill",
             Feature::Ironing => "Ironing",
+            Feature::Custom => "Custom",
         }
     }
 
@@ -106,6 +111,7 @@ impl Feature {
             }
             Feature::Ironing => 42,
             Feature::Bridge => 43,
+            Feature::Custom => 44,
         }
     }
 }
@@ -1481,7 +1487,7 @@ fn base_accel(feature: Feature, cfg: &PrinterConfig, first_layer: bool) -> f64 {
         Feature::SupportInterface => cfg.support_interface_accel,
         Feature::Bridge => cfg.bridge_acceleration,
         Feature::Ironing => 0.0,
-        Feature::Skirt | Feature::Brim | Feature::Thin => 0.0,
+        Feature::Skirt | Feature::Brim | Feature::Thin | Feature::Custom => 0.0,
     };
     if own == 0.0 && matches!(feature, Feature::Outer | Feature::Inner) {
         own = cfg.perimeter_accel;
@@ -1752,6 +1758,7 @@ fn base_speed(feature: Feature, cfg: &PrinterConfig, first_layer: bool) -> f64 {
         Feature::Support => cfg.support_speed,
         Feature::SupportInterface => cfg.support_interface_speed,
         Feature::Ironing => cfg.ironing_speed,
+        Feature::Custom => cfg.solid_speed,
     };
     if !first_layer || feature == Feature::Bridge {
         return clamp(speed);
@@ -1778,7 +1785,9 @@ fn base_speed(feature: Feature, cfg: &PrinterConfig, first_layer: bool) -> f64 {
         Feature::TopSolid => cfg.first_layer_top_solid_speed,
         Feature::Sparse => cfg.first_layer_infill_speed,
         Feature::Support | Feature::SupportInterface => cfg.first_layer_support_speed,
-        Feature::Skirt | Feature::Brim | Feature::Bridge | Feature::Ironing => 0.0,
+        Feature::Skirt | Feature::Brim | Feature::Bridge | Feature::Ironing | Feature::Custom => {
+            0.0
+        }
     };
     if own_first > 0.0 {
         clamp(own_first)
@@ -2247,6 +2256,41 @@ struct Spiral {
 
 impl Writer<'_> {
     /// True when a solid path lands on a bridge of the layer below.
+    /// Prints the plate's in-layer strokes that belong to the layer ending at `z`.
+    ///
+    /// A stroke is a real bead, not pasted text: it travels in, extrudes at its own
+    /// width, height and speed, and retracts, so E, position and the time estimate all
+    /// agree with the rest of the file. Its points are plate coordinates, which is why
+    /// they are only quantised and never shifted by the bed placement — the caller
+    /// already placed them.
+    fn print_in_layer(&mut self, strokes: &[InLayerPolyline], z: f64) {
+        for stroke in strokes.iter().filter(|stroke| (stroke.z - z).abs() <= 5e-4) {
+            let prefix = stroke.prefix.trim();
+            if !prefix.is_empty() {
+                self.out.push_str(prefix);
+                self.out.push('\n');
+            }
+            let mut path = Path {
+                pts: stroke
+                    .points
+                    .iter()
+                    .map(|p| V2::new(self.printed(p.x), self.printed(p.y)))
+                    .collect(),
+                width: vec![stroke.line_width; stroke.points.len()],
+                closed: false,
+                feature: Feature::Custom,
+                rank: 0,
+                span: 0.0,
+                flow: 1.0,
+                overhang: 0.0,
+                hole: false,
+                object: 0,
+            };
+            self.extrude(&mut path, stroke.layer_height, stroke.speed, false, None);
+            self.retract();
+        }
+    }
+
     fn path_over_bridge(&self, path: &Path) -> bool {
         if self.prev_bridges.is_empty() || path.pts.is_empty() {
             return false;
@@ -3124,7 +3168,15 @@ pub fn generate_with_paint(
     object_name: Option<&str>,
     seam_paint: &[SeamPaint],
 ) -> Result<Gcode, GcodeError> {
-    generate_with_markers(layers, cfg, object_name, seam_paint, &[])
+    generate_with_extras(
+        layers,
+        cfg,
+        object_name,
+        &Extras {
+            seam_paint,
+            ..Extras::default()
+        },
+    )
 }
 
 /// Writes G-code, honouring painted seam facets and the plate's timeline markers.
@@ -3141,6 +3193,44 @@ pub fn generate_with_markers(
     seam_paint: &[SeamPaint],
     markers: &[Marker],
 ) -> Result<Gcode, GcodeError> {
+    generate_with_extras(
+        layers,
+        cfg,
+        object_name,
+        &Extras {
+            seam_paint,
+            markers,
+            ..Extras::default()
+        },
+    )
+}
+
+/// What a plate adds to the plan before it becomes a file.
+///
+/// All three are the plate's own data rather than the profile's: paint says where a
+/// seam belongs, markers say what runs at a height, and in-layer strokes say what the
+/// plate prints that the model does not describe. Empty is a plate with none of them,
+/// which is what a single part from a profile alone is.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Extras<'a> {
+    /// Seam paint, indexed by the object label a path carries.
+    pub seam_paint: &'a [SeamPaint],
+    /// Commands the plate runs at a height, earliest first.
+    pub markers: &'a [Marker],
+    /// Strokes printed inside a layer, earliest layer first.
+    pub in_layer: &'a [InLayerPolyline],
+}
+
+/// Writes G-code for a plate that carries its own paint, timeline and in-layer strokes.
+pub fn generate_with_extras(
+    layers: &[PlannedLayer],
+    cfg: &PrinterConfig,
+    object_name: Option<&str>,
+    extras: &Extras<'_>,
+) -> Result<Gcode, GcodeError> {
+    let seam_paint = extras.seam_paint;
+    let markers = extras.markers;
+    let in_layer = extras.in_layer;
     cfg.validate()?;
     if layers.is_empty() {
         return Err(GcodeError::NoLayers);
@@ -3649,6 +3739,7 @@ pub fn generate_with_markers(
             w.extrude(&mut ordered[i], height, speeds[i], first_layer, next);
         }
         w.restore_limits();
+        w.print_in_layer(in_layer, z);
         if !cfg.layer_gcode.trim().is_empty() {
             let weight = format!("{:.3}", w.stats.volume_mm3 / 1000.0 * cfg.filament_density);
             let per_layer = [

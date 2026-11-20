@@ -38,7 +38,8 @@ mod preview;
 
 use hfw_config::PrinterConfig;
 use hfw_engine::{
-    Job, Marker, MarkerKind, Mesh, MeshTransform, Paint, PlateOrder, Settings, VolumeKind,
+    InLayerPolyline, Job, Marker, MarkerKind, Mesh, MeshTransform, Paint, PlateOrder, Settings,
+    VolumeKind,
 };
 use hfw_plate::{ObjectId, Plate, PlateObject};
 
@@ -229,12 +230,15 @@ fn bounds_from(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> HfwBound
 pub(crate) fn write_job(job: &Job, profile: &PrinterConfig) -> Result<HfwGcode, String> {
     let mut write_cfg = profile.clone();
     write_cfg.keep_position = true;
-    let written = hfw_gcode::generate_with_markers(
+    let written = hfw_gcode::generate_with_extras(
         &job.layers,
         &write_cfg,
         Some("plate"),
-        &job.seam_paint,
-        &job.markers,
+        &hfw_gcode::Extras {
+            seam_paint: &job.seam_paint,
+            markers: &job.markers,
+            in_layer: &job.in_layer,
+        },
     )
     .map_err(|error| error.to_string())?;
     let verified = hfw_gcode::verify(&written.text, &write_cfg).ok();
@@ -1991,6 +1995,200 @@ pub unsafe extern "C" fn hfw_plate_marker_get(
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), text.cast::<u8>(), bytes.len());
                 *text.add(bytes.len()) = 0;
+            }
+        }
+        Ok(0)
+    };
+    report(read(), -1)
+}
+
+/// Sets the plate's in-layer strokes: beads printed inside a layer that the model
+/// does not describe.
+///
+/// This is the calibration channel — a temperature tower's labels, a flow test's
+/// lines. `count` strokes are described by five parallel arrays: the print Z of the
+/// layer each belongs to, the number of points it has, its line width, its layer
+/// height and its speed. `points` holds every stroke's vertices back to back as
+/// interleaved `x, y` plate coordinates, `starts` where each stroke's points begin in
+/// `points`, and `prefixes` the G-code written before each stroke, verbatim (a
+/// temperature band changes the nozzle temperature just before it draws). Any pointer
+/// may be null for a `count` of zero, which clears the strokes.
+///
+/// Returns 0 on success and -1 when the counts do not agree, a stroke has fewer than
+/// two points, a width, height or speed is not positive, or a Z is not a height above
+/// the bed.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call; every array must point at
+/// `count` readable elements, `points` at twice the sum of `counts`, and every
+/// `prefixes` entry a live C string.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_set_in_layer(
+    plate: *mut HfwPlate,
+    zs: *const f64,
+    counts: *const usize,
+    widths: *const f64,
+    heights: *const f64,
+    speeds: *const f64,
+    starts: *const usize,
+    points: *const f64,
+    prefixes: *const *const c_char,
+    count: usize,
+) -> c_int {
+    let set = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        if count > 0
+            && (zs.is_null()
+                || counts.is_null()
+                || widths.is_null()
+                || heights.is_null()
+                || speeds.is_null()
+                || starts.is_null()
+                || prefixes.is_null())
+        {
+            return Err("an in-layer stroke array is null".to_owned());
+        }
+        let mut strokes = Vec::with_capacity(count);
+        for index in 0..count {
+            let (z, point_count, width, height, speed, start, prefix) = unsafe {
+                (
+                    *zs.add(index),
+                    *counts.add(index),
+                    *widths.add(index),
+                    *heights.add(index),
+                    *speeds.add(index),
+                    *starts.add(index),
+                    *prefixes.add(index),
+                )
+            };
+            if point_count < 2 {
+                return Err(format!(
+                    "stroke {index} has {point_count} point(s), and a stroke needs at least two"
+                ));
+            }
+            if points.is_null() {
+                return Err(format!(
+                    "stroke {index} has {point_count} points and the point array is null"
+                ));
+            }
+            let mut stroke_points = Vec::with_capacity(point_count);
+            for step in 0..point_count {
+                let at = (start + step) * 2;
+                stroke_points.push(hfw_engine::V2::new(unsafe { *points.add(at) }, unsafe {
+                    *points.add(at + 1)
+                }));
+            }
+            let prefix = if prefix.is_null() {
+                String::new()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(prefix) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            strokes.push(InLayerPolyline {
+                z,
+                points: stroke_points,
+                line_width: width,
+                layer_height: height,
+                speed,
+                prefix,
+            });
+        }
+        unsafe { &mut *plate }
+            .plate
+            .set_in_layer_polylines(strokes)
+            .map(|()| 0)
+            .map_err(|error| error.to_string())
+    };
+    report(set(), -1)
+}
+
+/// Number of in-layer strokes on the plate, or -1 when the handle is null.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_in_layer_count(plate: *const HfwPlate) -> isize {
+    let count = || -> Result<isize, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        Ok(unsafe { &*plate }.plate.in_layer_polylines().len() as isize)
+    };
+    report(count(), -1)
+}
+
+/// Reads stroke `index` back: its Z, its point count, its width, height and speed.
+///
+/// `points` receives up to `capacity` points as interleaved `x, y` and `prefix`
+/// receives up to `len` bytes of its G-code including the terminator, truncated to
+/// fit. Either may be null to skip it. Returns 0 on success, -1 when the handle is
+/// null, the index is past the end, or `points` is too small for the stroke.
+///
+/// # Safety
+///
+/// `plate` must be a live handle; every out pointer must be writable for what it
+/// receives.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_in_layer_get(
+    plate: *const HfwPlate,
+    index: usize,
+    z: *mut f64,
+    width: *mut f64,
+    height: *mut f64,
+    speed: *mut f64,
+    points: *mut f64,
+    capacity: usize,
+    prefix: *mut c_char,
+    len: usize,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let plate = unsafe { &*plate };
+        let stroke = plate.plate.in_layer_polylines().get(index).ok_or_else(|| {
+            format!(
+                "the plate has {} in-layer strokes, so stroke {index} does not exist",
+                plate.plate.in_layer_polylines().len()
+            )
+        })?;
+        if !points.is_null() && capacity < stroke.points.len() {
+            return Err(format!(
+                "stroke {index} has {} points, more than the {capacity} asked for",
+                stroke.points.len()
+            ));
+        }
+        if !z.is_null() {
+            unsafe { *z = stroke.z };
+        }
+        if !width.is_null() {
+            unsafe { *width = stroke.line_width };
+        }
+        if !height.is_null() {
+            unsafe { *height = stroke.layer_height };
+        }
+        if !speed.is_null() {
+            unsafe { *speed = stroke.speed };
+        }
+        if !points.is_null() {
+            for (step, point) in stroke.points.iter().enumerate() {
+                unsafe {
+                    *points.add(step * 2) = point.x;
+                    *points.add(step * 2 + 1) = point.y;
+                }
+            }
+        }
+        if !prefix.is_null() && len > 0 {
+            let mut bytes = stroke.prefix.as_bytes().to_vec();
+            bytes.truncate(len - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), prefix.cast::<u8>(), bytes.len());
+                *prefix.add(bytes.len()) = 0;
             }
         }
         Ok(0)

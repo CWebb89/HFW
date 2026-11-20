@@ -2572,3 +2572,94 @@ fn a_marker_below_the_bed_or_without_g_code_is_refused() {
     assert_eq!(sorted[0].z, 1.0);
     assert_eq!(sorted[1].z, 4.0);
 }
+
+#[test]
+fn an_in_layer_stroke_prints_once_inside_its_own_layer() {
+    use hfw_engine::V2;
+    use hfw_toolpath::InLayerPolyline;
+    let cfg = voron();
+    let job = plan("cube.stl", &cfg);
+    let first_layer_z = job.layers[0].print_z;
+    let strokes = vec![InLayerPolyline {
+        z: first_layer_z,
+        points: vec![V2::new(150.0, 150.0), V2::new(160.0, 150.0)],
+        line_width: 0.5,
+        layer_height: 0.2,
+        speed: 20.0,
+        prefix: "M104 S240".to_owned(),
+    }];
+    let gcode = hfw_gcode::generate_with_extras(
+        &job.layers,
+        &cfg,
+        Some("part"),
+        &hfw_gcode::Extras {
+            in_layer: &strokes,
+            ..hfw_gcode::Extras::default()
+        },
+    )
+    .expect("the job writes");
+    assert_eq!(gcode.text.matches(";TYPE:Custom").count(), 1);
+    assert_eq!(gcode.text.matches("M104 S240").count(), 1);
+
+    let custom = gcode
+        .text
+        .find(";TYPE:Custom")
+        .expect("the stroke is written");
+    let before = &gcode.text[..custom];
+    let marker = before.rfind(";Z:").expect("a layer marker precedes it");
+    let layer_z = before[marker + 3..]
+        .lines()
+        .next()
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(
+        layer_z,
+        format!("{first_layer_z:.3}"),
+        "the stroke sits inside the layer it names, not before it"
+    );
+    let temperature = gcode.text.find("M104 S240").expect("the prefix is written");
+    assert!(
+        temperature < custom,
+        "the stroke's own G-code comes before the bead it prepares"
+    );
+
+    let end = gcode.text[custom..]
+        .find(";LAYER_CHANGE")
+        .map(|offset| custom + offset)
+        .expect("the next layer follows");
+    let moves = gcode.text[custom..end]
+        .lines()
+        .filter(|line| line.starts_with("G1 ") && line.contains(" E"))
+        .count();
+    assert!(
+        moves >= 1,
+        "the stroke is extruded as a bead, not pasted as text: {moves} moves"
+    );
+}
+
+#[test]
+fn a_stroke_with_no_length_or_no_speed_is_refused() {
+    use hfw_engine::V2;
+    use hfw_toolpath::InLayerPolyline;
+    let short = InLayerPolyline::sorted(vec![InLayerPolyline {
+        z: 1.0,
+        points: vec![V2::new(0.0, 0.0)],
+        line_width: 0.4,
+        layer_height: 0.2,
+        speed: 20.0,
+        prefix: String::new(),
+    }])
+    .expect_err("a single point has no length");
+    assert!(short.to_string().contains("no length"), "{short}");
+    let slow = InLayerPolyline::sorted(vec![InLayerPolyline {
+        z: 1.0,
+        points: vec![V2::new(0.0, 0.0), V2::new(1.0, 0.0)],
+        line_width: 0.4,
+        layer_height: 0.2,
+        speed: 0.0,
+        prefix: String::new(),
+    }])
+    .expect_err("a speed of zero is refused");
+    assert!(slow.to_string().contains("positive"), "{slow}");
+}

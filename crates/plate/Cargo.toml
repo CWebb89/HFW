@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 hfw-engine = { path = "../engine" }
+hfw-kernel = { path = "../kernel" }
 hfw-mesh = { path = "../mesh" }
 
 [dev-dependencies]

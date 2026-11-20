@@ -833,3 +833,50 @@ fn a_marker_with_no_g_code_is_refused_by_the_plate() {
         "the refused list changed nothing"
     );
 }
+
+#[test]
+fn in_layer_strokes_reach_the_job_and_survive_a_project() {
+    let mut plate = plate();
+    plate.add("cube", cube()).expect("a cube adds");
+    plate
+        .set_in_layer_polylines(vec![hfw_engine::InLayerPolyline {
+            z: 0.2,
+            points: vec![
+                hfw_engine::V2::new(10.0, 10.0),
+                hfw_engine::V2::new(20.0, 10.0),
+            ],
+            line_width: 0.5,
+            layer_height: 0.2,
+            speed: 25.0,
+            prefix: "M104 S240".to_owned(),
+        }])
+        .expect("the stroke is accepted");
+    let job = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the plate slices");
+    assert_eq!(job.in_layer, plate.in_layer_polylines());
+
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    assert_eq!(
+        reopened.in_layer_polylines(),
+        plate.in_layer_polylines(),
+        "the strokes survive the round trip, points and prefix included"
+    );
+}
+
+#[test]
+fn a_stroke_with_no_length_is_refused_by_the_plate() {
+    let mut plate = plate();
+    let refused = plate
+        .set_in_layer_polylines(vec![hfw_engine::InLayerPolyline {
+            z: 0.2,
+            points: vec![hfw_engine::V2::new(1.0, 1.0)],
+            line_width: 0.5,
+            layer_height: 0.2,
+            speed: 25.0,
+            prefix: String::new(),
+        }])
+        .expect_err("one point has no length");
+    assert!(refused.to_string().contains("no length"), "{refused}");
+}

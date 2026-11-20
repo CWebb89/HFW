@@ -28,8 +28,8 @@ pub use error::GcodeError;
 pub use time::{Move, Planner, Tune};
 pub use verify::{verify, VerifyReport};
 pub use writer::{
-    feature_of, generate, generate_with_markers, generate_with_paint, Feature, Gcode, GcodeStats,
-    ModelExtent, Path,
+    feature_of, generate, generate_with_extras, generate_with_markers, generate_with_paint, Extras,
+    Feature, Gcode, GcodeStats, ModelExtent, Path,
 };
 
 pub use hfw_toolpath::{bead_area, bead_width};

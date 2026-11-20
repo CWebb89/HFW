@@ -519,6 +519,71 @@ impl Marker {
     }
 }
 
+/// A stroke the plate prints inside a layer that the model does not describe.
+///
+/// This is the calibration channel: a temperature tower's labels, a flow test's
+/// lines, a speed tower's bands. They are not part of the mesh, so no slice can
+/// produce them, and they carry their own width, height and speed because each band
+/// is printed differently on purpose. The writer extrudes them as real beads — travel
+/// in, extrude, retract — so E, position and time stay consistent with the rest of
+/// the file instead of being pasted in as text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InLayerPolyline {
+    /// Print Z of the layer the stroke belongs to, in millimetres: the top of that
+    /// layer, the same Z the file's own layer markers carry.
+    pub z: f64,
+    /// The stroke, in plate coordinates in millimetres.
+    pub points: Vec<V2>,
+    /// Extrusion width of the bead, in millimetres.
+    pub line_width: f64,
+    /// Height the bead is printed at, in millimetres.
+    pub layer_height: f64,
+    /// Print speed, in millimetres per second.
+    pub speed: f64,
+    /// G-code written before the stroke, verbatim.
+    ///
+    /// A temperature band changes the nozzle temperature immediately before it draws,
+    /// so the setting has to travel with the stroke rather than with the layer.
+    pub prefix: String,
+}
+
+impl InLayerPolyline {
+    /// Returns the strokes sorted by Z, refusing any that cannot be printed.
+    pub fn sorted(strokes: Vec<InLayerPolyline>) -> Result<Vec<InLayerPolyline>, MarkerError> {
+        for (index, stroke) in strokes.iter().enumerate() {
+            let fail = |reason: String| Err(MarkerError { index, reason });
+            if !stroke.z.is_finite() || stroke.z < 0.0 {
+                return fail(format!("Z {} mm is not a height above the bed", stroke.z));
+            }
+            if stroke.points.len() < 2 {
+                return fail(format!(
+                    "a stroke of {} point(s) has no length",
+                    stroke.points.len()
+                ));
+            }
+            if !stroke
+                .points
+                .iter()
+                .all(|p| p.x.is_finite() && p.y.is_finite())
+            {
+                return fail("a stroke has a point that is not a number".to_owned());
+            }
+            for (what, value) in [
+                ("line width", stroke.line_width),
+                ("layer height", stroke.layer_height),
+                ("speed", stroke.speed),
+            ] {
+                if !value.is_finite() || value <= 0.0 {
+                    return fail(format!("{what} {value} mm is not a positive number"));
+                }
+            }
+        }
+        let mut strokes = strokes;
+        strokes.sort_by(|a, b| a.z.total_cmp(&b.z));
+        Ok(strokes)
+    }
+}
+
 /// Seam paint, as the writer consumes it.
 ///
 /// The facets are triangles in model millimetres: an enforced one says the seam
