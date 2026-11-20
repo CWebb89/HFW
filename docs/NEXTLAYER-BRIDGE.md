@@ -171,6 +171,17 @@ file, under `;TYPE:Custom`, the label both reference slicers use. `prefixes` is 
 written immediately before a stroke, which is how a temperature band changes the nozzle
 temperature at the moment it starts drawing.
 
+## Carrying it, until the port lands
+
+`hfw-cli --plate <project> --profile <p.cfg> --gcode <out>` reads a plate file and slices
+through `hfw_plate::Plate`, not through a bag of meshes. That is the only input that
+carries paint, volumes, per-object layer heights, the timeline and the in-layer strokes:
+an STL has nowhere to put any of them, so a GUI that ships STLs is a GUI that silently
+drops every one of those capabilities. The run reports what the document carried
+(`Carries: paint support on 12 facet(s); volumes 1 modifier, 1 negative; ...`) and warns
+about an in-layer stroke whose Z matches no printed layer instead of dropping it in
+silence.
+
 `hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
 called `hfw_plate_slice` for the first hour of its life, before the document existed
 and the name was needed for the real thing; nothing outside this repository has been

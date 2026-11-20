@@ -144,6 +144,14 @@ Printer:
   --list-bundle               Name every preset in --bundle and stop.
   --flow <f>                  Extrusion multiplier 0.5..1.5, overriding the
                               profile. 1.0 prints the geometric volume.
+  --plate <path>              A plate file, as the app writes it: objects with their
+                              placement, per-object settings, per-object layer
+                              heights, paint, volumes (part, negative, support blocker
+                              and enforcer, modifier with its own settings), the
+                              plate's timeline markers and its in-layer strokes. This
+                              is the only input that carries paint and volumes; STL
+                              cannot. Needs --gcode, and a --profile or --layer-height
+                              for the layers it prints at.
   --in-layer <path>           Strokes printed inside a layer that the model does not
                               describe: one `<z> <width> <height> <speed> x y x y ...`
                               per line, with `| <gcode>` written first. Calibration
@@ -242,6 +250,9 @@ struct Options {
     colour_change_at: Vec<f64>,
     markers: Vec<Marker>,
     in_layer: Vec<InLayerPolyline>,
+    /// A plate file the app wrote: objects, paint, volumes, heights and the plate's own
+    /// timeline, read as a document rather than as a pile of meshes.
+    plate: Option<PathBuf>,
     json: bool,
     json_paths: bool,
     /// Where the intake report goes as JSON, one entry per key the preset stated.
@@ -300,6 +311,7 @@ impl Options {
             colour_change_at: Vec::new(),
             markers: Vec::new(),
             in_layer: Vec::new(),
+            plate: None,
             json: false,
             json_paths: false,
             intake_json: None,
@@ -720,6 +732,7 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.colour_change_at =
                     heights(&value).map_err(|e| format!("--colour-change-at: {e}"))?;
             }
+            "--plate" => o.plate = Some(PathBuf::from(next_value(&mut arguments, "--plate")?)),
             "--in-layer" => {
                 let path = PathBuf::from(next_value(&mut arguments, "--in-layer")?);
                 o.in_layer = read_in_layer(&path)?;
@@ -782,7 +795,7 @@ fn parse_arguments() -> Result<Option<Options>, String> {
         }
     }
     let listing = o.list_bundle && o.bundle.is_some();
-    if o.check_gcode.is_none() && o.inputs.is_empty() && !listing {
+    if o.check_gcode.is_none() && o.inputs.is_empty() && !listing && o.plate.is_none() {
         return Err(format!("missing model path\n\n{USAGE}"));
     }
     if o.preset_strict {
@@ -892,6 +905,10 @@ fn run_cli() -> Result<(), String> {
     }
     o.settings.metrics_res = o.metrics_res;
 
+    if let Some(path) = o.plate.clone() {
+        return run_plate(&o, &path);
+    }
+
     let unit_scale = if o.units == "inch" { 25.4 } else { 1.0 };
     let shrink = o.profile_config.as_ref().map_or([1.0; 3], |cfg| {
         let factor = |percent: f64| {
@@ -948,6 +965,145 @@ fn run_cli() -> Result<(), String> {
         return run_single(&o, &mesh, before, after, repair, total_scale);
     }
     run_stack(&o, &mesh, &plate, before, after, repair, total_scale)
+}
+
+/// Runs a plate file the app wrote: the document is the job, so nothing is arranged,
+/// nothing is merged and no setting is inferred from a filename.
+///
+/// Every capability that has no way into an STL arrives through this path — paint,
+/// volumes, per-object layer heights, the plate's timeline and its in-layer strokes —
+/// which is why the report leads with what the file carries. A plate that quietly
+/// dropped its paint would otherwise print perfectly and be wrong.
+fn run_plate(o: &Options, path: &Path) -> Result<(), String> {
+    if o.z_mm.is_some() || o.svg.is_some() || o.out_dir.is_some() {
+        return Err(
+            "--plate slices the whole document; --z, --svg and --out-dir describe a single model"
+                .to_owned(),
+        );
+    }
+    let gcode = o
+        .gcode
+        .as_ref()
+        .ok_or_else(|| "--plate needs --gcode: the document is what becomes the file".to_owned())?;
+    let layer_height = o
+        .layer_height
+        .ok_or_else(|| "--plate needs --profile or --layer-height".to_owned())?;
+    let first_layer_height = o.first_layer_height.unwrap_or(layer_height);
+    let bytes =
+        fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let plate = hfw_plate::Plate::from_project(&bytes, o.settings.clone())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    report_plate(&plate);
+
+    let order = match o.profile_config.as_ref().map(|cfg| cfg.print_sequence) {
+        Some(PrintSequence::ByObject) => PlateOrder::ByObject,
+        _ => PlateOrder::ByLayer,
+    };
+    let job = plate
+        .slice(first_layer_height, layer_height, order)
+        .map_err(|error| error.to_string())?;
+    let names: Vec<String> = plate
+        .objects()
+        .iter()
+        .map(|object| object.name().to_owned())
+        .collect();
+    let deposited = |index: usize| -> f64 {
+        job.layers
+            .iter()
+            .map(|layer| {
+                let height = layer.height();
+                layer
+                    .paths
+                    .iter()
+                    .filter(|line| usize::from(line.object) == index)
+                    .map(|line| hfw_engine::line_volume(line, height))
+                    .sum::<f64>()
+            })
+            .sum()
+    };
+    let per_object: Vec<String> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| format!("{name} {:.0} mm^3", deposited(index)))
+        .collect();
+    outln!(
+        "Plate {}: {} object(s), {} layers, deposited: {}.",
+        path.display(),
+        names.len(),
+        job.layers.len(),
+        per_object.join(", ")
+    );
+    let written = write_gcode(o, &job, gcode, true)?;
+    let _ = written;
+    Ok(())
+}
+
+/// Says what a plate file carries, one line per capability that cannot come from an
+/// STL.
+fn report_plate(plate: &hfw_plate::Plate) {
+    let supports: usize = plate
+        .objects()
+        .iter()
+        .map(|object| {
+            object
+                .paint()
+                .support
+                .iter()
+                .filter(|state| **state != 0)
+                .count()
+        })
+        .sum();
+    let seams: usize = plate
+        .objects()
+        .iter()
+        .map(|object| {
+            object
+                .paint()
+                .seam
+                .iter()
+                .filter(|state| **state != 0)
+                .count()
+        })
+        .sum();
+    let mut volumes: Vec<(String, usize)> = Vec::new();
+    let mut heights = 0usize;
+    for object in plate.objects() {
+        if !object.layer_heights().is_empty() {
+            heights += 1;
+        }
+        for volume in object.volumes() {
+            let name = volume.kind().name().to_owned();
+            match volumes.iter_mut().find(|(kind, _)| *kind == name) {
+                Some(entry) => entry.1 += 1,
+                None => volumes.push((name, 1)),
+            }
+        }
+    }
+    let painted: Vec<String> = [("support", supports), ("seam", seams)]
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(name, count)| format!("{name} on {count} facet(s)"))
+        .collect();
+    let volume_text = if volumes.is_empty() {
+        "none".to_owned()
+    } else {
+        volumes
+            .iter()
+            .map(|(kind, count)| format!("{count} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    outln!(
+        "Carries: paint {}; volumes {volume_text}; {heights} object(s) with their own layer \
+         heights; {} marker(s); {} in-layer stroke(s).",
+        if painted.is_empty() {
+            "none".to_owned()
+        } else {
+            painted.join(", ")
+        },
+        plate.markers().len(),
+        plate.in_layer_polylines().len()
+    );
 }
 
 /// One body on the plate, with the placement it prints at.
@@ -1892,20 +2048,40 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
     if o.settings.every != 1 {
         return Err("--gcode needs every layer planned; drop --every".to_owned());
     }
-    let object = std::path::Path::new(o.inputs.first().map(String::as_str).unwrap_or("plate"))
-        .file_stem()
-        .and_then(|s| s.to_str());
+    let object = o
+        .plate
+        .as_deref()
+        .or_else(|| o.inputs.first().map(Path::new))
+        .and_then(|path| path.file_stem())
+        .and_then(|name| name.to_str());
+    let mut markers = o.markers.clone();
+    markers.extend(job.markers.iter().cloned());
+    let mut in_layer = o.in_layer.clone();
+    in_layer.extend(job.in_layer.iter().cloned());
     let written = hfw_gcode::generate_with_extras(
         &job.layers,
         cfg,
         object,
         &hfw_gcode::Extras {
             seam_paint: &job.seam_paint,
-            markers: &o.markers,
-            in_layer: &o.in_layer,
+            markers: &markers,
+            in_layer: &in_layer,
         },
     )
     .map_err(|error| error.to_string())?;
+    for stroke in &in_layer {
+        if !job
+            .layers
+            .iter()
+            .any(|layer| (layer.print_z - stroke.z).abs() <= 5e-4)
+        {
+            outln!(
+                "  warning: an in-layer stroke at Z{:.3} matches no printed layer, so it is not \
+                 in the file",
+                stroke.z
+            );
+        }
+    }
     let path = output_path(cfg, o, path)?;
     fs::write(&path, &written.text)
         .map_err(|error| format!("could not write {}: {error}", path.display()))?;
