@@ -41,7 +41,9 @@ use hfw_engine::{
     InLayerPolyline, Job, Marker, MarkerKind, Mesh, MeshTransform, Paint, PlateOrder, Settings,
     VolumeKind,
 };
+use hfw_font::Face;
 use hfw_plate::{ObjectId, Plate, PlateObject};
+use hfw_text::text_prism;
 
 /// Version of the surface this library exports.
 ///
@@ -217,6 +219,37 @@ fn bounds_of(mesh: &Mesh) -> Result<HfwBounds, String> {
         y1,
         z1 as f64 / 1_000_000.0,
     ))
+}
+
+/// Appends `text` as a JSON string, escaped.
+fn push_json_text(out: &mut String, text: &str) {
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+}
+
+/// A JSON object of string rows, with every key and value escaped.
+fn json_object(rows: &[(String, String)]) -> String {
+    let mut json = String::from("{");
+    for (index, (key, value)) in rows.iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        push_json_text(&mut json, key);
+        json.push(':');
+        push_json_text(&mut json, value);
+    }
+    json.push('}');
+    json
 }
 
 fn bounds_from(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> HfwBounds {
@@ -732,6 +765,243 @@ pub unsafe extern "C" fn hfw_plate_open_project(
     report(build(), ptr::null_mut())
 }
 
+/// Writes the ids of the plate's objects into `out`, and returns how many there
+/// are.
+///
+/// The count is reported even when `out` is null or too short, so a caller sizes
+/// its buffer with one call it can also use to read. Ids are stable for as long as
+/// the object is on the plate and are never reused.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for `len` 64-bit ids, or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_ids(
+    plate: *const HfwPlate,
+    out: *mut u64,
+    len: usize,
+) -> usize {
+    let count = || -> Result<usize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let objects = plate.plate.objects();
+        if !out.is_null() {
+            let buffer = unsafe { std::slice::from_raw_parts_mut(out, len) };
+            for (slot, object) in buffer.iter_mut().zip(objects) {
+                *slot = object.id().get();
+            }
+        }
+        Ok(objects.len())
+    };
+    report(count(), 0)
+}
+
+/// Writes object `id`'s name into `out` and returns how many bytes it needs,
+/// excluding the terminating NUL.
+///
+/// A buffer that is too short writes nothing and reports the length the name
+/// needs, so a caller can retry with the right size. Returns -1 when the object is
+/// not on the plate or the name cannot be written.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for `len` bytes, or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_name_get(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut c_char,
+    len: usize,
+) -> isize {
+    let read = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        let name = object.name();
+        let needed = name.len();
+        if out.is_null() || len < needed + 1 {
+            return Ok(needed as isize);
+        }
+        let buffer = unsafe { std::slice::from_raw_parts_mut(out as *mut u8, len) };
+        buffer[..needed].copy_from_slice(name.as_bytes());
+        buffer[needed] = 0;
+        Ok(needed as isize)
+    };
+    report(read(), -1)
+}
+
+/// Writes object `id`'s placement into `out`.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for one `HfwTransform`.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_placement_get(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut HfwTransform,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        if out.is_null() {
+            return Err("output pointer is null".to_owned());
+        }
+        let object = object_of(&plate.plate, id)?;
+        let placement = object.placement();
+        unsafe {
+            out.write(HfwTransform {
+                scale: placement.scale,
+                rotation_degrees: placement.rotation_degrees,
+                translation_mm: placement.translation_mm,
+            });
+        }
+        Ok(0)
+    };
+    report(read(), -1)
+}
+
+/// Writes 1 into `out` when object `id` is switched on, 0 when it is not.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for one `int32_t`.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_enabled_get(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut c_int,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        if out.is_null() {
+            return Err("output pointer is null".to_owned());
+        }
+        let object = object_of(&plate.plate, id)?;
+        unsafe { *out = i32::from(object.enabled()) };
+        Ok(0)
+    };
+    report(read(), -1)
+}
+
+/// Returns a copy of object `id`'s own geometry, in the object's frame, or NULL on
+/// error.
+///
+/// The copy carries the object's paint channels, so a reader that keeps the mesh
+/// keeps what was painted on it. Release it with [`hfw_mesh_free`].
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_mesh(plate: *const HfwPlate, id: u64) -> *mut HfwMesh {
+    let build = || -> Result<*mut HfwMesh, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        Ok(Box::into_raw(Box::new(HfwMesh {
+            mesh: object.mesh().clone(),
+            paint: object.paint().clone(),
+        })))
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Returns object `id`'s own settings as a JSON object of key/value strings, or
+/// NULL on error.
+///
+/// The values are what [`hfw_plate_object_set`] accepts, so a document can be read
+/// back and rebuilt setting for setting. Release the string with
+/// [`hfw_string_free`].
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_settings_json(
+    plate: *const HfwPlate,
+    id: u64,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        let settings = object.effective_settings(plate.plate.settings());
+        let mut rows: Vec<(String, String)> = Vec::new();
+        for key in object.overrides() {
+            let value = settings
+                .key_value(key)
+                .map_err(|error| format!("`{key}` cannot be read back: {error}"))?;
+            rows.push((key.to_owned(), value));
+        }
+        let json = json_object(&rows);
+        CString::new(json)
+            .map(CString::into_raw)
+            .map_err(|_| "the settings JSON contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Returns a copy of volume `index` of object `id`, or NULL on error.
+///
+/// Release it with [`hfw_mesh_free`]. The geometry is in the object's own frame.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_mesh(
+    plate: *const HfwPlate,
+    id: u64,
+    index: usize,
+) -> *mut HfwMesh {
+    let build = || -> Result<*mut HfwMesh, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        let volume = object.volumes().get(index).ok_or_else(|| {
+            format!(
+                "object {id} has no volume {index}: it has {}",
+                object.volumes().len()
+            )
+        })?;
+        Ok(Box::into_raw(Box::new(HfwMesh {
+            mesh: volume.mesh().clone(),
+            paint: Paint::default(),
+        })))
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Returns volume `index` of object `id` as a JSON object of the settings its
+/// region prints with, or NULL on error.
+///
+/// Release the string with [`hfw_string_free`].
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_settings_json(
+    plate: *const HfwPlate,
+    id: u64,
+    index: usize,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        let volume = object.volumes().get(index).ok_or_else(|| {
+            format!(
+                "object {id} has no volume {index}: it has {}",
+                object.volumes().len()
+            )
+        })?;
+        let rows: Vec<(String, String)> = volume
+            .overrides()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        CString::new(json_object(&rows))
+            .map(CString::into_raw)
+            .map_err(|_| "the settings JSON contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
+}
+
 /// Releases a string this library returned, such as the preview document. A null
 /// pointer is ignored.
 ///
@@ -794,6 +1064,55 @@ pub unsafe extern "C" fn hfw_mesh_load_file(path: *const c_char) -> *mut HfwMesh
                 })
                 .map_err(|error| error.to_string())
         }),
+        ptr::null_mut(),
+    )
+}
+
+/// Builds a mesh from a string of text, extruded from a font file.
+///
+/// The mesh is a closed prism: the glyphs of `text` at `size_mm`, raised from `z_mm`
+/// to `z_mm + height_mm`, laid out left to right from the origin. Add it to a plate
+/// object with [`hfw_plate_object_add_volume`] as a part volume to print it raised, or
+/// as a negative volume to engrave it — the slice unions or subtracts it per layer, so
+/// no boolean is involved and the result is as exact as any other volume.
+///
+/// `face_index` selects a face inside a font collection; 0 is the first, and 0 is what
+/// a plain `.ttf` or `.otf` has.
+///
+/// # Safety
+///
+/// `font_path` must be a NUL-terminated string and `text` must be a NUL-terminated
+/// UTF-8 string. The returned handle must be released with [`hfw_mesh_free`], and
+/// never used after it.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_text_mesh(
+    font_path: *const c_char,
+    face_index: u32,
+    text: *const c_char,
+    size_mm: f64,
+    height_mm: f64,
+    z_mm: f64,
+) -> *mut HfwMesh {
+    report(
+        (|| -> Result<*mut HfwMesh, String> {
+            let path = unsafe { text_of(font_path, "font_path") }?;
+            let label = unsafe { text_of(text, "text") }?;
+            if label.trim().is_empty() {
+                return Err("text is empty".to_owned());
+            }
+            let face = Face::load(Path::new(&path), face_index)
+                .map_err(|error| format!("{path}: {error}"))?;
+            let (prism, _) = text_prism(&face, &label, size_mm, height_mm, 0.0, 0.0, z_mm)
+                .map_err(|error| error.to_string())?;
+            let mesh = prism.mesh().map_err(|error| error.to_string())?;
+            if mesh.triangle_count() == 0 {
+                return Err(format!("{path} draws no glyph in {label:?}"));
+            }
+            Ok(Box::into_raw(Box::new(HfwMesh {
+                mesh,
+                paint: Paint::default(),
+            })))
+        })(),
         ptr::null_mut(),
     )
 }
@@ -1045,6 +1364,109 @@ pub unsafe extern "C" fn hfw_mesh_volume(mesh: *const HfwMesh) -> f64 {
         Ok(source.mesh.volume_mm3())
     };
     report(volume(), f64::NAN)
+}
+
+/// Returns how many vertices the mesh has, or 0 for a null handle.
+///
+/// # Safety
+///
+/// `mesh` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_vertex_count(mesh: *const HfwMesh) -> usize {
+    let count = || -> Result<usize, String> {
+        let source = unsafe { mesh_of(mesh) }?;
+        Ok(source.mesh.vertices().len())
+    };
+    report(count(), 0)
+}
+
+/// Writes the mesh's vertices into `out` as `count` triples of millimetres.
+///
+/// `out` must hold `hfw_mesh_vertex_count` triples; a shorter buffer is an error
+/// rather than a partial write, because a caller that mis-sized it would render a
+/// mesh with vertices missing. Returns 0 on success and -1 on a null handle or a
+/// buffer that is too short.
+///
+/// # Safety
+///
+/// `mesh` must be a live handle and `out` must be writable for `count * 3`
+/// doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_vertices(
+    mesh: *const HfwMesh,
+    out: *mut f64,
+    count: usize,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        let source = unsafe { mesh_of(mesh) }?;
+        if out.is_null() {
+            return Err("the vertex buffer is null".to_owned());
+        }
+        let vertices = source.mesh.vertices();
+        if count < vertices.len() {
+            return Err(format!(
+                "the vertex buffer holds {count} and the mesh has {}",
+                vertices.len()
+            ));
+        }
+        let buffer = unsafe { std::slice::from_raw_parts_mut(out, count * 3) };
+        for (slot, vertex) in buffer.chunks_exact_mut(3).zip(vertices) {
+            slot.copy_from_slice(&vertex.to_mm());
+        }
+        Ok(0)
+    };
+    report(read(), -1)
+}
+
+/// Returns how many triangles the mesh has, or 0 for a null handle.
+///
+/// # Safety
+///
+/// `mesh` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_index_count(mesh: *const HfwMesh) -> usize {
+    let count = || -> Result<usize, String> {
+        let source = unsafe { mesh_of(mesh) }?;
+        Ok(source.mesh.triangles().len())
+    };
+    report(count(), 0)
+}
+
+/// Writes the mesh's triangle indices into `out`, three per triangle.
+///
+/// The order is the mesh's own, which is the order paint is indexed by, so a
+/// reader that keeps these triangles keeps the paint it read with them aligned.
+/// Returns 0 on success and -1 on a null handle or a buffer that is too short.
+///
+/// # Safety
+///
+/// `mesh` must be a live handle and `out` must be writable for `count * 3`
+/// 32-bit indices.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_indices(
+    mesh: *const HfwMesh,
+    out: *mut u32,
+    count: usize,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        let source = unsafe { mesh_of(mesh) }?;
+        if out.is_null() {
+            return Err("the index buffer is null".to_owned());
+        }
+        let triangles = source.mesh.triangles();
+        if count < triangles.len() {
+            return Err(format!(
+                "the index buffer holds {count} triangles and the mesh has {}",
+                triangles.len()
+            ));
+        }
+        let buffer = unsafe { std::slice::from_raw_parts_mut(out, count * 3) };
+        for (slot, triangle) in buffer.chunks_exact_mut(3).zip(triangles) {
+            slot.copy_from_slice(&triangle.0);
+        }
+        Ok(0)
+    };
+    report(read(), -1)
 }
 
 /// Releases a mesh handle. A null handle is ignored.
@@ -1947,14 +2369,8 @@ pub unsafe extern "C" fn hfw_plate_object_layer_heights_get(
         if heights.is_empty() {
             return Ok(0);
         }
-        if out.is_null() {
-            return Err("layer height pointer is null".to_owned());
-        }
-        if len < heights.len() {
-            return Err(format!(
-                "object {id} has {} layer height pairs, more than the {len} asked for",
-                heights.len()
-            ));
+        if out.is_null() || len < heights.len() {
+            return Ok(heights.len() as isize);
         }
         for (index, (z, height)) in heights.iter().enumerate() {
             unsafe {

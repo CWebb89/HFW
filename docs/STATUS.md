@@ -77,11 +77,20 @@ Two more that matter when deciding whether to trust the output:
   planning and per layer while writing, cancellation observed between objects and
   before the write. A cancelled job yields no file. The threaded job writes
   byte-identical G-code to the synchronous slice — the gate compares the two.
-- Scope: `docs/SCOPE.md` (generated) and the surface's `capabilities` array — text,
-  cut/hollow, STEP, SLA, MMU and nesting, each with the setting that stands in. None
-  of them has a setting the engine parses, so asking for one is refused by name.
-  Support and seam painting left that list: they are per-triangle channels, consumed
-  inside support generation and by the writer's seam chooser (`docs/PAINT.md`).
+- Text: `crates/font` reads TrueType (`cmap` 4/12, `glyf` simple and composite, quadratic
+  flattening) and agrees with FreeType to 0.00002 mm on advances and 0.00218 mm on ink at
+  10 mm; `crates/text` extrudes an outline into a closed prism (volume checked against
+  polygon area × height, hole preserved); `hfw-cli --text` slices it — the gate requires
+  four layers, the letters' walls and a verifier pass. `docs/TEXT.md` lists what is left.
+- Parity backlog: `docs/PARITY-BACKLOG.md` (generated) and the surface's `capabilities`
+  array — every capability libslic3r has and this engine does not, with a `state`
+  (`unbuilt`, `blocked`, `excluded`), what closing it costs and what it waits on.
+  **300 of 364 settings applied**; 70 of the dialect's 383 are unapplied, 57 of those
+  need a second extruder or the filament loading path, and the remaining 13 are listed
+  by name. The ledger declines to score 19 rows as n/a, which is why its own unapplied
+  total reads 64 rather than 70. Support and seam painting left that list by being built:
+  per-triangle channels consumed inside support generation and by the writer's seam
+  chooser (`docs/PAINT.md`).
 - Project files: `Plate::to_project`/`from_project`/`save_project`/`open_project`,
   `hfw_plate_project_bytes`/`hfw_plate_open_project`/`hfw_buffer_free`. A saved plate
   reopened slices to byte-identical G-code — asserted in the plate tests, in the ABI

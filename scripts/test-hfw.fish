@@ -424,7 +424,7 @@ python3 tools/gen-settings-gaps.py --check
 or fail 'the gap breakdown is stale'
 
 section 'The settings surface is one document the panel can read'
-python3 -c 'import json; d = json.load(open("crates/config/assets/settings-surface.json")); assert d["surface"] == "hfw-settings"; assert len(d["settings"]) == d["counts"]["settings"]; assert all(row["status"] in d["statuses"] for row in d["settings"]); caps = d["capabilities"]; assert len(caps) == 6 and len({c["id"] for c in caps}) == 6, "the out-of-scope list is malformed"; assert all(c["disposition"] == "out_of_scope" and c["panel"] == "unavailable" and c["note"] for c in caps), "a capability is missing its disposition"; assert not {c["id"] for c in caps} & {row["name"] for row in d["settings"]}, "a capability is also a setting"; print("Verified: the surface describes", len(d["settings"]), "settings,", d["counts"]["applied"], "of them applied,", len(caps), "capabilities declined.")'
+python3 -c 'import json; d = json.load(open("crates/config/assets/settings-surface.json")); assert d["surface"] == "hfw-settings"; assert len(d["settings"]) == d["counts"]["settings"]; assert all(row["status"] in d["statuses"] for row in d["settings"]); caps = d["capabilities"]; assert len(caps) >= 10 and len({c["id"] for c in caps}) == len(caps), "the parity backlog is malformed"; assert all(c["state"] in ("unbuilt", "blocked", "excluded") and c["panel"] in ("unavailable", "available") and c["note"] and c["cost"] for c in caps), "a capability is missing its state or its cost"; assert all(c.get("blocked_on") for c in caps if c["state"] in ("blocked", "excluded")), "a blocked capability does not say what it waits on"; assert not {c["id"] for c in caps} & {row["name"] for row in d["settings"]}, "a capability is also a setting"; print("Verified: the surface describes", len(d["settings"]), "settings,", d["counts"]["applied"], "of them applied,", len(caps), "capabilities in the backlog.")'
 or fail 'the settings surface is not valid JSON, or its counts disagree with its rows'
 $bin --settings-surface "$tmp/surface.json" >/dev/null
 or fail 'the command line could not write the settings surface'
@@ -1951,6 +1951,44 @@ test "$last" = 'M201 X2000'
  or fail "the top layer was not the table's end value ($last)"
 if not grep -q '6[0-9][0-9][0-9]' "$tmp/perlayer.gcode"
     fail 'the table was read at one height for the whole print'
+end
+
+section 'Text is geometry: a font is read, extruded, sliced and verified'
+
+set -l text_font
+for candidate in /usr/share/fonts/TTF/FiraCode-Regular.ttf /usr/share/fonts/TTF/DejaVuSans.ttf /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+    if test -f "$candidate"
+        set text_font "$candidate"
+        break
+    end
+end
+if test -z "$text_font"
+    printf 'skipped: no TrueType font is installed.\n'
+else
+    mkdir -p "$tmp/text"
+    $bin --text HFW --text-font "$text_font" --text-size 12 --text-height 0.8 --layer-height 0.2 --profile profiles/voron_klipper.cfg --gcode "$tmp/text/text.gcode" >"$tmp/text/job.log" 2>&1
+    or fail 'slicing a string failed'
+    test -s "$tmp/text/text.gcode"; or fail 'the text job wrote no G-code'
+    grep -q 'text "HFW"' "$tmp/text/job.log"; or fail 'the CLI did not report the text it embossed'
+    grep -q 'RESULT PASS' "$tmp/text/job.log"; or fail 'the text job did not pass the independent G-code verifier'
+    set -l text_layers (grep -c '^;LAYER:' "$tmp/text/text.gcode")
+    test "$text_layers" -eq 4
+    or fail "the text prism printed $text_layers layers, not the four its 0.8 mm height asks for"
+    grep -q '^;TYPE:Inner wall' "$tmp/text/text.gcode"; or fail 'the letters planned no walls'
+    $bin --text HFW --text-font "$text_font" --text-size 12 --text-height 0.8 --layer-height 0.2 >"$tmp/text/plan.log" 2>&1
+    or fail 'planning the text without G-code failed'
+    grep -q '24 walls' "$tmp/text/plan.log"; or fail 'the three letters did not plan their outer walls'
+    grep -o 'Deposited volume [0-9.]* mm' "$tmp/text/plan.log"
+    $bin --text '' --text-font "$text_font" >"$tmp/text/empty.log" 2>&1
+    and fail 'an empty string was accepted'
+    grep -q 'needs a string' "$tmp/text/empty.log"; or fail 'an empty string was refused without saying why'
+    $bin --text X --text-font /nonexistent.ttf >"$tmp/text/font.log" 2>&1
+    and fail 'a missing font file was accepted'
+    grep -q 'nonexistent.ttf' "$tmp/text/font.log"; or fail 'a missing font file was not named in the refusal'
+    if set -q HFW_PY
+        cargo test --release -q -p hfw-font --test freetype -- --nocapture 2>&1 | grep -i 'freetype agreement'
+        or fail 'the font reader no longer agrees with FreeType'
+    end
 end
 
 section 'Two-reference oracle'

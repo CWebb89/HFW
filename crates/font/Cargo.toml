@@ -1,0 +1,12 @@
+[package]
+name = "hfw-font"
+description = "TrueType and OpenType glyph outlines: the font reader text embossing stands on."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

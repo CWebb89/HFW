@@ -7,20 +7,25 @@ use hfw_capi::{
     hfw_abi_version, hfw_buffer_free, hfw_gcode_free, hfw_gcode_len, hfw_gcode_text,
     hfw_gcode_verified, hfw_job_cancel, hfw_job_poll, hfw_job_start, hfw_job_take_gcode,
     hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_free, hfw_mesh_from_bytes,
-    hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_transform,
-    hfw_mesh_triangle_count, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
+    hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get,
+    hfw_mesh_paint_set, hfw_mesh_transform, hfw_mesh_triangle_count, hfw_mesh_vertex_count,
+    hfw_mesh_vertices, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
     hfw_plate_free, hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count,
     hfw_plate_marker_get, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
     hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
-    hfw_plate_object_enabled, hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get,
-    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_paint,
-    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_remove,
-    hfw_plate_object_remove_volume, hfw_plate_object_rotate, hfw_plate_object_set,
-    hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_open_project,
-    hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers,
-    hfw_plate_slice, hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free, HfwBounds,
+    hfw_plate_object_enabled, hfw_plate_object_enabled_get, hfw_plate_object_ids,
+    hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mesh,
+    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_name_get,
+    hfw_plate_object_paint, hfw_plate_object_paint_get, hfw_plate_object_placement,
+    hfw_plate_object_placement_get, hfw_plate_object_remove, hfw_plate_object_remove_volume,
+    hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_settings_json,
+    hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
+    hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
+    hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_slice,
+    hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free, hfw_text_mesh, HfwBounds,
     HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED,
-    HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
+    HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT, HFW_VOLUME_MODIFIER,
+    HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -336,9 +341,8 @@ fn the_settings_surface_arrives_as_one_json_document() {
     assert!(text.contains("\"counts\": {"));
     let named = text.matches("\"name\":").count();
     assert!(named > 300, "only {named} settings in the surface");
-    assert_eq!(
-        text.matches("\"disposition\": \"out_of_scope\"").count(),
-        6,
+    assert!(
+        text.matches("\"state\": \"unbuilt\"").count() >= 8,
         "the panel cannot tell which features are unavailable"
     );
     assert_eq!(
@@ -1165,6 +1169,135 @@ fn in_layer_strokes_cross_the_abi_and_read_back() {
     unsafe { hfw_plate_free(plate) };
 }
 
+/// Total extrusion in a G-code document, in millimetres of filament.
+fn extruded(gcode: &str) -> f64 {
+    gcode
+        .lines()
+        .filter(|line| line.starts_with("G1 ") || line.starts_with("G2 "))
+        .filter_map(|line| {
+            line.split_whitespace()
+                .find_map(|word| word.strip_prefix('E'))
+                .and_then(|value| value.parse::<f64>().ok())
+        })
+        .sum()
+}
+
+/// A font this machine has, or `None` when it has none.
+fn system_font() -> Option<String> {
+    [
+        "/usr/share/fonts/TTF/FiraCode-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    .iter()
+    .find(|path| std::path::Path::new(path).exists())
+    .map(|path| (*path).to_owned())
+}
+
+#[test]
+fn text_crosses_the_abi_and_engraving_removes_material() {
+    let Some(font) = system_font() else {
+        eprintln!("skipped: no TrueType font is installed");
+        return;
+    };
+    let font_path = c_string(&font);
+    let label = c_string("HFW");
+    let text = unsafe { hfw_text_mesh(font_path.as_ptr(), 0, label.as_ptr(), 12.0, 0.8, 0.0) };
+    assert!(!text.is_null(), "text builds: {}", last_error());
+    let triangles = unsafe { hfw_mesh_triangle_count(text) };
+    assert!(
+        triangles > 100,
+        "only {triangles} triangles in three letters"
+    );
+    let mut bounds = HfwBounds {
+        min: [f64::NAN; 3],
+        max: [f64::NAN; 3],
+    };
+    assert_eq!(unsafe { hfw_mesh_bounds(text, &mut bounds) }, 0);
+    assert!(
+        (bounds.max[2] - 0.8).abs() < 1e-6 && bounds.min[2].abs() < 1e-6,
+        "the prism spans z 0 to 0.8: {:?}",
+        bounds
+    );
+    assert!(
+        bounds.max[0] - bounds.min[0] > 10.0,
+        "three letters span more than 10 mm: {:?}",
+        bounds
+    );
+
+    let empty = c_string("");
+    assert!(
+        unsafe { hfw_text_mesh(font_path.as_ptr(), 0, empty.as_ptr(), 12.0, 0.8, 0.0) }.is_null()
+    );
+    assert!(
+        last_error().contains("empty"),
+        "an empty string is refused by name: {}",
+        last_error()
+    );
+    let missing = c_string("/nonexistent.ttf");
+    assert!(
+        unsafe { hfw_text_mesh(missing.as_ptr(), 0, label.as_ptr(), 12.0, 0.8, 0.0) }.is_null()
+    );
+    assert!(
+        last_error().contains("nonexistent.ttf"),
+        "a missing font is named in the refusal: {}",
+        last_error()
+    );
+
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!cube.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(id, 0);
+    let profile = c_string(&profile());
+    let bare = unsafe { hfw_plate_slice(plate, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!bare.is_null(), "the bare slice failed: {}", last_error());
+    let bare_text = unsafe { CStr::from_ptr(hfw_gcode_text(bare)) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let sunk = unsafe { hfw_text_mesh(font_path.as_ptr(), 0, label.as_ptr(), 12.0, 0.8, 0.0) };
+    assert_eq!(
+        unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_NEGATIVE, sunk) },
+        0,
+        "the text attaches as a negative volume: {}",
+        last_error()
+    );
+    let engraved = unsafe { hfw_plate_slice(plate, profile.as_ptr(), 0.2, 0.2) };
+    assert!(
+        !engraved.is_null(),
+        "the engraved slice failed: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_gcode_verified(engraved) }, 1);
+    let engraved_text = unsafe { CStr::from_ptr(hfw_gcode_text(engraved)) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let before = extruded(&bare_text);
+    let after = extruded(&engraved_text);
+    println!(
+        "engraving 3 letters removed {:.1} mm of filament from {:.1} mm",
+        before - after,
+        before
+    );
+    assert!(
+        after < before - 1.0,
+        "engraved text removed nothing: {before} mm before, {after} mm after"
+    );
+
+    unsafe {
+        hfw_gcode_free(bare);
+        hfw_gcode_free(engraved);
+        hfw_mesh_free(sunk);
+        hfw_mesh_free(text);
+        hfw_mesh_free(cube);
+        hfw_plate_free(plate);
+    }
+}
+
 #[test]
 fn a_modifier_volume_takes_settings_across_the_abi() {
     let plate = hfw_plate_new();
@@ -1240,5 +1373,169 @@ fn a_mesh_builds_from_arrays_with_its_triangle_order_kept() {
         unsafe { hfw_mesh_new(vertices.as_ptr(), 8, indices.as_ptr(), 0) }.is_null(),
         "a mesh with no triangles is refused"
     );
+    unsafe { hfw_mesh_free(mesh) };
+}
+
+/// A plate handed to the engine comes back: every object with its name, its
+/// placement, its own settings, the paint on it and the geometry underneath.
+#[test]
+fn a_plate_reads_back_the_document_it_was_given() {
+    let path = c_string(&fixture("cube.stl"));
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, mesh) };
+    let name = c_string("painted bracket");
+    assert_eq!(
+        unsafe { hfw_plate_object_name(plate, id, name.as_ptr()) },
+        0
+    );
+    let placement = HfwTransform {
+        rotation_degrees: [0.0, 0.0, 30.0],
+        translation_mm: [25.0, 35.0, 0.0],
+        ..HfwTransform::default()
+    };
+    assert_eq!(
+        unsafe { hfw_plate_object_placement(plate, id, placement) },
+        0
+    );
+    let key = c_string("sparse_infill_density");
+    let value = c_string("35%");
+    assert_eq!(
+        unsafe { hfw_plate_object_set(plate, id, key.as_ptr(), value.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    let states = vec![1u8; unsafe { hfw_mesh_triangle_count(mesh) }];
+    assert_eq!(
+        unsafe {
+            hfw_plate_object_paint(plate, id, HFW_PAINT_SUPPORT, states.as_ptr(), states.len())
+        },
+        0
+    );
+
+    let mut ids = [0u64; 4];
+    assert_eq!(
+        unsafe { hfw_plate_object_ids(plate, ids.as_mut_ptr(), ids.len()) },
+        1
+    );
+    assert_eq!(ids[0], id);
+
+    let mut written = vec![0 as c_char; 64];
+    let needed = unsafe { hfw_plate_object_name_get(plate, id, written.as_mut_ptr(), 64) };
+    assert_eq!(needed, "painted bracket".len() as isize);
+    assert_eq!(
+        unsafe { CStr::from_ptr(written.as_ptr()) }.to_str(),
+        Ok("painted bracket")
+    );
+    let short = unsafe { hfw_plate_object_name_get(plate, id, written.as_mut_ptr(), 4) };
+    assert_eq!(
+        short, needed,
+        "a buffer that is too short reports the length it needs"
+    );
+
+    let mut read_placement = HfwTransform::default();
+    assert_eq!(
+        unsafe { hfw_plate_object_placement_get(plate, id, &mut read_placement) },
+        0
+    );
+    assert_eq!(read_placement.rotation_degrees, [0.0, 0.0, 30.0]);
+    assert_eq!(read_placement.translation_mm, [25.0, 35.0, 0.0]);
+
+    let mut enabled = 0;
+    assert_eq!(
+        unsafe { hfw_plate_object_enabled_get(plate, id, &mut enabled) },
+        0
+    );
+    assert_eq!(enabled, 1);
+
+    let settings = unsafe { hfw_plate_object_settings_json(plate, id) };
+    assert!(!settings.is_null(), "{}", last_error());
+    let settings = unsafe { CStr::from_ptr(settings) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(settings, r#"{"sparse_infill_density":"35%"}"#);
+
+    let geometry = unsafe { hfw_plate_object_mesh(plate, id) };
+    assert!(!geometry.is_null(), "{}", last_error());
+    let vertices = unsafe { hfw_mesh_vertex_count(geometry) };
+    let indices = unsafe { hfw_mesh_index_count(geometry) };
+    assert!(vertices > 0 && indices > 0);
+    let mut xyz = vec![f64::NAN; vertices * 3];
+    assert_eq!(
+        unsafe { hfw_mesh_vertices(geometry, xyz.as_mut_ptr(), vertices) },
+        0
+    );
+    assert!(xyz.iter().all(|value| value.is_finite()));
+    let mut triangles = vec![0u32; indices * 3];
+    assert_eq!(
+        unsafe { hfw_mesh_indices(geometry, triangles.as_mut_ptr(), indices) },
+        0
+    );
+    assert!(triangles.iter().all(|index| (*index as usize) < vertices));
+    assert_eq!(
+        unsafe { hfw_mesh_vertices(geometry, xyz.as_mut_ptr(), vertices - 1) },
+        -1,
+        "a short buffer is refused rather than half-written"
+    );
+    let mut states = vec![0u8; indices];
+    assert_eq!(
+        unsafe { hfw_mesh_paint_get(geometry, HFW_PAINT_SUPPORT, states.as_mut_ptr(), indices) },
+        indices as isize,
+        "the paint on the object comes back with its geometry"
+    );
+    assert!(states.iter().all(|state| *state == 1));
+
+    unsafe { hfw_mesh_free(geometry) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(mesh) };
+}
+
+/// A volume's kind, geometry and settings come back with the object they belong
+/// to, so a document's modifiers survive the trip.
+#[test]
+fn a_plate_reads_back_the_volumes_of_its_objects() {
+    let path = c_string(&fixture("cube.stl"));
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, mesh) };
+    assert_eq!(
+        unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_MODIFIER, mesh) },
+        0,
+        "{}",
+        last_error()
+    );
+    let key = c_string("sparse_infill_density");
+    let value = c_string("55%");
+    assert_eq!(
+        unsafe { hfw_plate_volume_set(plate, id, 0, key.as_ptr(), value.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+
+    let mut kind = -1;
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_kind(plate, id, 0, &mut kind) },
+        0
+    );
+    assert_eq!(kind, HFW_VOLUME_MODIFIER);
+    let settings = unsafe { hfw_plate_object_volume_settings_json(plate, id, 0) };
+    assert!(!settings.is_null(), "{}", last_error());
+    assert_eq!(
+        unsafe { CStr::from_ptr(settings) }.to_str(),
+        Ok(r#"{"sparse_infill_density":"55%"}"#)
+    );
+    let geometry = unsafe { hfw_plate_object_volume_mesh(plate, id, 0) };
+    assert!(!geometry.is_null(), "{}", last_error());
+    assert_eq!(unsafe { hfw_mesh_triangle_count(geometry) }, unsafe {
+        hfw_mesh_triangle_count(mesh)
+    });
+    assert!(unsafe { hfw_plate_object_volume_mesh(plate, id, 7) }.is_null());
+
+    unsafe { hfw_mesh_free(geometry) };
+    unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(mesh) };
 }

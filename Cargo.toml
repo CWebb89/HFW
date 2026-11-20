@@ -4,6 +4,8 @@ members = [
     "crates/geometry",
     "crates/kernel",
     "crates/mesh",
+    "crates/font",
+    "crates/text",
     "crates/slicing",
     "crates/walls",
     "crates/skeleton",

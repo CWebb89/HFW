@@ -86,6 +86,13 @@ hfw_mesh_from_bytes(bytes, len) -> *mut HfwMesh       // STL bytes
 hfw_mesh_transform(const *HfwMesh, HfwTransform) -> *mut HfwMesh   // new handle, source kept
 hfw_mesh_bounds(const *HfwMesh, *HfwBounds) -> i32
 hfw_mesh_triangle_count(const *HfwMesh) -> usize
+hfw_mesh_vertex_count(const *HfwMesh) -> usize          // reading geometry back out
+hfw_mesh_vertices(const *HfwMesh, double *out, count) -> i32
+hfw_mesh_index_count(const *HfwMesh) -> usize
+hfw_mesh_indices(const *HfwMesh, uint32_t *out, count) -> i32
+hfw_mesh_paint_set(*HfwMesh, channel, const u8 *states, len) -> i32
+hfw_mesh_paint_get(const *HfwMesh, channel, u8 *out, len) -> ptrdiff_t
+hfw_mesh_new(const double *vertices, count, const uint32_t *indices, count) -> *mut HfwMesh
 hfw_mesh_volume(const *HfwMesh) -> f64
 hfw_mesh_free(*HfwMesh)
 
@@ -104,6 +111,16 @@ hfw_plate_object_add_volume(*HfwPlate, id, kind, const *HfwMesh) -> i32
 hfw_plate_object_remove_volume(*HfwPlate, id, index) -> i32
 hfw_plate_object_volume_count(const *HfwPlate, id) -> ptrdiff_t
 hfw_plate_object_volume_kind(const *HfwPlate, id, index, *i32) -> i32
+
+// Reading the document back, so a plate can be rebuilt from one
+hfw_plate_object_ids(const *HfwPlate, u64 *out, len) -> usize      // count even for a NULL out
+hfw_plate_object_name_get(const *HfwPlate, id, char *out, len) -> ptrdiff_t
+hfw_plate_object_placement_get(const *HfwPlate, id, *HfwTransform) -> i32
+hfw_plate_object_enabled_get(const *HfwPlate, id, *i32) -> i32
+hfw_plate_object_mesh(const *HfwPlate, id) -> *mut HfwMesh          // copy, paint included
+hfw_plate_object_settings_json(const *HfwPlate, id) -> *mut c_char  // what `_set` accepts
+hfw_plate_object_volume_mesh(const *HfwPlate, id, index) -> *mut HfwMesh
+hfw_plate_object_volume_settings_json(const *HfwPlate, id, index) -> *mut c_char
 hfw_plate_set_in_layer(*HfwPlate, const f64 *zs, const usize *counts,
                        const f64 *widths, const f64 *heights, const f64 *speeds,
                        const usize *starts, const f64 *points,
@@ -170,6 +187,24 @@ extrude, retract — so E, position and the time estimate agree with the rest of
 file, under `;TYPE:Custom`, the label both reference slicers use. `prefixes` is G-code
 written immediately before a stroke, which is how a temperature band changes the nozzle
 temperature at the moment it starts drawing.
+
+### Reading a plate back (2026-11-20)
+
+A document the application holds has to survive being handed to the engine and
+returned, or the port can only go one way. Every part of a plate is therefore
+readable: the ids (in insertion order, `hfw_plate_object_ids` reporting the count
+even for a NULL buffer so one call sizes another), each object's name, placement,
+enabled flag, settings and geometry with **its paint attached**, and each volume's
+kind, geometry and settings. `hfw_plate_object_settings_json` returns exactly the
+key/value rows `hfw_plate_object_set` accepts, so a rebuilt plate takes the same
+settings it gave.
+
+`next-layer`'s `--plate-readback-test` is the measure: it builds a document with a
+modifier, a per-object layer height, an override, 360 painted facets, a marker and a
+stroke; reads all of it back through the ABI; builds a *second* plate from nothing but
+what was read; and requires the two project files to be identical byte for byte
+(13,650 bytes). A field the engine holds but cannot give up therefore fails a gate
+rather than going missing quietly.
 
 ## Carrying it, until the port lands
 

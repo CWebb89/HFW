@@ -156,8 +156,10 @@ version = "0.8.0"
 dependencies = [
  "hfw-config",
  "hfw-engine",
+ "hfw-font",
  "hfw-gcode",
  "hfw-plate",
+ "hfw-text",
 ]
 
 [[package]]
@@ -166,8 +168,10 @@ version = "0.8.0"
 dependencies = [
  "hfw-config",
  "hfw-engine",
+ "hfw-font",
  "hfw-gcode",
  "hfw-plate",
+ "hfw-text",
 ]
 
 [[package]]
@@ -188,6 +192,10 @@ dependencies = [
  "hfw-toolpath",
  "hfw-walls",
 ]
+
+[[package]]
+name = "hfw-font"
+version = "0.8.0"
 
 [[package]]
 name = "hfw-gcode"
@@ -264,6 +272,15 @@ dependencies = [
  "hfw-infill",
  "hfw-kernel",
  "hfw-walls",
+]
+
+[[package]]
+name = "hfw-text"
+version = "0.8.0"
+dependencies = [
+ "hfw-font",
+ "hfw-geometry",
+ "hfw-mesh",
 ]
 
 [[package]]

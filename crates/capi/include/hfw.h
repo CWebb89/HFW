@@ -53,12 +53,13 @@ uint32_t hfw_abi_version(void);
  * process; do not free it. Each setting carries its dialect name, the key this
  * engine uses, its location, type, default, unit and whether the value changes
  * the G-code (`applied`, `partial`, `missing` or `n/a`), so a settings panel can
- * hide or disable everything that is not `applied`. Its `capabilities` array lists
- * the features this engine declines — text, cut and hollow, STEP, SLA, MMU, a
- * nesting arranger — with `disposition`, `panel`, `note` and the setting to use
- * instead, so a panel shows those controls as unavailable and says why. Painting is
- * not on that list: it is an ABI of its own below, and the channels it carries are
- * read by the support generator and the seam placer.
+ * hide or disable everything that is not `applied`. Its `capabilities` array is the
+ * parity backlog — every feature libslic3r has and this engine does not yet — with
+ * `title`, `state` (`unbuilt`, `blocked` or `excluded`), `panel`, `note`, `cost` and,
+ * when blocked, `blocked_on`, so a panel shows those controls as unavailable and says
+ * what closing them takes. Painting is not on that list: it is an ABI of its own
+ * below, and the channels it carries are read by the support generator and the seam
+ * placer.
  */
 const char *hfw_settings_surface_json(void);
 
@@ -102,6 +103,23 @@ HfwMesh *hfw_mesh_new(const double *vertices, size_t vertex_count, const uint32_
 HfwMesh *hfw_mesh_transform(const HfwMesh *mesh, HfwTransform transform);
 
 /**
+ * Builds a mesh from a string of text, extruded from a font file.
+ *
+ * The mesh is a closed prism: the glyphs of `text` at `size_mm`, raised from `z_mm` to
+ * `z_mm + height_mm`, laid out left to right from the origin with the baseline at
+ * `y = 0`. Feed it to `hfw_plate_object_add_volume` as `HFW_VOLUME_PART` to print it
+ * raised, or as `HFW_VOLUME_NEGATIVE` to engrave it: the slice unions or subtracts the
+ * prism per layer, the same way it handles any other volume, so no boolean is involved.
+ *
+ * `face_index` selects a face inside a font collection; a plain `.ttf` or `.otf` has
+ * one face, at index 0. A CFF-flavoured OpenType file is refused by name. Returns NULL
+ * when the font cannot be read, when no glyph in `text` is drawn by it, or when the
+ * size, the height or the coordinates are out of range.
+ */
+HfwMesh *hfw_text_mesh(const char *font_path, uint32_t face_index, const char *text,
+                      double size_mm, double height_mm, double z_mm);
+
+/**
  * Writes the mesh's bounds in millimetres into `out`.
  *
  * Returns 0 on success and -1 when the mesh has no area or no height.
@@ -138,6 +156,19 @@ int32_t hfw_mesh_paint_set(HfwMesh *mesh, int32_t channel, const uint8_t *states
  */
 ptrdiff_t hfw_mesh_paint_get(const HfwMesh *mesh, int32_t channel, uint8_t *out,
                            size_t len);
+
+/**
+ * Vertex and index access.
+ *
+ * `hfw_mesh_vertices` writes `count` triples of millimetres and `hfw_mesh_indices`
+ * writes `count` triangles, both in the mesh's own order -- the order its paint is
+ * indexed by, so a reader that keeps these triangles keeps its paint aligned. A
+ * buffer shorter than the mesh is an error, never a partial write.
+ */
+size_t hfw_mesh_vertex_count(const HfwMesh *mesh);
+int32_t hfw_mesh_vertices(const HfwMesh *mesh, double *out, size_t count);
+size_t hfw_mesh_index_count(const HfwMesh *mesh);
+int32_t hfw_mesh_indices(const HfwMesh *mesh, uint32_t *out, size_t count);
 
 /** Returns the enclosed volume in cubic millimetres, or NaN for a NULL handle. */
 double hfw_mesh_volume(const HfwMesh *mesh);
@@ -430,8 +461,9 @@ int32_t hfw_plate_object_layer_heights(HfwPlate *plate, uint64_t id, const doubl
  * Reads object `id`'s own layer heights back as interleaved `(z, height)` pairs.
  *
  * Returns the number of pairs written, 0 when the object prints at the plate's
- * uniform height, and -1 when the object is not on the plate or `len` pairs do not
- * fit in `out`.
+ * uniform height, and -1 when the object is not on the plate. A NULL `out` or a
+ * `len` too small for the pairs reports the count the object has and writes nothing,
+ * so one call sizes the buffer another fills.
  */
 ptrdiff_t hfw_plate_object_layer_heights_get(const HfwPlate *plate, uint64_t id, double *out,
                                              size_t len);
@@ -497,6 +529,31 @@ void hfw_gcode_free(HfwGcode *gcode);
  */
 char *hfw_plate_preview_json(const HfwPlate *plate, const char *profile,
                              double first_layer_height, double layer_height);
+
+/**
+ * Reading a plate back.
+ *
+ * A document the application holds has to survive being handed to the engine and
+ * returned, so every part of it can be read: the ids, each object's name, placement,
+ * enabled flag, geometry (with its paint) and settings, and each volume's geometry
+ * and settings.
+ *
+ * `hfw_plate_object_ids` reports the count even for a NULL or short buffer, so one
+ * call sizes a buffer it can also fill. Geometry comes back as a copy the caller
+ * frees with `hfw_mesh_free`; a name that does not fit its buffer reports the length
+ * it needs and writes nothing.
+ */
+size_t hfw_plate_object_ids(const HfwPlate *plate, uint64_t *out, size_t len);
+ptrdiff_t hfw_plate_object_name_get(const HfwPlate *plate, uint64_t id, char *out,
+                                    size_t len);
+int32_t hfw_plate_object_placement_get(const HfwPlate *plate, uint64_t id,
+                                       HfwTransform *out);
+int32_t hfw_plate_object_enabled_get(const HfwPlate *plate, uint64_t id, int32_t *out);
+HfwMesh *hfw_plate_object_mesh(const HfwPlate *plate, uint64_t id);
+char *hfw_plate_object_settings_json(const HfwPlate *plate, uint64_t id);
+HfwMesh *hfw_plate_object_volume_mesh(const HfwPlate *plate, uint64_t id, size_t index);
+char *hfw_plate_object_volume_settings_json(const HfwPlate *plate, uint64_t id,
+                                            size_t index);
 
 /** Releases a string this library returned. A NULL pointer is ignored. */
 void hfw_string_free(char *text);

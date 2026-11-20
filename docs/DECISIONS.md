@@ -260,14 +260,70 @@ emitted from the same rows if a compile-time check per key is ever wanted.
 
 ---
 
-## DECISION-16: six features are declined in writing, from one table
+## DECISION-17: text is a prism, not a boolean
+
+**Options**: (a) no text in the engine, as today; (b) read a font, then union its
+glyphs into the mesh with a triangle-level CSG kernel; (c) read a font, extrude each
+string into a closed prism, place it as a volume, and let the slice's own region union
+and subtraction decide what the layers look like.
+
+**Choice**: (c), `crates/font` + `crates/text` + `hfw-cli --text`.
+
+**Reason**: the engine already unions and subtracts regions per layer with exact
+integer predicates — that is what a modifier or negative volume is. A letter only
+looks expensive because it arrives as curves; once it is triangles it is an ordinary
+object, and CSG on triangle soup would add a kernel, its rounding failure modes and its
+non-determinism to buy nothing the per-layer region already gives. Measured: `hfw-cli
+--text HFW` slices to four layers at 0.2 mm, writes G-code the independent verifier
+passes, and the font reader agrees with FreeType to 0.00218 mm of ink at 10 mm.
+
+**Tradeoff**: embossed text has to be placed as a volume that overlaps the object, so
+it cannot modify another object's own mesh (there is nothing to export as a merged STL),
+and engraved text has to be a negative volume. Both are the plate's job already — the
+application asks for a prism with `hfw_text_mesh` and attaches it with
+`hfw_plate_object_add_volume`, so it never parses a font and never runs a boolean.
+
+**How to reverse**: if the application ever needs a single merged mesh with the text in
+it, the prism's triangles are the input a boolean would take; adding `--cut`-style
+subtraction inside `crates/text` would be that change, and it would earn its own
+decision and its own deviations in `docs/TEXT.md`.
+
+## DECISION-16: engine parity is the goal, so every gap is a backlog row
+
+**Supersedes the original DECISION-16 below**, which listed the gaps as declined. The
+owner's rule is the opposite: **everything libslic3r has, this engine has in Rust** —
+the tool changer and MMU wait on hardware that does not exist here, and SLA/MSLA is a
+different process, ruled out on purpose. Painting already moved off the list by being
+implemented (support and seam channels, `enforcers_only`).
+
+**Options**: (a) no list at all, so gaps are discovered by users; (b) a per-feature
+prose note; (c) one table of every capability libslic3r has and this engine does not,
+carrying `state` (`unbuilt`, `blocked`, `excluded`), what closing it costs and what it
+waits on, generating both `docs/PARITY-BACKLOG.md` and the `capabilities` rows the
+application's panel disables.
+
+**Choice**: (c), `BACKLOG` in `tools/gen-settings-ledger.py`.
+
+**Reason**: parity is a measurable target, so the gap has to be enumerated rather than
+remembered. The settings half is already measured — 300 of 364 applied — and the
+backlog adds the part a setting cannot express: text, cut and hollow, nesting, AMF,
+internal bridges, a tiled field, modifier volumes, vendor placeholders, slicing modes,
+and a gated corpus driven through libslic3r's own API. `blocked` is not `declined`: a
+blocked row states what it waits on and is deleted when the work starts.
+
+**How to reverse**: a row comes off the backlog by being built, in the commit that
+builds it, with the test that proves it. Removing a row without the feature is the
+failure this decision exists to prevent, which is why the panel reads the same rows and
+the gate checks them from outside Rust.
+
+## DECISION-16 (original, superseded 2026-11-20): six features recorded as declined, from one table
 
 **Options**: (a) leave them unmentioned and let the absence speak; (b) build them;
 (c) name them as out of scope in one table that generates both the document and the
 rows the application's panel renders as unavailable.
 
 **Choice**: (c) — `CAPABILITIES` in `tools/gen-settings-ledger.py`, which writes
-`docs/SCOPE.md` and the surface's `capabilities` array in the same run.
+`docs/PARITY-BACKLOG.md` and the surface's `capabilities` array in the same run.
 
 **Reason**: (a) is how a rewrite quietly becomes a decade — every one of them is a
 project, and an unmentioned gap is discovered by a user who assumes it exists. (b) is
@@ -286,9 +342,9 @@ never a return to `upstream/`. Removing its row demotes the panel control to ava
 only once the feature slices and verifies. Paint is the first to go through that door:
 support paint is a per-triangle channel in `crates/mesh`, consumed inside
 `supports::seed_masks` and carried in the project file, so its row is gone from
-`docs/SCOPE.md` while seam and tool paint remain unbuilt (`docs/PAINT.md`). If text
+`docs/PARITY-BACKLOG.md` while seam and tool paint remain unbuilt (`docs/PAINT.md`). If text
 turns out to matter — it is the other one users notice — it is a new crate with its
-own provenance row, and `docs/SCOPE.md` loses a line.
+own provenance row, and `docs/PARITY-BACKLOG.md` loses a line.
 
 ## DECISION-15: a project file is a 3MF with our own side part, and settings are written by inverting the parser
 

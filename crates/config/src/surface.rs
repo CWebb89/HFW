@@ -18,9 +18,10 @@
 /// dialect name), `hfw` (the key this engine uses when it differs), `tier`,
 /// `status`, `type`, `default`, `unit`, `location`, `category`, `source` and
 /// `per_object`: whether a panel may set it on one object as well as on the
-/// job. Each capability is a feature this engine will not build, carrying `id`,
-/// `title`, `disposition`, `panel`, `note` and `instead`, so a panel can show the
-/// control as unavailable and say what to use.
+/// job. Each capability is a feature libslic3r has and this engine does not yet,
+/// carrying `id`, `title`, `state` (`unbuilt`, `blocked` or `excluded`), `panel`,
+/// `note`, `cost` and, when blocked, `blocked_on`, so a panel can show the control as
+/// unavailable and say what closing it takes.
 pub fn json() -> &'static str {
     include_str!("../assets/settings-surface.json")
 }
@@ -29,7 +30,7 @@ pub fn json() -> &'static str {
 ///
 /// It changes when a field is removed or renamed, so a panel built against an
 /// older document refuses rather than guessing at what a field means.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 #[cfg(test)]
 mod tests {
@@ -88,24 +89,36 @@ mod tests {
     }
 
     #[test]
-    fn every_capability_is_a_feature_this_engine_declines_and_says_what_to_use() {
+    fn every_capability_names_its_state_and_what_closing_it_costs() {
         let text = json();
         assert!(
             text.contains("\"capabilities\":"),
             "the surface has no capabilities"
         );
-        let listed = text.matches("\"disposition\": \"out_of_scope\"").count();
-        assert_eq!(listed, 6, "{listed} out-of-scope capabilities");
-        assert_eq!(text.matches("\"panel\": \"unavailable\"").count(), listed);
+        let listed = text.matches("\"cost\":").count();
+        assert!(listed >= 10, "only {listed} capabilities in the backlog");
+        let states = text.matches("\"state\": \"unbuilt\"").count()
+            + text.matches("\"state\": \"blocked\"").count()
+            + text.matches("\"state\": \"excluded\"").count();
+        assert_eq!(
+            states, listed,
+            "{listed} capabilities, {states} with a state"
+        );
         assert_eq!(text.matches("\"title\":").count(), listed);
-        assert_eq!(text.matches("\"instead\":").count(), listed);
-        let mut ids = Vec::new();
-        for row in text.split("\"id\":") {
-            let id = row.trim_start().split('"').nth(1).unwrap_or_default();
-            if !id.is_empty() && !id.contains(':') && row.contains("out_of_scope") {
-                ids.push(id.to_owned());
-            }
-        }
+        assert_eq!(text.matches("\"note\":").count(), listed);
+        let mut ids: Vec<String> = text
+            .split("\"id\":")
+            .skip(1)
+            .map(|row| {
+                row.trim_start()
+                    .split('"')
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .filter(|id| !id.is_empty())
+            .collect();
+        assert_eq!(ids.len(), listed, "a capability has no id");
         ids.sort();
         let before = ids.len();
         ids.dedup();

@@ -11,7 +11,8 @@ nothing in this repository is "done" because it compiles here.
 
 ## Layout
 
-- `crates/` — the engine. `mesh` (parse, weld, repair), `geometry` (integer
+- `crates/` — the engine. `mesh` (parse, weld, repair), `font` (TrueType
+  outlines), `text` (outlines as extrude-ready prisms), `geometry` (integer
   nanometre points, exact predicates), `kernel` (float regions, indices, offsets),
   `slicing`, `walls`, `infill`, `supports`, `toolpath`, `gcode` (writer and
   independent verifier), `engine` (the pipeline), `cli` (`hfw-cli`), `skeleton`
@@ -41,7 +42,7 @@ nothing in this repository is "done" because it compiles here.
   `docs/PROVENANCE.md`. A new crate or a new algorithm gets a row there in the
   same commit.
 - **Generated documents are generated.** `docs/SETTINGS-LEDGER.md`,
-  `docs/SETTINGS-GAPS.md`, `docs/SCOPE.md` and
+  `docs/SETTINGS-GAPS.md`, `docs/PARITY-BACKLOG.md` and
   `crates/config/assets/settings-surface.json` come from `tools/gen-settings-*.py`.
   Edit the tool and re-run it; never hand-edit the output.
 - **Fixtures are inputs to recorded numbers.** Changing one invalidates every

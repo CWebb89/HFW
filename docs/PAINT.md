@@ -100,9 +100,10 @@ int32_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
    slicing a cube twice: unpainted, the seam starts on one corner, painted, on the
    painted face. A loop whose every vertex is blocked keeps the profile's seam — a
    seam has to start somewhere — and that is the one place paint yields.
-3. **Tool paint.** Needed for a tool changer, and blocked on multi-material being
-   out of scope today (`docs/SCOPE.md`). Nothing carries it yet, because a channel
-   nothing consumes is a field a panel could write and no stage would read.
+3. **Tool paint.** Needed for a tool changer, and blocked with multi-material in
+   `docs/PARITY-BACKLOG.md` — it waits on hardware, not on a decision. Nothing carries
+   it yet, because a channel nothing consumes is a field a panel could write and no
+   stage would read.
 
 ## Volumes are the same mechanism where they overlap
 

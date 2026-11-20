@@ -57,58 +57,158 @@ EMIT_PREFIXES = ("start_gcode", "end_gcode", "before_layer_gcode", "layer_gcode"
 # would otherwise hide a setting the engine actually applies.
 ENGINE_ONLY = {"gantry_height"}
 
-# Features the reference slicers carry that this engine will not build. Each row is
-# a promise to the application's panel as much as a note to a reader: the panel shows
-# the control as unavailable, and this table is where "unavailable" comes from.
-CAPABILITIES = (
+# Every capability libslic3r has that this engine does not, with what closing it
+# costs and what it is waiting on. `state` is `unbuilt` for work that is planned,
+# `blocked` for work that cannot start, and `excluded` for the one process the owner
+# has ruled out. Each row also reaches the application's panel, which shows the
+# control as unavailable until the row is deleted.
+#
+# The owner's rule, quoted: everything libslic3r has, in Rust, except the tool
+# changer and MMU (no hardware) and SLA/MSLA (a different process).
+BACKLOG = (
     {
         "id": "text",
         "title": "Text embossing and font loading",
+        "state": "unbuilt",
         "panel": "unavailable",
-        "note": "A mesh with the text already in it is an ordinary object; the engine "
-                "reads no fonts and places no glyphs.",
-        "instead": "any STL, 3MF or OBJ that carries the embossing",
+        "cost": "part built: `crates/font` reads TrueType outlines and measured against "
+                "FreeType, `crates/text` extrudes them into a closed prism, `hfw-cli "
+                "--text` slices one, and `hfw_text_mesh` hands the same prism to the "
+                "application as a mesh handle to add as a part or a negative volume. "
+                "Left: kerning and shaping (advances are plain `hmtx` widths), placing "
+                "text on an object's surface, and CFF-flavoured fonts",
+        "note": "`docs/TEXT.md` is the design note and the measured state.",
     },
     {
         "id": "cut_hollow",
-        "title": "Cut and hollow",
+        "title": "Cut, hollow and split",
+        "state": "unbuilt",
         "panel": "unavailable",
-        "note": "The engine slices a closed mesh; it never subtracts, splits or shells "
-                "one. A cut or hollowed body has to arrive that way.",
-        "instead": "a mesh prepared in CAD",
-    },
-    {
-        "id": "step_import",
-        "title": "STEP and IGES import",
-        "panel": "unavailable",
-        "note": "B-rep to triangle needs an OCCT-class kernel, which is a dependency "
-                "this project will not take. Nothing here reads a parametric solid.",
-        "instead": "STL, 3MF or OBJ",
-    },
-    {
-        "id": "sla",
-        "title": "Resin (SLA/DLP) slicing",
-        "panel": "unavailable",
-        "note": "The pipeline is filament: extrusion per bead, retraction, a layer "
-                "cooling rule. Resin wants exposure per layer and no extrusion.",
-        "instead": "",
-    },
-    {
-        "id": "mmu",
-        "title": "Multi-material colour mixing (MMU, AMS)",
-        "panel": "unavailable",
-        "note": "A tool changer is in scope and a colour mixer is not: beads are "
-                "assigned to tools, never blended within one layer.",
-        "instead": "Tool settings and toolchange_gcode",
+        "cost": "a plane-mesh split that caps both halves, and hollowing as an inward "
+                "shell with a wall thickness and drain holes",
+        "note": "A cut or hollowed body has to arrive that way today.",
     },
     {
         "id": "nesting",
         "title": "Nesting arranger",
+        "state": "unbuilt",
         "panel": "unavailable",
-        "note": "The arranger is a shelf packer: it fills rows, it does not interlock "
-                "irregular outlines. It falls back to turning a part a quarter turn.",
-        "instead": "hfw_plate_arrange",
+        "cost": "interlocking 2D packing with rotations and a search; the shelf packer "
+                "here fills rows and turns a part a quarter turn, so a bed whose parts "
+                "only fit interlocked is refused",
+        "note": "`hfw_plate_arrange` is the shelf packer, and it stays as the fast path.",
     },
+    {
+        "id": "amf_import",
+        "title": "AMF reading",
+        "state": "unbuilt",
+        "panel": "unavailable",
+        "cost": "an XML model with vertices, triangles and materials — small next to "
+                "the 3MF reader already here",
+        "note": "STL, 3MF and OBJ are read; AMF is not.",
+    },
+    {
+        "id": "internal_bridges",
+        "title": "Internal bridges",
+        "state": "unbuilt",
+        "panel": "unavailable",
+        "cost": "detect a bridge whose support is infill rather than air, and give it "
+                "the bridging flow and direction; the external bridge path exists",
+        "note": "OrcaSlicer's `internal_bridge_*` settings assume it.",
+    },
+    {
+        "id": "tiled_distance_field",
+        "title": "Tiled distance field",
+        "state": "unbuilt",
+        "panel": "unavailable",
+        "cost": "tile the per-layer mask so a 200 mm plate at 0.05 mm stops being "
+                "refused for memory (~450 MB today)",
+        "note": "A large thin plate at a fine layer height is refused rather than "
+                "slowed.",
+    },
+    {
+        "id": "machine_placeholders",
+        "title": "Vendor G-code placeholders",
+        "state": "unbuilt",
+        "panel": "available",
+        "cost": "substitute the dialect's whole placeholder set "
+                "(`[bed_temperature_initial_layer_single]`, "
+                "`{during_print_exhaust_fan_speed_num[current_extruder]}` and the rest) "
+                "in start and end G-code",
+        "note": "A real vendor machine preset leaves them literal today and the "
+                "verifier rejects the file.",
+    },
+    {
+        "id": "slicing_modes",
+        "title": "Slicing mode and hole closing",
+        "state": "unbuilt",
+        "panel": "unavailable",
+        "cost": "an even-odd and a close-holes contour policy beside the regular one",
+        "note": "`slicing_mode` is the one unapplied setting in this group.",
+    },
+    {
+        "id": "step_import",
+        "title": "STEP and IGES import",
+        "state": "blocked",
+        "panel": "unavailable",
+        "cost": "B-rep tessellation needs an OCCT-class kernel, which is the one "
+                "dependency this project has refused so far",
+        "blocked_on": "the dependency decision: a C++ CAD kernel in the build",
+        "note": "Nothing here reads a parametric solid.",
+    },
+    {
+        "id": "differential_slice",
+        "title": "A gated corpus against libslic3r",
+        "state": "unbuilt",
+        "panel": "available",
+        "cost": "drive libslic3r through its own API on a fixed corpus and diff the "
+                "toolpaths, rather than comparing exported G-code on six fixtures",
+        "note": "`scripts/oracle.py` is the fixture-level version of this.",
+    },
+    {
+        "id": "tool_paint",
+        "title": "Tool paint: a facet's extruder",
+        "state": "blocked",
+        "panel": "unavailable",
+        "cost": "a third paint channel, consumed by stack assignment",
+        "blocked_on": "the tool changer",
+        "note": "`Paint` carries support and seam only: a channel nothing reads is a "
+                "control that does nothing.",
+    },
+    {
+        "id": "mmu",
+        "title": "Multi-material: MMU, AMS, wipe tower",
+        "state": "blocked",
+        "panel": "unavailable",
+        "cost": "per-facet tool assignment, strand ordering, purge and a wipe tower, "
+                "and the 56 settings in `docs/SETTINGS-GAPS.md`'s multi-material bucket",
+        "blocked_on": "the owner has no tool changer or MMU yet",
+        "note": "Deferred by request, not declined.",
+    },
+    {
+        "id": "sla",
+        "title": "Resin (SLA/MSLA) slicing",
+        "state": "excluded",
+        "panel": "unavailable",
+        "cost": "a second pipeline: exposure masks per layer, resin supports, and a "
+                "writer that commands light instead of extrusion",
+        "blocked_on": "the owner has ruled it out — a different process, not a gap",
+        "note": "Ruled out by the owner: the pipeline here is filament.",
+    },
+)
+
+# Settings that belong to the multi-material work, which is blocked rather than
+# planned. Membership is a name rule so the backlog can separate "waiting on the tool
+# changer" from "to be built" without a second taxonomy.
+TOOLCHANGE_MARKERS = (
+    "mmu", "wipe_tower", "extruder", "single_extruder", "toolchange", "multitool",
+    "filament_loading", "filament_unloading", "filament_stamping", "filament_ramming",
+    "filament_cooling", "filament_change_time", "filament_purge", "filament_flush",
+    "multimaterial_purging", "purge", "wiping_volumes", "wipe_into",
+    "standby_temperature", "ooze_prevention", "parking_pos", "extra_loading_move",
+    "interlocking",
+    "high_current_on_filament_swap", "cooling_tube",
+    "enable_pressure_advance_during_ramming",
 )
 
 EMIT_NAMES = {
@@ -825,7 +925,7 @@ def surface_document(rows, applicable, applied, partial, missing, alias_index) -
 
     return {
         "surface": "hfw-settings",
-        "version": 2,
+        "version": 3,
         "generated_by": "tools/gen-settings-ledger.py",
         "counts": {
             "settings": len(rows),
@@ -836,7 +936,7 @@ def surface_document(rows, applicable, applied, partial, missing, alias_index) -
             "not_applicable": len(rows) - len(applicable),
         },
         "statuses": ["applied", "partial", "missing", "n/a"],
-        "capabilities": [dict(entry, disposition="out_of_scope") for entry in CAPABILITIES],
+        "capabilities": [dict(entry) for entry in BACKLOG],
         "locations": locations,
         "settings": [
             {
@@ -857,38 +957,79 @@ def surface_document(rows, applicable, applied, partial, missing, alias_index) -
     }
 
 
-def scope_document() -> str:
-    """The out-of-scope list, in prose, from the same table the panel reads."""
+def backlog_document(rows) -> str:
+    """The parity backlog: what libslic3r has, this engine does not, and at what cost."""
+    states = [("unbuilt", "To be built"), ("blocked", "Blocked"), ("excluded", "Excluded")]
     out = [
-        "# Out of scope",
+        "# Parity backlog",
         "",
         "Generated by `tools/gen-settings-ledger.py` from the table the settings",
         "surface carries as `capabilities`. Do not edit by hand.",
         "",
-        f"{len(CAPABILITIES)} features the reference slicers ship and this engine will "
-        "not build.",
-        "Each one is a project in its own right, not a setting; the cost of saying so",
-        "is a control the panel shows as unavailable, and the cost of not saying so is",
-        "a decade of work that ends in a worse copy of PrusaSlicer.",
+        "The rule this list exists to serve: **everything libslic3r has, this engine",
+        "has in Rust**, except the tool changer and MMU (no hardware yet) and SLA/MSLA",
+        "(a different process). Nothing here is a decision to stay behind — every row",
+        "either names the work that closes it or the thing it is waiting on.",
         "",
-        "| feature | what the engine does instead |",
-        "| --- | --- |",
+        "A capability is not a setting. The settings side of the same gap is measured",
+        "below, from the same run that writes `SETTINGS-LEDGER.md`; the capability list",
+        "is the work a setting cannot express.",
+        "",
     ]
-    for entry in CAPABILITIES:
-        instead = entry["instead"] or "nothing — it is not a filament process"
-        out.append(f"| **{entry['title']}**<br>{entry['note']} | {instead} |")
+    for state, heading in states:
+        entries = [entry for entry in BACKLOG if entry["state"] == state]
+        if not entries:
+            continue
+        out += [f"## {heading}", ""]
+        if state == "unbuilt":
+            out += ["| capability | what closing it costs |", "| --- | --- |"]
+            for entry in entries:
+                out.append(f"| **{entry['title']}**<br>{entry['note']} | {entry['cost']} |")
+        else:
+            out += ["| capability | waiting on | what it costs |", "| --- | --- | --- |"]
+            for entry in entries:
+                waiting = entry.get("blocked_on", "—")
+                out.append(f"| **{entry['title']}**<br>{entry['note']} | {waiting} | {entry['cost']} |")
+        out.append("")
+
+    applicable = [
+        row for row in rows if row["status"] != "n/a" and row.get("tier") != "n/a"
+    ]
+    unapplied = [row for row in rows if row["status"] in ("missing", "partial")]
+    not_scored = [row for row in unapplied if row not in applicable]
+
+    def toolchange(row) -> bool:
+        return any(marker in row["name"].lower() for marker in TOOLCHANGE_MARKERS)
+
+    waiting = [row for row in unapplied if toolchange(row)]
+    planned = [row for row in unapplied if not toolchange(row)]
+    out += [
+        "## Settings: libslic3r has them, this engine does not",
+        "",
+        f"{len(rows)} settings are defined by the reference dialect; {len(unapplied)} of",
+        "them are not applied here.",
+        "",
+        f"The ledger declines to score {len(rows) - len(applicable)} rows as n/a — resin, milling, colour mixing",
+        f"and printer identity — so its own unapplied total is {len(unapplied) - len(not_scored)} rather than {len(unapplied)}.",
+        "",
+        f"{len(waiting)} of the unapplied settings need hardware this machine does not have: a second",
+        "extruder, or the filament loading path a single-extruder run never uses. The rest, by name:",
+        "",
+        "| setting | state | this engine's key |",
+        "| --- | --- | --- |",
+    ]
+    for row in sorted(planned, key=lambda item: item["name"]):
+        key = row["note"] or "—"
+        out.append(f"| `{row['name']}` | {row['status']} | {key} |")
     out += [
         "",
-        "The application reads the same rows from `hfw_settings_surface_json`: every",
-        "entry has `id`, `title`, `disposition` (`out_of_scope`), `panel`",
-        "(`unavailable`), `note` and `instead`. A panel that renders an unavailable",
-        "control from that list cannot drift from this document, and adding a feature",
-        "here means changing one table.",
+        "Waiting on hardware — a second extruder, or a filament loading path the"
+        " single-extruder pipeline never runs: "
+        + ", ".join(f"`{row['name']}`" for row in sorted(waiting, key=lambda item: item["name"]))
+        + ".",
         "",
-        "What is *not* on this list matters as much: every setting the engine parses",
-        "and reads is in `SETTINGS-LEDGER.md` with the command that measured it, and",
-        "every setting it does not apply is `missing` or `partial` there rather than",
-        "silently ignored.",
+        "`docs/SETTINGS-GAPS.md` buckets the same rows by what closing them costs; this",
+        "list is by name so nothing hides inside a total.",
         "",
     ]
     return "\n".join(out)
@@ -1132,11 +1273,11 @@ def main() -> int:
     target = HFW / "docs/SETTINGS-LEDGER.md"
     text = "\n".join(out) + "\n"
     surface_text = json.dumps(surface, indent=1, sort_keys=False) + "\n"
-    scope = HFW / "docs/SCOPE.md"
-    scope_text = scope_document()
+    backlog = HFW / "docs/PARITY-BACKLOG.md"
+    backlog_text = backlog_document(rows)
     if "--check" in sys.argv[1:]:
         stale = []
-        for path, expected in ((target, text), (SURFACE, surface_text), (scope, scope_text)):
+        for path, expected in ((target, text), (SURFACE, surface_text), (backlog, backlog_text)):
             current = path.read_text(encoding="utf-8") if path.exists() else ""
             if current != expected:
                 stale.append(path)
@@ -1149,10 +1290,10 @@ def main() -> int:
     target.write_text(text, encoding="utf-8")
     SURFACE.parent.mkdir(parents=True, exist_ok=True)
     SURFACE.write_text(surface_text, encoding="utf-8")
-    scope.write_text(scope_text, encoding="utf-8")
+    backlog.write_text(backlog_text, encoding="utf-8")
     print(f"wrote {target}")
     print(f"wrote {SURFACE}")
-    print(f"wrote {scope}")
+    print(f"wrote {backlog}")
     print(f"engine settings: {len(rows)}  applicable: {len(applicable)}  "
           f"applied: {len(applied)}  partial: {len(partial)}  missing: {len(missing)}  "
           f"n/a: {len(rows) - len(applicable)}")

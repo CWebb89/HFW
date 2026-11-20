@@ -36,7 +36,7 @@ own history. "Green" means the check below runs and passes today.
 | # | Item | Blocks the swap because | State |
 |---|------|------------------------|-------|
 | 1 | Settings intake: PrusaSlicer-format profile inheritance, or a translation layer with measured coverage | Users' existing machines and presets must work | **green for intake, one blocker left.** `--bundle` indexes a vendor profile tree or a sectioned vendor file, resolves `inherits` across it, picks one machine, one process and one filament (preferring the machine's own vendor), and reports every key as applied/partial/unknown. Orca's whole shipped library — 1463 machines, 3277 processes, 6650 filaments — indexes in under a second. **Blocker: `machine_start_gcode` placeholders.** A real machine preset is templated with `[bed_temperature_initial_layer_single]`, `{during_print_exhaust_fan_speed_num[current_extruder]}` and the like; this engine substitutes a small set of its own and leaves the rest literal, so the verifier rejects the file. Intake now names those placeholders up front instead of after the G-code is written.
-| 2 | Per-object and per-region overrides | next-layer exposes 136 of them per object | **partial.** Five keys per object (density, pattern, walls, width, support) and four volume kinds as geometry — part, negative, support blocker, support enforcer. Per-object layer heights landed 2026-11-20. The one gap left is a **modifier** volume: settings scoped to a region, which means splitting a layer into regions and planning each with its own walls and infill, not a geometry operation |
+| 2 | Per-object and per-region overrides | next-layer exposes 136 of them per object | **green for the document, partial for the key list.** 52 keys per object, five volume kinds — part, negative, support blocker, support enforcer, and **modifier**, which carries its own settings and survives a project round trip (three plate tests). Per-object layer heights landed 2026-11-20. What is short is the number of keys a region can carry: `hfw_plate_volume_set` refuses any key the object override list does not already publish |
 | 3 | Arrange: centring, `--arrange`, build-volume collision | Plates and multi-object jobs are core UI | **green.** A MaxRects packer places every unpositioned object in the gap it wastes least, turns one a quarter turn when that is what makes it fit, centres the arrangement on the bed, and refuses a plate that cannot fit before slicing rather than after planning it. A plate a file already positioned keeps its own layout, and the remaining objects are laid out beside it |
 | 4 | Acceleration, junction deviation, honest time estimate | A kinematic estimate is optimistic by 2–3× on short moves | **green.** Burst-free trapezoidal planner with one junction of lookahead: per-move acceleration, junction deviation (Marlin's `M205 J`, or Klipper's `square_corner_velocity` converted the way `klippy/toolhead.py` converts it), and a classic-jerk model for a Marlin profile that sets no deviation. On the two prints whose real duration is recorded, the planned estimate lands within 4% (cube 16.2 min against 16 printed, sphere 21.8 against 21) where the kinematic sum was 5–6% low. A profile that states no acceleration still gets the kinematic number, and the file's header says which one it got |
 | 5 | 3MF/AMF import with plates and instances | Most downloaded models are 3MF | **green for 3MF.** ZIP, unit, components, per-item transforms and a project's own settings file. No AMF |
@@ -109,12 +109,12 @@ regions, each with its own walls, infill and skin, merged back into one layer. T
 is a change to the planner, not to the document.
 
 **What is needed.** Overrides keyed by object instance (done), plus region modifiers
-and height ranges. A "region" is an extra volume with its own settings.
-
-**Height ranges landed 2026-11-20.** `hfw_plate_object_layer_heights` gives one object
-its own `(z, height)` pairs while the rest of the plate keeps the uniform height, and
-`by layer` merges the stacks on Z rather than on layer number. The modifier volume
-remains the one gap in this row.
+and height ranges — both are in as of 2026-11-20: `hfw_plate_object_layer_heights`
+gives one object its own `(z, height)` pairs while the rest of the plate keeps the
+uniform height, `by layer` merges the stacks on Z rather than on layer number, and a
+modifier volume is a fifth `VolumeKind` whose settings are applied on top of the
+object's own for the region it covers. What is left in this row is breadth, not a
+mechanism: 52 keys reach an object and the same list reaches a modifier.
 
 **Check.** The same two assertions next-layer already measures against
 libslic3r: a 0.30 mm per-object layer height must reduce the layer count from
@@ -229,21 +229,24 @@ per feature class, layer count, per-layer path length, and total time estimate.
 Divergences beyond tolerance are listed with a cause, exactly as `docs/ORACLE.md`
 does for the two reference slicers.
 
-## Out of scope
+## The parity backlog
 
-Six features the reference slicers ship and this engine will not build: text
-embossing, cut and hollow, STEP import, SLA, MMU colour mixing, and a nesting
-arranger. Support and seam painting used to be on that list and are now built — see
-item 11 and `docs/PAINT.md`. The list, what each would cost, and the setting that stands in for it is
-`docs/SCOPE.md`, generated from the same table that gives the application's panel its
-`capabilities` rows — so a control marked unavailable in the UI and a paragraph in
-this repository cannot disagree. The disposition is a product decision with stated
-reversal conditions, not an oversight: DECISION-16.
+The target is that everything libslic3r has, this engine has in Rust. The gap is
+enumerated in `docs/PARITY-BACKLOG.md`, generated from the same table that gives the
+application's panel its `capabilities` rows, so a control the UI disables and a row
+here cannot disagree. Painting is off that list already: support and seam channels are
+built (item 11, `docs/PAINT.md`), and `support = enforcers_only` works.
 
-The complement is what matters for parity. Nothing on that list has a setting the
-engine parses and ignores: MMU's keys are `n/a` or `missing` in
-`SETTINGS-LEDGER.md`, and every key the ledger calls `applied` is read by the
-pipeline somewhere outside `crates/config`.
+What is left: text embossing, cut/hollow/split, a nesting arranger, AMF reading,
+internal bridges, a tiled distance field, modifier volumes with their own settings,
+vendor G-code placeholders, slicing modes with hole closing, and a gated corpus driven
+through libslic3r's own API. STEP import is blocked on the dependency decision (an
+OCCT-class kernel); tool paint and MMU wait on the tool changer; SLA is ruled out as a
+different process. See DECISION-16.
+
+The complement is what makes the backlog honest rather than decorative: no row is a
+setting the engine parses and ignores — MMU's keys are `missing` or `n/a` in
+`SETTINGS-LEDGER.md`, and asking for one is refused by name.
 
 ## How the swap happens
 

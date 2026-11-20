@@ -280,10 +280,12 @@ phase 0 (landed) ─┬─ phase 1 C ABI ─┬─ phase 2 document model ─┬
    grew the write side; `crates/plate/src/project.rs` owns the project part) so read
    and write cannot drift. Landed: a saved plate reopens and slices to the same
    bytes.
-7. **Optional features** — text, cut/hollow, STEP, SLA, MMU and a nesting arranger
-   are declined in writing rather than left undone: `docs/SCOPE.md`, and the surface's
-   `capabilities` rows the panel renders as unavailable. Support paint was on that list
-   and is now built (`docs/PAINT.md`), with seam and tool paint staged behind it.
+7. **Parity backlog** — every capability libslic3r has and this engine does not is one
+   row with a cost and a state, in `docs/PARITY-BACKLOG.md` and in the surface's
+   `capabilities` rows the panel renders as unavailable. Blocked is not declined: MMU
+   and tool paint wait on the tool changer, STEP on the dependency decision, SLA is
+   ruled out as a different process (DECISION-16). Support and seam paint already left
+   the list by being built (`docs/PAINT.md`).
 
 ### What must be ported over before `upstream/` can go
 

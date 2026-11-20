@@ -262,6 +262,17 @@ struct Options {
     json_paths: bool,
     /// Where the intake report goes as JSON, one entry per key the preset stated.
     intake_json: Option<PathBuf>,
+    /// A string embossed as its own object, with the font that draws it.
+    text: Option<TextSpec>,
+}
+
+/// A string to emboss: the font, the size, and how thick a prism to extrude it into.
+#[derive(Clone, Debug)]
+struct TextSpec {
+    text: String,
+    font: PathBuf,
+    size_mm: f64,
+    height_mm: f64,
 }
 
 impl Options {
@@ -321,6 +332,7 @@ impl Options {
             json: false,
             json_paths: false,
             intake_json: None,
+            text: None,
         }
     }
 
@@ -793,6 +805,52 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                     "--gantry-height",
                 )?)
             }
+            "--text" => {
+                let value = next_value(&mut arguments, "--text")?;
+                o.text
+                    .get_or_insert(TextSpec {
+                        text: String::new(),
+                        font: PathBuf::new(),
+                        size_mm: 10.0,
+                        height_mm: 0.6,
+                    })
+                    .text = value;
+            }
+            "--text-font" => {
+                let path = PathBuf::from(next_value(&mut arguments, "--text-font")?);
+                let spec = o.text.get_or_insert_with(|| TextSpec {
+                    text: String::new(),
+                    font: PathBuf::new(),
+                    size_mm: 10.0,
+                    height_mm: 0.6,
+                });
+                spec.font = path;
+            }
+            "--text-size" => {
+                let size = positive(&next_value(&mut arguments, "--text-size")?, "--text-size")?;
+                o.text
+                    .get_or_insert(TextSpec {
+                        text: String::new(),
+                        font: PathBuf::new(),
+                        size_mm: size,
+                        height_mm: 0.6,
+                    })
+                    .size_mm = size;
+            }
+            "--text-height" => {
+                let height = positive(
+                    &next_value(&mut arguments, "--text-height")?,
+                    "--text-height",
+                )?;
+                o.text
+                    .get_or_insert(TextSpec {
+                        text: String::new(),
+                        font: PathBuf::new(),
+                        size_mm: 10.0,
+                        height_mm: height,
+                    })
+                    .height_mm = height;
+            }
             "--help" | "-h" => {
                 outln!("{USAGE}");
                 return Ok(None);
@@ -802,7 +860,20 @@ fn parse_arguments() -> Result<Option<Options>, String> {
         }
     }
     let listing = o.list_bundle && o.bundle.is_some();
-    if o.check_gcode.is_none() && o.inputs.is_empty() && !listing && o.plate.is_none() {
+    if let Some(spec) = &o.text {
+        if spec.text.is_empty() {
+            return Err("--text needs a string".to_owned());
+        }
+        if spec.font.as_os_str().is_empty() {
+            return Err("--text needs --text-font <path>".to_owned());
+        }
+    }
+    if o.check_gcode.is_none()
+        && o.inputs.is_empty()
+        && o.text.is_none()
+        && !listing
+        && o.plate.is_none()
+    {
         return Err(format!("missing model path\n\n{USAGE}"));
     }
     if o.preset_strict {
@@ -1220,6 +1291,42 @@ fn load_plate(o: &Options, factors: [f64; 3]) -> Result<Vec<PlatePart>, String> 
                 .to_owned();
             parts.push(PlatePart::new(0, name, mesh, false, o.settings.clone())?);
         }
+    }
+    if let Some(spec) = &o.text {
+        let face = hfw_font::Face::load(&spec.font, 0)
+            .map_err(|error| format!("--text-font {}: {error}", spec.font.display()))?;
+        let (prism, width) = hfw_text::text_prism(
+            &face,
+            &spec.text,
+            spec.size_mm,
+            spec.height_mm,
+            0.0,
+            0.0,
+            0.0,
+        )
+        .map_err(|error| format!("--text {:?}: {error}", spec.text))?;
+        let mesh = prism.mesh().map_err(|error| error.to_string())?;
+        if mesh.triangle_count() == 0 {
+            return Err(format!(
+                "--text {:?}: no glyph in {} draws {:?}",
+                spec.text,
+                spec.font.display(),
+                spec.text
+            ));
+        }
+        outln!(
+            "text {:?}: {width:.3} mm wide, {:.3} mm tall, {} triangles",
+            spec.text,
+            spec.size_mm,
+            mesh.triangle_count()
+        );
+        parts.push(PlatePart::new(
+            1,
+            "text".to_owned(),
+            mesh,
+            false,
+            o.settings.clone(),
+        )?);
     }
     if parts.is_empty() {
         return Err("no model path".to_owned());

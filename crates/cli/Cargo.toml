@@ -11,6 +11,8 @@ hfw-config = { path = "../config" }
 hfw-engine = { path = "../engine" }
 hfw-gcode = { path = "../gcode" }
 hfw-plate = { path = "../plate" }
+hfw-font = { path = "../font" }
+hfw-text = { path = "../text" }
 
 [lints]
 workspace = true
