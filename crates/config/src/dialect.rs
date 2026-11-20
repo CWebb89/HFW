@@ -351,6 +351,7 @@ const DYNAMIC_PLACEHOLDERS: &[(&str, &str)] = &[
     ("layer_num", "{layer_num}"),
     ("total_layer_count", "{total_layers}"),
     ("current_extruder", "0"),
+    ("extruded_weight_total", "{extruded_weight_total}"),
 ];
 
 /// Placeholders the G-code writer fills, because their value belongs to the slice
@@ -380,7 +381,12 @@ pub const START_PLACEHOLDERS: &[&str] = &[
 ];
 
 /// The writer's placeholders that only a per-layer hook can carry.
-pub const LAYER_PLACEHOLDERS: &[&str] = &["total_layers", "layer_z", "layer_num"];
+pub const LAYER_PLACEHOLDERS: &[&str] = &[
+    "total_layers",
+    "layer_z",
+    "layer_num",
+    "extruded_weight_total",
+];
 
 /// Substitutes the reference dialects' placeholders in the G-code a preset carries.
 ///

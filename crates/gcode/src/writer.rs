@@ -3093,6 +3093,7 @@ pub fn generate(
             format!("{:.3},{:.3}", bed_max.0, bed_max.1),
         ),
         ("{max_print_height}", format!("{:.3}", cfg.max_z)),
+        ("{extruded_weight_total}", "0.000".to_owned()),
     ];
     w.out.push_str(&cfg.fill(&cfg.start_gcode, &extra));
     w.out.push('\n');
@@ -3401,10 +3402,12 @@ pub fn generate(
         let cooled = apply_cooling(&ordered, &mut speeds, &lengths, cfg, target);
         w.last_rate = limit_rate_slope(&ordered, &lengths, &mut speeds, cfg, height, w.last_rate);
         if !cfg.before_layer_gcode.trim().is_empty() {
+            let weight = format!("{:.3}", w.stats.volume_mm3 / 1000.0 * cfg.filament_density);
             let per_layer = [
                 ("{layer_num}", printed.to_string()),
                 ("{layer_z}", format!("{z:.3}")),
                 ("{total_layers}", layer_count.to_string()),
+                ("{extruded_weight_total}", weight),
             ];
             w.out
                 .push_str(&cfg.fill(&cfg.before_layer_gcode, &per_layer));
@@ -3515,10 +3518,12 @@ pub fn generate(
         }
         w.restore_limits();
         if !cfg.layer_gcode.trim().is_empty() {
+            let weight = format!("{:.3}", w.stats.volume_mm3 / 1000.0 * cfg.filament_density);
             let per_layer = [
                 ("{layer_num}", printed.to_string()),
                 ("{layer_z}", format!("{z:.3}")),
                 ("{total_layers}", layer_count.to_string()),
+                ("{extruded_weight_total}", weight),
             ];
             w.out.push_str(&cfg.fill(&cfg.layer_gcode, &per_layer));
             w.out.push('\n');

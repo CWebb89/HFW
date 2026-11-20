@@ -2044,10 +2044,8 @@ mod tests {
 
     #[test]
     fn a_settings_document_loads_as_a_profile() {
-        let path = std::env::temp_dir().join(format!(
-            "hfw-config-document-{}.json",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("hfw-config-document-{}.json", std::process::id()));
         std::fs::write(
             &path,
             "{\"configuration\":{\"print_settings\":{\"layer_height\":0.3,\"perimeters\":3},\"printer_settings\":{\"nozzle_diameter\":0.4}}}",
