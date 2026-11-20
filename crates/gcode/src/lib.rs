@@ -27,6 +27,6 @@ pub mod verify;
 pub use error::GcodeError;
 pub use time::{Move, Planner, Tune};
 pub use verify::{verify, VerifyReport};
-pub use writer::{generate, Feature, Gcode, GcodeStats, ModelExtent, Path};
+pub use writer::{feature_of, generate, Feature, Gcode, GcodeStats, ModelExtent, Path};
 
 pub use hfw_toolpath::{bead_area, bead_width};

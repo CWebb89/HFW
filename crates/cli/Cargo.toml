@@ -10,6 +10,7 @@ license.workspace = true
 hfw-config = { path = "../config" }
 hfw-engine = { path = "../engine" }
 hfw-gcode = { path = "../gcode" }
+hfw-plate = { path = "../plate" }
 
 [lints]
 workspace = true

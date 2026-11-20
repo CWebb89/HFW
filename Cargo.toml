@@ -13,7 +13,9 @@ members = [
     "crates/config",
     "crates/gcode",
     "crates/engine",
+    "crates/plate",
     "crates/cli",
+    "crates/capi",
 ]
 
 [workspace.package]

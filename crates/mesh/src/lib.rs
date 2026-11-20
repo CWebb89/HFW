@@ -8,8 +8,9 @@
 mod threemf;
 
 pub use threemf::{
-    from_3mf_reader, from_3mf_text, load_3mf, load_3mf_objects, metadata_from_reader,
-    objects_from_3mf_text, three_mf_metadata, ModelObject,
+    archive_parts, from_3mf_reader, from_3mf_text, load_3mf, load_3mf_objects,
+    metadata_from_reader, model_part_xml, objects_from_3mf_text, three_mf_metadata, write_archive,
+    ModelObject,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

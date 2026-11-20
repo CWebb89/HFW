@@ -4,25 +4,26 @@ A headless FFF slicing engine in Rust: a model in, printable G-code out, plus an
 independent verifier that re-reads the file and checks it before anyone prints it.
 
 It is the merge of two earlier prototypes (a variable-width wall generator and an
-integer slicing pipeline) and it is the engine meant to replace `libslic3r` in
-next-layer. Since 2026-11-17 it **is** the engine next-layer slices with: the
-application hands it a plate and gets verified G-code back
-(`next-layer/src/qt/src/HfwEngine.cpp`, `NEXT_LAYER_ENGINE=hfw`). What is left is
-the rest of that library's job — the plate model, settings, preview, project
-files — which is planned in `next-layer/docs/rust-engine-plan.md` and is Rust work
-in this repository, not a reason to keep the C++ engine.
+integer slicing pipeline) and it is the engine next-layer slices with. Since
+2026-11-18 that is the only engine the application has: the plate is handed over,
+verified G-code comes back, and there is no switch and no fallback
+(`next-layer/src/qt/src/HfwEngine.cpp`). What is left is the rest of that
+library's job — the plate model, settings, preview, project files — which is
+planned in `next-layer/docs/rust-engine-plan.md` and is Rust work here, not a
+reason to keep the C++ engine.
 
 ## Read this first
 
 | document | answers |
 |---|---|
+| `docs/START-HERE.md` | the whole picture — both projects, how they fit, what to run, how to work on this with the agent |
+| `docs/README.md` | what every other document is for, and which ones are history |
 | `docs/STATUS.md` | where the project stands, in two minutes, with the numbers |
-| `docs/ROADMAP.md` | the order of work and why it is that order, including the crates that retire the C++ engine |
-| `docs/ENGINE-PARITY.md` | what must be true before it can replace libslic3r |
-| `docs/ENGINE-PARITY.md` → `docs/SETTINGS-LEDGER.md` | every setting, applied or not, generated from the reference dialect |
+| `docs/ROADMAP.md` | the order of work and why it is that order |
+| `docs/ENGINE-PARITY.md` | the capability checklist, each item with how it is measured |
+| `docs/SETTINGS-LEDGER.md` | every setting, applied or not, generated from the reference dialect |
 | `docs/ORACLE.md` | measured agreement with OrcaSlicer and PrusaSlicer |
-| `docs/EXPLAINED.md` | how each stage works, for someone reading the code |
-| `docs/WALLS-SKELETON.md` | why the offset ladder leaves laps on rounded walls, and the bead generator that replaces it |
+| `docs/EXPLAINED.md` | how each stage works, without jargon |
 
 ## Build and check
 

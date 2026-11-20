@@ -1,0 +1,15 @@
+[package]
+name = "hfw-plate"
+description = "The plate document: what is on the bed, and how it becomes one job"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hfw-engine = { path = "../engine" }
+hfw-mesh = { path = "../mesh" }
+
+[dev-dependencies]
+hfw-config = { path = "../config" }
+hfw-gcode = { path = "../gcode" }

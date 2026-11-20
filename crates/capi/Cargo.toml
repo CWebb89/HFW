@@ -1,0 +1,25 @@
+[package]
+name = "hfw-capi"
+description = "C ABI for the HFW slicing engine: opaque mesh handles in, G-code out"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "hfw_capi"
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[dependencies]
+hfw-config = { path = "../config" }
+hfw-engine = { path = "../engine" }
+hfw-gcode = { path = "../gcode" }
+hfw-plate = { path = "../plate" }
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"

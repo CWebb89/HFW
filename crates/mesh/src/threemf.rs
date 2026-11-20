@@ -12,7 +12,7 @@
 //! of the file's `unit` attribute.
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use crate::{Mesh, MeshError, Point3};
@@ -481,6 +481,115 @@ pub fn three_mf_metadata<P: AsRef<Path>>(path: P) -> Result<Vec<(String, Vec<u8>
     let file = std::fs::File::open(path.as_ref())
         .map_err(|error| MeshError::Io(format!("{}: {error}", path.as_ref().display())))?;
     metadata_from_reader(file)
+}
+
+/// Builds a 3MF container from named parts.
+///
+/// The caller supplies every part, including `[Content_Types].xml`, `_rels/.rels`
+/// and the model part, because those are what a reader expects in a fixed order
+/// and a writer that guessed at them would be the only place a project's layout
+/// is decided. Parts are written uncompressed-deflate in the order given, which
+/// keeps the output byte-identical for the same input.
+pub fn write_archive(parts: &[(&str, Vec<u8>)]) -> Result<Vec<u8>, MeshError> {
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, bytes) in parts {
+            zip.start_file(*name, options)
+                .map_err(|error| MeshError::Io(format!("cannot start {name}: {error}")))?;
+            zip.write_all(bytes)
+                .map_err(|error| MeshError::Io(format!("cannot write {name}: {error}")))?;
+        }
+        zip.finish()
+            .map_err(|error| MeshError::Io(format!("cannot close the archive: {error}")))?;
+    }
+    Ok(buffer.into_inner())
+}
+
+/// The model part's XML for a plate: one object per build item, at its own
+/// coordinates.
+///
+/// The objects are written in the order given, so a project's object order is its
+/// build order and an index in a side part means the same thing on both sides.
+pub fn model_part_xml(objects: &[(String, &Mesh)]) -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <model unit=\"millimeter\" xml:lang=\"en-US\" \
+         xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n\
+         \x20 <resources>\n",
+    );
+    for (index, (name, mesh)) in objects.iter().enumerate() {
+        let id = index + 1;
+        xml.push_str(&format!(
+            "    <object id=\"{id}\" type=\"model\" name=\"{}\">\n      <mesh>\n        <vertices>\n",
+            escape_attribute(name)
+        ));
+        for vertex in &mesh.vertices {
+            let [x, y, z] = vertex.to_mm();
+            xml.push_str(&format!(
+                "          <vertex x=\"{x:.6}\" y=\"{y:.6}\" z=\"{z:.6}\"/>\n"
+            ));
+        }
+        xml.push_str("        </vertices>\n        <triangles>\n");
+        for triangle in &mesh.triangles {
+            let [a, b, c] = triangle.0;
+            xml.push_str(&format!(
+                "          <triangle v1=\"{a}\" v2=\"{b}\" v3=\"{c}\"/>\n"
+            ));
+        }
+        xml.push_str("        </triangles>\n      </mesh>\n    </object>\n");
+    }
+    xml.push_str("  </resources>\n  <build>\n");
+    for index in 0..objects.len() {
+        xml.push_str(&format!("    <item objectid=\"{}\"/>\n", index + 1));
+    }
+    xml.push_str("  </build>\n</model>\n");
+    xml
+}
+
+/// Every part in a container, by name, in the order the archive stores them.
+///
+/// A container that is not a ZIP is refused here rather than treated as empty:
+/// unlike [`metadata_from_reader`], this is how a project is opened, and a file
+/// that is not a project should say so.
+pub fn archive_parts<R: Read + std::io::Seek>(
+    reader: R,
+) -> Result<Vec<(String, Vec<u8>)>, MeshError> {
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|error| MeshError::InvalidThreeMf(format!("not a ZIP container: {error}")))?;
+    let mut parts = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| MeshError::InvalidThreeMf(format!("unreadable archive: {error}")))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_owned();
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| MeshError::InvalidThreeMf(format!("cannot read {name}: {error}")))?;
+        parts.push((name, bytes));
+    }
+    Ok(parts)
+}
+
+fn escape_attribute(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Reads the `Metadata/` parts from any seekable reader.

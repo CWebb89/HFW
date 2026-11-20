@@ -10,6 +10,7 @@ license.workspace = true
 hfw-geometry = { path = "../geometry" }
 hfw-kernel = { path = "../kernel" }
 hfw-mesh = { path = "../mesh" }
+hfw-config = { path = "../config" }
 hfw-slicing = { path = "../slicing" }
 hfw-walls = { path = "../walls" }
 hfw-infill = { path = "../infill" }

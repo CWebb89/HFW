@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-mod arrange;
 mod json;
 
 /// True when the human report goes to stderr because `--json` owns stdout.
@@ -35,9 +34,9 @@ macro_rules! outln {
 use hfw_config::PrinterConfig;
 use hfw_config::{Bundle, Intake, IntakeReport, Kind, Preset, PrintSequence, ProjectSettings};
 use hfw_engine::{
-    evaluate_all, evaluate_perimeter, run, slice_plane, InfillPattern, Job, JobTotals, MaskCache,
-    Mesh, MeshDiagnostics, MeshRepairReport, MeshTransform, Metrics, Mode, PlannedSlice, Settings,
-    SkinPattern, SupportFill, SupportSettings, SupportStyle, MANIFEST_HEADER,
+    evaluate_all, evaluate_perimeter, infill_pattern, run, slice_plane, InfillPattern, Job,
+    JobTotals, MaskCache, Mesh, MeshDiagnostics, MeshRepairReport, MeshTransform, Metrics, Mode,
+    PlannedSlice, PlateOrder, Settings, SupportSettings, SupportStyle, MANIFEST_HEADER,
 };
 
 const USAGE: &str = "\
@@ -132,6 +131,10 @@ Printer:
                               missing from this document never reached the
                               engine, which is the one failure the printed report
                               cannot show.
+  --settings-surface <path>   Write the settings surface as JSON and exit: every
+                              setting an engine is expected to understand, whether
+                              this one honours it, and where it belongs, plus the
+                              features this engine declines and what stands in.
   --bundle <dir>              A whole profile collection: a directory of presets
                               or one sectioned vendor file.
   --machine <name>            Machine preset of that name in the bundle.
@@ -365,195 +368,11 @@ impl Options {
     }
 
     fn apply_profile(&mut self, cfg: &PrinterConfig) {
-        self.settings.spiral_vase = cfg.spiral_vase;
-        if cfg.variable_layer_height {
-            self.settings.layer_profile = cfg.layer_height_profile.clone();
-        }
-        self.settings.min_layer_height = cfg.min_layer_height;
-        self.settings.max_layer_height = cfg.max_layer();
-        self.settings.wall.w = if cfg.wall_width > 0.0 {
-            cfg.wall_width
-        } else {
-            cfg.line_width
-        };
-        self.settings.wall.w_outer = cfg.outer_wall_width;
-        self.settings.ironing = cfg.ironing;
-        self.settings.ironing_target = match cfg.ironing_type.as_str() {
-            "all_solid" => hfw_engine::IroningTarget::AllSolid,
-            "topmost_only" => hfw_engine::IroningTarget::TopmostOnly,
-            _ => hfw_engine::IroningTarget::TopSurfaces,
-        };
-        self.settings.ironing_spacing = cfg.ironing_spacing;
-        self.settings.measure_overhang = cfg.dynamic_overhang_speeds || cfg.dynamic_fan_speeds;
-        self.settings.wall.walls = cfg.walls;
-        self.settings.wall.thin_walls = cfg.thin_walls;
-        self.settings.wall.gap_fill = cfg.gap_fill_enabled;
-        self.settings.wall.distribution = cfg.wall_distribution_count;
-        self.settings.nozzle = cfg.nozzle_diameter;
-        self.settings.first_layer_width = cfg.first_layer_width;
-        self.settings.extra_perimeters = cfg.extra_perimeters;
-        self.settings.extra_perimeters_overhangs = cfg.extra_perimeters_on_overhangs;
-        self.settings.one_perimeter_first_layer = cfg.only_one_perimeter_first_layer;
-        self.settings.one_perimeter_top = if cfg.top_one_perimeter_type == "none" {
-            String::new()
-        } else {
-            cfg.top_one_perimeter_type.clone()
-        };
-        self.settings.measure_overhang =
-            cfg.overhangs && (cfg.dynamic_overhang_speeds || cfg.dynamic_fan_speeds);
-        if cfg.wall_transition_angle > 0.0 {
-            self.settings.wall.corner_deg = cfg.wall_transition_angle;
-        }
-        if cfg.perimeter_generator == "classic" {
-            self.settings.mode = Mode::Classic;
-        }
-        self.settings.wall.min_feature = if cfg.min_feature_size >= 0.0 {
-            cfg.min_feature_size
-        } else {
-            0.25 * cfg.nozzle_diameter
-        };
-        self.settings.brim_loops = cfg.adhesion_brim_loops();
-        self.settings.brim_gap = cfg.brim_gap;
-        self.settings.elephant_foot = cfg.elefant_foot_compensation;
-        self.settings.xy_size = cfg.xy_size_compensation;
-        self.settings.closing_radius = cfg.slice_closing_radius;
-        self.settings.resolution = cfg.resolution;
+        self.settings.apply_printer(cfg);
         if let Ok(text) = std::env::var("HFW_THREADS") {
             if let Ok(count) = text.trim().parse::<usize>() {
                 self.settings.threads = count;
             }
-        }
-        if let Some(ip) = self.settings.infill.as_mut() {
-            ip.density = cfg.infill_density;
-            ip.width = if cfg.infill_width > 0.0 {
-                cfg.infill_width
-            } else {
-                cfg.line_width
-            };
-            ip.solid_width = cfg.solid_infill_width;
-            ip.top_width = cfg.top_infill_width;
-            ip.top_pattern = skin_pattern(&cfg.top_fill_pattern);
-            ip.bottom_pattern = skin_pattern(&cfg.bottom_fill_pattern);
-            ip.solid_every = cfg.solid_infill_every_layers;
-            ip.solid_below_area = cfg.solid_infill_below_area;
-            ip.combine_layers = cfg.infill_every_layers.max(1);
-            ip.combine_auto = cfg.automatic_infill_combination;
-            ip.combine_max_height = cfg.infill_combination_max_layer_height;
-            ip.top_layers = solid_layers(
-                cfg.top_layers,
-                cfg.top_solid_min_thickness,
-                cfg.layer_height,
-            );
-            ip.bottom_layers = solid_layers(
-                cfg.bottom_layers,
-                cfg.bottom_solid_min_thickness,
-                cfg.layer_height,
-            );
-            ip.vertical_shell = match cfg.ensure_vertical_shell_thickness.as_str() {
-                "disabled" => hfw_engine::VerticalShell::Disabled,
-                "partial" => hfw_engine::VerticalShell::Partial,
-                _ => hfw_engine::VerticalShell::Enabled,
-            };
-            ip.overlap = if cfg.infill_overlap >= 0.0 {
-                cfg.infill_overlap * ip.width
-            } else {
-                0.1 * ip.width
-            };
-            ip.pattern = infill_pattern(&cfg.infill_pattern).unwrap_or(InfillPattern::Rectilinear);
-            ip.fill_angle = cfg.fill_angle;
-            ip.bridge.density = cfg.bridge_density;
-            ip.bridge.cross_hatch = cfg.bridge_cross_hatch;
-            ip.bridge.width = if cfg.bridge_line_width > 0.0 {
-                cfg.bridge_line_width
-            } else {
-                cfg.line_width
-            };
-            ip.bridge.angle = if cfg.bridge_angle >= 0.0 {
-                Some(cfg.bridge_angle)
-            } else {
-                None
-            };
-            ip.bridge.max_length = cfg.max_bridge_length;
-            ip.anchor = if cfg.infill_anchor >= 0.0 {
-                cfg.infill_anchor
-            } else {
-                6.0 * ip.width
-            };
-            ip.anchor_max = cfg.infill_anchor_max;
-        }
-        if cfg.support {
-            let mut sp = SupportSettings::new(if cfg.support_width > 0.0 {
-                cfg.support_width
-            } else {
-                cfg.line_width
-            });
-            sp.interface_width = cfg.support_interface_width;
-            let interface_width = if sp.interface_width > 0.0 {
-                sp.interface_width
-            } else {
-                sp.width
-            };
-            let density_from_spacing = |width: f64, spacing: f64| {
-                if spacing == 0.0 {
-                    1.0
-                } else {
-                    (width / spacing).min(1.0)
-                }
-            };
-            sp.threshold_angle = cfg.support_threshold_angle;
-            sp.xy_gap = cfg.support_xy_gap;
-            sp.z_gap = cfg.support_z_gap;
-            sp.interface_layers = cfg.support_interface_layers;
-            sp.density = if cfg.support_spacing >= 0.0 {
-                density_from_spacing(sp.width, cfg.support_spacing)
-            } else {
-                cfg.support_density
-            };
-            sp.interface_density = if cfg.support_interface_spacing >= 0.0 {
-                density_from_spacing(interface_width, cfg.support_interface_spacing)
-            } else {
-                cfg.support_interface_density
-            };
-            sp.on_build_plate_only = cfg.support_on_build_plate_only;
-            sp.min_area = cfg.support_min_area;
-            sp.style = if cfg.support_style == "tree" {
-                SupportStyle::Tree
-            } else {
-                SupportStyle::Normal
-            };
-            sp.branch_angle = cfg.support_branch_angle;
-            sp.branch_distance = cfg.support_branch_distance;
-            sp.tip_diameter = cfg.support_tip_diameter;
-            sp.branch_diameter_angle = cfg.support_branch_diameter_angle;
-            sp.max_branch_diameter = cfg.support_max_branch_diameter;
-            sp.pattern = if cfg.support_pattern == "grid" {
-                SupportFill::Grid
-            } else {
-                SupportFill::Rectilinear
-            };
-            sp.first_layer_density = cfg.support_first_layer_density;
-            sp.interface_pattern = match cfg.support_interface_pattern.as_str() {
-                "grid" => Some(SupportFill::Grid),
-                "rectilinear" => Some(SupportFill::Rectilinear),
-                _ => None,
-            };
-            sp.interface_loops = if cfg.support_interface_shells {
-                cfg.support_interface_loops.max(2)
-            } else {
-                cfg.support_interface_loops
-            };
-            sp.sheath = cfg.support_sheath;
-            sp.first_layer_expansion = cfg.support_first_layer_expansion;
-            sp.enforce_layers = cfg.support_enforce_layers;
-            sp.bottom_interface_layers = cfg.support_bottom_interface_layers;
-            sp.tree_angle_slow = cfg.support_tree_angle_slow;
-            sp.tree_top_rate = cfg.support_tree_top_rate;
-            sp.tree_double_wall = cfg.support_tree_double_wall;
-            sp.closing_radius = cfg.support_closing_radius;
-            sp.bottom_contact_distance = cfg.support_bottom_contact_distance;
-            sp.skip_bridges = cfg.support_skip_bridges;
-            sp.bridge_span = cfg.max_bridge_length;
-            self.settings.support = Some(sp);
         }
         if self.layer_height.is_none() {
             self.layer_height = Some(cfg.layer_height);
@@ -892,6 +711,13 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                 o.check_gcode = Some(PathBuf::from(next_value(&mut arguments, "--check-gcode")?))
             }
             "--json" => o.json = true,
+            "--settings-surface" => {
+                let path = PathBuf::from(next_value(&mut arguments, "--settings-surface")?);
+                fs::write(&path, hfw_config::surface::json())
+                    .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+                outln!("Wrote the settings surface to {}", path.display());
+                return Ok(None);
+            }
             "--intake-json" => {
                 o.intake_json = Some(PathBuf::from(next_value(&mut arguments, "--intake-json")?))
             }
@@ -1364,131 +1190,15 @@ fn apply_object_settings_file(parts: &mut [PlatePart], path: &Path) -> Result<()
 
 fn apply_object_overrides(part: &mut PlatePart, pairs: &[(String, String)]) {
     for (key, value) in pairs {
-        let applied = match key.as_str() {
-            "sparse_infill_density" | "fill_density" | "infill_density" => match fraction(value) {
-                Some(density) => match part.settings.infill.as_mut() {
-                    Some(infill) => {
-                        infill.density = density;
-                        true
-                    }
-                    None => false,
-                },
-                None => false,
-            },
-            "sparse_infill_pattern" | "fill_pattern" | "infill_pattern" => {
-                let pattern = infill_pattern(value);
-                match (pattern, part.settings.infill.as_mut()) {
-                    (Some(pattern), Some(infill)) => {
-                        infill.pattern = pattern;
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            "wall_loops" | "perimeters" | "walls" => match value.trim().parse::<usize>() {
-                Ok(loops) if loops > 0 => {
-                    part.settings.wall.walls = loops;
-                    true
-                }
-                _ => false,
-            },
-            "line_width" | "extrusion_width" | "perimeter_extrusion_width" => {
-                match millimetres(value) {
-                    Some(width) if width > 0.0 => {
-                        part.settings.wall.w = width;
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            "enable_support" | "support_material" => match boolean_value(value) {
-                Some(true) => {
-                    part.settings.support = Some(SupportSettings::new(part.settings.wall.w));
-                    true
-                }
-                Some(false) => {
-                    part.settings.support = None;
-                    true
-                }
-                None => false,
-            },
-            _ => false,
-        };
-        if applied {
-            part.applied_overrides.push(key.clone());
-        } else {
-            part.ignored_overrides.push(key.clone());
+        match part.settings.apply_key(key, value) {
+            Ok(()) => part.applied_overrides.push(key.clone()),
+            Err(_) => part.ignored_overrides.push(format!("{key} = {value}")),
         }
-    }
-}
-
-fn fraction(value: &str) -> Option<f64> {
-    let text = value.trim();
-    if let Some(percent) = text.strip_suffix('%') {
-        let value: f64 = percent.trim().parse().ok()?;
-        return Some((value / 100.0).clamp(0.0, 1.0));
-    }
-    let value: f64 = text.parse().ok()?;
-    Some(value.clamp(0.0, 1.0))
-}
-
-fn millimetres(value: &str) -> Option<f64> {
-    let text = value.trim().trim_end_matches("mm").trim();
-    text.parse().ok()
-}
-
-fn boolean_value(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
     }
 }
 
 /// Maps a profile's or the command line's pattern name to the engine's pattern.
 ///
-/// The dialect names are Orca's and PrusaSlicer's, and a profile may carry a
-/// pattern this engine has no geometry for. Those are reported as unapplied by
-/// the intake rather than silently printed as something else, so this returns
-/// `None` and the caller decides.
-/// Maps a profile's skin-pattern name onto the skin fill this engine draws.
-///
-/// The parser has already refused anything outside this list, so the fallback
-/// is only reached by a caller that built a config by hand.
-fn skin_pattern(name: &str) -> SkinPattern {
-    match name {
-        "rectilinear" => SkinPattern::Rectilinear,
-        "monotoniclines" => SkinPattern::MonotonicLines,
-        "alignedrectilinear" => SkinPattern::AlignedRectilinear,
-        "concentric" => SkinPattern::Concentric,
-        "hilbertcurve" => SkinPattern::HilbertCurve,
-        "archimedeanchords" => SkinPattern::ArchimedeanChords,
-        "octagramspiral" => SkinPattern::OctagramSpiral,
-        _ => SkinPattern::Monotonic,
-    }
-}
-
-fn infill_pattern(name: &str) -> Option<InfillPattern> {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "grid" => Some(InfillPattern::Grid),
-        "rectilinear" | "rectilinear_infill" => Some(InfillPattern::Rectilinear),
-        "line" | "lines" => Some(InfillPattern::Line),
-        "triangle" | "triangles" => Some(InfillPattern::Triangle),
-        "cubic" => Some(InfillPattern::Cubic),
-        "gyroid" => Some(InfillPattern::Gyroid),
-        "3d_honeycomb" | "3dhoneycomb" | "honeycomb_3d" => Some(InfillPattern::Honeycomb3D),
-        "concentric" => Some(InfillPattern::Concentric),
-        "zigzag" | "zig_zag" => Some(InfillPattern::ZigZag),
-        "crosshatch" | "cross_hatch" => Some(InfillPattern::CrossHatch),
-        "honeycomb" | "hexagon" => Some(InfillPattern::Honeycomb),
-        "monotonic" => Some(InfillPattern::Monotonic),
-        "monotonicline" | "monotoniclines" | "monotonic_line" => {
-            Some(InfillPattern::MonotonicLines)
-        }
-        _ => None,
-    }
-}
-
 /// Places the objects no file positioned, packing them onto the bed.
 ///
 /// A 3MF already carries a plate layout, so those objects keep their coordinates
@@ -1505,38 +1215,23 @@ fn arrange_plate(parts: &mut [PlatePart], o: &Options) -> Result<(), String> {
     let config = o.profile_config.clone().unwrap_or_default();
     let bed = (config.bed_x, config.bed_y);
     let spacing = o.spacing.unwrap_or(PLATE_SPACING_MM);
-    if parts.iter().any(|part| part.positioned) {
-        return arrange_beside_positioned(parts, bed.0, spacing);
-    }
-    let items: Vec<arrange::Item> = parts
+    let footprints: Vec<hfw_plate::arrange::Footprint> = parts
         .iter()
-        .map(|part| arrange::Item {
-            width: part.bounds.2 - part.bounds.0,
-            height: part.bounds.3 - part.bounds.1,
+        .map(|part| hfw_plate::arrange::Footprint {
+            bounds: part.bounds,
+            positioned: part.positioned,
         })
         .collect();
-    let placements = arrange::pack(&items, bed, spacing).map_err(|error| {
+    let transforms = hfw_plate::arrange::layout(&footprints, bed, spacing).map_err(|error| {
         format!(
             "{} does not fit on a {} x {} bed: it needs {:.1} x {:.1} mm with the \
              spacing this plate uses, and leaving it out would print a different job",
             parts[error.item].name, bed.0, bed.1, error.footprint.0, error.footprint.1
         )
     })?;
-    for (part, placement) in parts.iter_mut().zip(placements) {
-        let (min_x, min_y) = (part.bounds.0, part.bounds.1);
-        let mut transform = MeshTransform {
-            translation_mm: [placement.x - min_x, placement.y - min_y, 0.0],
-            ..MeshTransform::default()
-        };
-        if placement.rotated {
-            transform.rotation_degrees = [0.0, 0.0, 90.0];
-            let centred_x = 0.5 * (part.bounds.0 + part.bounds.2);
-            let centred_y = 0.5 * (part.bounds.1 + part.bounds.3);
-            transform.translation_mm = [
-                placement.x + 0.5 * (part.bounds.3 - part.bounds.1) - centred_x,
-                placement.y + 0.5 * (part.bounds.2 - part.bounds.0) - centred_y,
-                0.0,
-            ];
+    for (part, transform) in parts.iter_mut().zip(transforms) {
+        if part.positioned {
+            continue;
         }
         part.mesh = part
             .mesh
@@ -1545,74 +1240,6 @@ fn arrange_plate(parts: &mut [PlatePart], o: &Options) -> Result<(), String> {
         part.refresh_bounds();
     }
     Ok(())
-}
-
-/// Lays the unpositioned objects out to the right of the ones a file placed.
-///
-/// A 3MF's own layout is a decision the user made in the slicer, so it is kept and
-/// the packer is not turned on the plate: mixing objects that have coordinates with
-/// ones that do not would need to know which of them the user moved on purpose.
-fn arrange_beside_positioned(
-    parts: &mut [PlatePart],
-    bed_width: f64,
-    spacing: f64,
-) -> Result<(), String> {
-    let positioned: Vec<&PlatePart> = parts.iter().filter(|part| part.positioned).collect();
-    let row_start = match positioned
-        .iter()
-        .map(|part| part.bounds.2)
-        .fold(None, max_opt)
-    {
-        Some(right) => right + spacing,
-        None => 0.0,
-    };
-    let mut row_y = positioned
-        .iter()
-        .map(|part| part.bounds.1)
-        .fold(None, min_opt)
-        .unwrap_or(0.0);
-
-    let mut cursor_x = row_start;
-    let mut row_height = 0.0;
-    for part in parts.iter_mut().filter(|part| !part.positioned) {
-        let (min_x, min_y, max_x, max_y) = part.bounds;
-        let width = max_x - min_x;
-        let height = max_y - min_y;
-        if cursor_x > row_start && cursor_x + width - row_start > bed_width {
-            row_y += row_height + spacing;
-            cursor_x = row_start;
-            row_height = 0.0;
-        }
-        let dx = cursor_x - min_x;
-        let dy = row_y - min_y;
-        if dx.abs() > f64::EPSILON || dy.abs() > f64::EPSILON {
-            part.mesh = part
-                .mesh
-                .transformed(MeshTransform {
-                    translation_mm: [dx, dy, 0.0],
-                    ..MeshTransform::default()
-                })
-                .map_err(|error| error.to_string())?;
-            part.refresh_bounds();
-        }
-        cursor_x += width + spacing;
-        row_height = row_height.max(height);
-    }
-    Ok(())
-}
-
-fn max_opt(best: Option<f64>, value: f64) -> Option<f64> {
-    Some(match best {
-        Some(current) => current.max(value),
-        None => value,
-    })
-}
-
-fn min_opt(best: Option<f64>, value: f64) -> Option<f64> {
-    Some(match best {
-        Some(current) => current.min(value),
-        None => value,
-    })
 }
 
 /// Labels every planned path with the object it belongs to.
@@ -1650,15 +1277,6 @@ fn label_objects(job: &mut Job, plate: &[PlatePart]) {
 /// any planning happens, because both are collisions if wrong: every object has
 /// to be shorter than the toolhead's clearance over a finished part, and every
 /// pair has to be far enough apart for the head to travel between them.
-/// How a plate of objects becomes one file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PlateOrder {
-    /// Every object's layer N, then every object's layer N+1.
-    ByLayer,
-    /// One object's whole stack, then the next object's.
-    ByObject,
-}
-
 /// Plans a plate object by object and assembles the file in `order`.
 ///
 /// This is the path taken whenever an object carries its own settings, and
@@ -1723,62 +1341,7 @@ fn plate_job(
                 .map_err(|error| error.to_string())?,
         );
     }
-
-    let mut job = Job {
-        mesh_diagnostics: diagnostics,
-        repair: hfw_engine::MeshRepairReport::default(),
-        layers: Vec::new(),
-        metrics: Vec::new(),
-        volume: (0.0, 0.0),
-        stats: hfw_engine::JobStats::default(),
-        worst_layer_ms: 0.0,
-        worst_layer: 0,
-        skipped: Vec::new(),
-    };
-    let tallest = stacks
-        .iter()
-        .map(|stack| stack.layers.len())
-        .max()
-        .unwrap_or(0);
-    for step in 0..stacks.len() * tallest {
-        let (object, layer_index) = match order {
-            PlateOrder::ByObject => (step / tallest.max(1), step % tallest.max(1)),
-            PlateOrder::ByLayer => (step % stacks.len(), step / stacks.len().max(1)),
-        };
-        let Some(stack) = stacks.get_mut(object) else {
-            continue;
-        };
-        let base = job.layers.len();
-        let Some(mut layer) = stack.layers.get(layer_index).cloned() else {
-            continue;
-        };
-        if layer.paths.is_empty() && !layer.first {
-            continue;
-        }
-        layer.first = layer_index == 0;
-        layer.index = base;
-        let label = u16::try_from(object).unwrap_or(u16::MAX);
-        for line in &mut layer.paths {
-            line.object = label;
-        }
-        job.layers.push(layer);
-    }
-    for (object, stack) in stacks.iter_mut().enumerate() {
-        let _ = object;
-        let base = job.layers.len();
-        for (offset, reason) in std::mem::take(&mut stack.skipped) {
-            job.skipped.push((base + offset, reason));
-        }
-        job.metrics.append(&mut stack.metrics);
-        job.volume.0 += stack.volume.0;
-        job.volume.1 += stack.volume.1;
-        add_stats(&mut job.stats, &stack.stats);
-        if stack.worst_layer_ms > job.worst_layer_ms {
-            job.worst_layer_ms = stack.worst_layer_ms;
-            job.worst_layer = base + stack.worst_layer;
-        }
-    }
-    Ok(job)
+    Ok(hfw_engine::merge_stacks(stacks, order, diagnostics))
 }
 
 /// Deposited volume per object, in cubic millimetres, in plate order.
@@ -1805,14 +1368,6 @@ fn far_enough_apart(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64), spacing: f
     gap_x >= spacing || gap_y >= spacing
 }
 
-fn solid_layers(configured: usize, min_thickness: f64, layer_height: f64) -> usize {
-    if min_thickness <= 0.0 || layer_height <= 0.0 {
-        return configured;
-    }
-    let from_thickness = (min_thickness / layer_height).ceil() as usize;
-    configured.max(from_thickness)
-}
-
 fn heights(value: &str) -> Result<Vec<f64>, String> {
     let mut out = Vec::new();
     for entry in value.split(',') {
@@ -1836,21 +1391,6 @@ fn heights(value: &str) -> Result<Vec<f64>, String> {
 
 fn boxes_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
     !far_enough_apart(a, b, 0.0)
-}
-
-fn add_stats(total: &mut hfw_engine::JobStats, extra: &hfw_engine::JobStats) {
-    total.layers += extra.layers;
-    total.processed_layers += extra.processed_layers;
-    total.triangles_tested += extra.triangles_tested;
-    total.wall_loops += extra.wall_loops;
-    total.gap_strands += extra.gap_strands;
-    total.wall_points += extra.wall_points;
-    total.ms_slice += extra.ms_slice;
-    total.ms_walls += extra.ms_walls;
-    total.ms_infill += extra.ms_infill;
-    total.ms_support += extra.ms_support;
-    total.ms_metrics += extra.ms_metrics;
-    total.ms_offset += extra.ms_offset;
 }
 
 fn object_at(x: f64, y: f64, plate: &[PlatePart]) -> u16 {

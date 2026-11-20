@@ -70,7 +70,148 @@ expose for them:
 | `Slic3r::place_objects` / arrange | plate layout | `hfw-cli` already packs and centres; the application wants arrange as a callable operation |
 | progress reporting, cancel | UI | callbacks in the ABI below |
 
-### Proposed versioned C ABI (`crates/capi`)
+### The C ABI (`crates/capi`)
+
+**Landed 2026-11-20, version 1 — meshes and the plate document.** What shipped is
+the mesh-and-slice half of the block below, flat and handle-based, declared in
+`crates/capi/include/hfw.h`:
+
+```
+hfw_abi_version() -> u32
+hfw_settings_surface_json() -> *const c_char     // static, process-lifetime, do not free
+hfw_last_error() -> *const c_char                     // per thread, cleared by success
+
+hfw_mesh_load_file(path) -> *mut HfwMesh              // STL or 3MF
+hfw_mesh_from_bytes(bytes, len) -> *mut HfwMesh       // STL bytes
+hfw_mesh_transform(const *HfwMesh, HfwTransform) -> *mut HfwMesh   // new handle, source kept
+hfw_mesh_bounds(const *HfwMesh, *HfwBounds) -> i32
+hfw_mesh_triangle_count(const *HfwMesh) -> usize
+hfw_mesh_volume(const *HfwMesh) -> f64
+hfw_mesh_free(*HfwMesh)
+
+hfw_plate_new() -> *mut HfwPlate
+hfw_plate_add(*HfwPlate, const *HfwMesh) -> u64       // copies the mesh; 0 on failure
+hfw_plate_add_positioned(*HfwPlate, const *HfwMesh) -> u64
+hfw_plate_object_count(const *HfwPlate) -> usize
+hfw_plate_object_name(*HfwPlate, id, name) -> i32
+hfw_plate_object_placement(*HfwPlate, id, HfwTransform) -> i32
+hfw_plate_object_bake(*HfwPlate, id) -> i32
+hfw_plate_object_enabled(*HfwPlate, id, i32) -> i32
+hfw_plate_object_remove(*HfwPlate, id) -> i32
+hfw_plate_object_bounds(const *HfwPlate, id, *HfwBounds) -> i32
+hfw_plate_bounds(const *HfwPlate, *HfwBounds) -> i32
+hfw_plate_slice(const *HfwPlate, profile_path, first_layer_height, layer_height) -> *mut HfwGcode
+hfw_plate_free(*HfwPlate)
+
+hfw_slice_meshes(const **HfwMesh, count, profile_path, first_layer_height, layer_height) -> *mut HfwGcode
+hfw_gcode_text(const *HfwGcode) -> *const c_char      // NUL-terminated, owned by the handle
+hfw_gcode_len(const *HfwGcode) -> usize
+hfw_gcode_verified(const *HfwGcode) -> i32            // the verifier's own verdict
+hfw_gcode_free(*HfwGcode)
+```
+
+The plate half is phase 2's document model: objects keep a stable id (never zero,
+surviving the removal of their neighbours), a name, geometry, a placement and an
+enabled flag. Moving an object does not rewrite its triangles —
+`hfw_plate_object_bake` is the call that folds the placement in, for a caller whose
+own transform stack has finished composing. Object ids are what a view holds, so
+`hfw_plate_object_remove` leaves every other id valid.
+
+`hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
+called `hfw_plate_slice` for the first hour of its life, before the document existed
+and the name was needed for the real thing; nothing outside this repository has been
+built against the old name.
+
+Meshes handed to a slice call are already placed on the bed: the ABI does not
+arrange a plate, and the returned file keeps the coordinates it was given
+(`keep_position`). A zero layer height takes the profile's own. The settings reader
+and the plate merge are the engine's, not copies, so a preset means the same thing
+through the ABI as through `hfw-cli`. A plate's own settings are what the profile is
+layered onto for one job and not stored, so slicing under two profiles does not
+leave the second on the document.
+
+Nothing is missing from phase 4. The preview is `hfw_plate_preview_json`; the long
+job is `hfw_job_start` and friends, polled rather than pushed. The job-shaped surface
+below is still the target; what shipped is the part that had to exist first, and the
+symbols above are the part of it that is now a promise.
+
+The settings surface (`hfw_settings_surface_json`) is phase 3's document: one JSON
+object with `counts`, `statuses`, `locations` and a `settings` array, each row
+carrying `name` (the dialect name), `hfw` (this engine's key when it differs),
+`tier`, `status`, `type`, `default`, `unit`, `location`, `category`, `source` and
+`per_object`. A panel hides or disables every row whose status is not `applied` —
+that is the ledger's first rule, enforced from data instead of from discipline — and
+only offers a per-object control where `per_object` is true.
+
+Setting one object's value across the ABI:
+
+```c
+if (hfw_plate_object_set(plate, id, "sparse_infill_density", "40%") != 0)
+    show(hfw_last_error());     /* `…` is not a per-object setting, or what it accepts */
+```
+
+Saving and reopening a project:
+
+```c
+size_t len = 0;
+char *project = hfw_plate_project_bytes(plate, &len);   /* a .3mf */
+/* write `project`, `len` bytes, wherever the app keeps projects */
+hfw_buffer_free(project, len);
+
+HfwPlate *reopened = hfw_plate_open_project(bytes, len, profile_path);
+```
+
+The model part is a standard 3MF, so other slicers open the layout; the enabled flags
+and each object's settings live in `Metadata/hfw_project.xml`. Geometry is stored where
+it sits, so every object comes back marked positioned. A reopened plate slices to the
+same bytes as the plate it was saved from — that is the test, not a promise.
+
+Editing the plate:
+
+```c
+uint64_t copy = hfw_plate_object_duplicate(plate, id);   /* same place, same settings */
+hfw_plate_object_rotate(plate, copy, 2, 90.0);           /* about its own centre */
+hfw_plate_object_mirror(plate, copy, 0);                 /* in place, still slices */
+hfw_plate_arrange(plate, 250.0, 250.0, 5.0);             /* shelf layout, centred */
+```
+
+Scale, translate and any composed placement go through `hfw_plate_object_placement`
+with an `HfwTransform`. Nothing here rewrites triangles: an object keeps its geometry
+and gains a placement, so a scale or a turn is exact and reversible until the job is
+sliced.
+
+Running the job without freezing the caller:
+
+```c
+HfwJob *job = hfw_job_start(plate, profile_path, 0.2, 0.2);
+HfwJobProgress p;
+while (hfw_job_poll(job, &p) == HFW_JOB_RUNNING) {
+    redraw(p.stage, p.done, p.total);   /* your timer calls this */
+}
+HfwGcode *gcode = hfw_job_take_gcode(job);   /* NULL if cancelled or failed */
+```
+
+`hfw_job_cancel` stops the job between objects, and a cancelled job produces no file at
+all. The plate is copied into the job, so it can keep being edited while the job runs.
+
+Drawing the job before printing it:
+
+```c
+char *preview = hfw_plate_preview_json(plate, profile_path, 0.2, 0.2);
+if (preview != NULL) {
+    draw(preview);          /* {"layers":[{"index":0,"z":0.2,"paths":[{"role":"Outer wall",...}]}]} */
+    hfw_string_free(preview);
+}
+```
+
+Each path carries `role` (the `;TYPE:` label), `closed`, `flow`, `width` per vertex and
+`points`, so a viewer needs no engine types and no G-code parse.
+
+The object takes the plate's settings on its first override, so the value is a delta
+from the job and the keys may arrive in any order. `hfw_plate_object_clear_settings`
+drops the override and returns the object to the job's settings.
+
+The rest of the proposal stands as written:
 
 ```
 hfw_abi_version() -> u32

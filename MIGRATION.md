@@ -11,10 +11,10 @@ into either.
 
 | Directory | Character |
 |---|---|
-| `../HFW-CLAUDE` | variable-width wall generator from a distance field and medial axis |
-| `../HFW-GPT` | deterministic integer slicing pipeline with mesh diagnostics |
+| `archive/HFW-CLAUDE` | variable-width wall generator from a distance field and medial axis |
+| `archive/HFW-GPT` | deterministic integer slicing pipeline with mesh diagnostics |
 
-**HFW-final is MIT OR Apache-2.0.** An earlier revision of this file claimed
+**This engine is MIT OR Apache-2.0.** An earlier revision of this file claimed
 AGPL-3.0-or-later, on the grounds that the GPT package declared that licence and
 permissive code can be absorbed into copyleft but not the reverse. That
 reasoning was wrong twice over: the declaration was generated metadata, not a

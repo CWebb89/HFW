@@ -39,6 +39,8 @@ LEGACY = (
     / "upstream/src/slic3r-shared/src/Slic3r/Biz/Config/Legacy/PrintConfig.cpp"
 )
 HFW_PARSE = HFW / "crates/config/src/parse.rs"
+SURFACE = HFW / "crates/config/assets/settings-surface.json"
+PER_OBJECT = HFW / "crates/engine/src/settings_key.rs"
 FOREIGN_SETTINGS = NEXT_LAYER / "src/qt/src/ForeignSettings.cpp"
 PRESET_IMPORT = NEXT_LAYER / "src/qt/src/PresetImport.cpp"
 LOOP_AXES = ("x", "y", "z", "e")
@@ -54,6 +56,70 @@ EMIT_PREFIXES = ("start_gcode", "end_gcode", "before_layer_gcode", "layer_gcode"
 # Keys this engine defines itself: nothing upstream lists them, so the ledger
 # would otherwise hide a setting the engine actually applies.
 ENGINE_ONLY = {"gantry_height"}
+
+# Features the reference slicers carry that this engine will not build. Each row is
+# a promise to the application's panel as much as a note to a reader: the panel shows
+# the control as unavailable, and this table is where "unavailable" comes from.
+CAPABILITIES = (
+    {
+        "id": "paint",
+        "title": "Painting supports, seams and brim",
+        "panel": "unavailable",
+        "note": "Placement comes from settings, not from the mouse: supports from "
+                "support_material and its threshold angle, seams from seam_position, "
+                "brim from brim_type and brim_width.",
+        "instead": "support_material, support_threshold_angle, seam_position, brim_type",
+    },
+    {
+        "id": "text",
+        "title": "Text embossing and font loading",
+        "panel": "unavailable",
+        "note": "A mesh with the text already in it is an ordinary object; the engine "
+                "reads no fonts and places no glyphs.",
+        "instead": "any STL, 3MF or OBJ that carries the embossing",
+    },
+    {
+        "id": "cut_hollow",
+        "title": "Cut and hollow",
+        "panel": "unavailable",
+        "note": "The engine slices a closed mesh; it never subtracts, splits or shells "
+                "one. A cut or hollowed body has to arrive that way.",
+        "instead": "a mesh prepared in CAD",
+    },
+    {
+        "id": "step_import",
+        "title": "STEP and IGES import",
+        "panel": "unavailable",
+        "note": "B-rep to triangle needs an OCCT-class kernel, which is a dependency "
+                "this project will not take. Nothing here reads a parametric solid.",
+        "instead": "STL, 3MF or OBJ",
+    },
+    {
+        "id": "sla",
+        "title": "Resin (SLA/DLP) slicing",
+        "panel": "unavailable",
+        "note": "The pipeline is filament: extrusion per bead, retraction, a layer "
+                "cooling rule. Resin wants exposure per layer and no extrusion.",
+        "instead": "",
+    },
+    {
+        "id": "mmu",
+        "title": "Multi-material colour mixing (MMU, AMS)",
+        "panel": "unavailable",
+        "note": "A tool changer is in scope and a colour mixer is not: beads are "
+                "assigned to tools, never blended within one layer.",
+        "instead": "Tool settings and toolchange_gcode",
+    },
+    {
+        "id": "nesting",
+        "title": "Nesting arranger",
+        "panel": "unavailable",
+        "note": "The arranger is a shelf packer: it fills rows, it does not interlock "
+                "irregular outlines. It falls back to turning a part a quarter turn.",
+        "instead": "hfw_plate_arrange",
+    },
+)
+
 EMIT_NAMES = {
     "thumbnails_format", "remaining_times",
     "gcode_flavor", "label_objects",
@@ -733,6 +799,108 @@ def status_for(name: str, hfw: set, alias_index: dict) -> tuple[str, str]:
     return "missing", ""
 
 
+def per_object_names() -> set:
+    """The keys `Settings::apply_key` promises a settings panel may set per object."""
+    if not PER_OBJECT.exists():
+        return set()
+    text = PER_OBJECT.read_text(encoding="utf-8", errors="replace")
+    start = text.find("pub const PER_OBJECT_KEYS")
+    if start < 0:
+        return set()
+    end = text.find("];", start)
+    return set(re.findall(r'"([^"]+)"', text[start:end]))
+
+
+def surface_document(rows, applicable, applied, partial, missing, alias_index) -> dict:
+    """The JSON sidecar next-layer's settings panel reads.
+
+    It carries the same measurement the markdown does, in the form a UI can
+    enumerate: every setting's name, the key this engine uses for it, its
+    location, type, default, unit and whether the value changes the G-code, plus
+    the features this engine will not build, so the panel neither offers a control
+    that does nothing nor hides one it could explain. The files are written by the
+    same run so a panel and the ledger cannot disagree about a setting.
+    """
+    locations = sorted({row["locations"] for row in rows if row["locations"]})
+    per_object = per_object_names()
+
+    def settable(row) -> bool:
+        if row["status"] != "applied":
+            return False
+        if row["name"] in per_object or row["note"] in per_object:
+            return True
+        native = alias_index.get(row["name"])
+        return bool(native) and native[0] in per_object
+
+    return {
+        "surface": "hfw-settings",
+        "version": 2,
+        "generated_by": "tools/gen-settings-ledger.py",
+        "counts": {
+            "settings": len(rows),
+            "applicable": len(applicable),
+            "applied": len(applied),
+            "partial": len(partial),
+            "missing": len(missing),
+            "not_applicable": len(rows) - len(applicable),
+        },
+        "statuses": ["applied", "partial", "missing", "n/a"],
+        "capabilities": [dict(entry, disposition="out_of_scope") for entry in CAPABILITIES],
+        "locations": locations,
+        "settings": [
+            {
+                "name": row["name"],
+                "hfw": row["note"],
+                "tier": row["tier"],
+                "status": row["status"],
+                "type": row["type"],
+                "default": row["default"],
+                "unit": row["unit"],
+                "location": row["locations"] if row["locations"] not in ("", "?") else "Engine",
+                "category": row["category"],
+                "source": row["source"],
+                "per_object": settable(row),
+            }
+            for row in sorted(rows, key=lambda item: item["name"])
+        ],
+    }
+
+
+def scope_document() -> str:
+    """The out-of-scope list, in prose, from the same table the panel reads."""
+    out = [
+        "# Out of scope",
+        "",
+        "Generated by `tools/gen-settings-ledger.py` from the table the settings",
+        "surface carries as `capabilities`. Do not edit by hand.",
+        "",
+        "Seven features the reference slicers ship and this engine will not build.",
+        "Each one is a project in its own right, not a setting; the cost of saying so",
+        "is a control the panel shows as unavailable, and the cost of not saying so is",
+        "a decade of work that ends in a worse copy of PrusaSlicer.",
+        "",
+        "| feature | what the engine does instead |",
+        "| --- | --- |",
+    ]
+    for entry in CAPABILITIES:
+        instead = entry["instead"] or "nothing — it is not a filament process"
+        out.append(f"| **{entry['title']}**<br>{entry['note']} | {instead} |")
+    out += [
+        "",
+        "The application reads the same rows from `hfw_settings_surface_json`: every",
+        "entry has `id`, `title`, `disposition` (`out_of_scope`), `panel`",
+        "(`unavailable`), `note` and `instead`. A panel that renders an unavailable",
+        "control from that list cannot drift from this document, and adding a feature",
+        "here means changing one table.",
+        "",
+        "What is *not* on this list matters as much: every setting the engine parses",
+        "and reads is in `SETTINGS-LEDGER.md` with the command that measured it, and",
+        "every setting it does not apply is `missing` or `partial` there rather than",
+        "silently ignored.",
+        "",
+    ]
+    return "\n".join(out)
+
 def main() -> int:
     for required in (DOMAIN / "ConfigDefsFDM.cpp", HFW_PARSE):
         if not required.exists():
@@ -968,17 +1136,31 @@ def main() -> int:
             add(f"- `{hfw_key}` — {note}")
     add("")
 
+    surface = surface_document(rows, applicable, applied, partial, missing, alias_index)
     target = HFW / "docs/SETTINGS-LEDGER.md"
     text = "\n".join(out) + "\n"
+    surface_text = json.dumps(surface, indent=1, sort_keys=False) + "\n"
+    scope = HFW / "docs/SCOPE.md"
+    scope_text = scope_document()
     if "--check" in sys.argv[1:]:
-        current = target.read_text(encoding="utf-8") if target.exists() else ""
-        if current != text:
-            print(f"{target} is stale; run tools/gen-settings-ledger.py", file=sys.stderr)
+        stale = []
+        for path, expected in ((target, text), (SURFACE, surface_text), (scope, scope_text)):
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            if current != expected:
+                stale.append(path)
+        if stale:
+            for path in stale:
+                print(f"{path} is stale; run tools/gen-settings-ledger.py", file=sys.stderr)
             return 1
-        print(f"settings ledger: {len(rows)} settings, up to date")
+        print(f"settings ledger and surface: {len(rows)} settings, up to date")
         return 0
     target.write_text(text, encoding="utf-8")
+    SURFACE.parent.mkdir(parents=True, exist_ok=True)
+    SURFACE.write_text(surface_text, encoding="utf-8")
+    scope.write_text(scope_text, encoding="utf-8")
     print(f"wrote {target}")
+    print(f"wrote {SURFACE}")
+    print(f"wrote {scope}")
     print(f"engine settings: {len(rows)}  applicable: {len(applicable)}  "
           f"applied: {len(applied)}  partial: {len(partial)}  missing: {len(missing)}  "
           f"n/a: {len(rows) - len(applicable)}")

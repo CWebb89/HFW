@@ -151,12 +151,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "hfw-capi"
+version = "0.8.0"
+dependencies = [
+ "hfw-config",
+ "hfw-engine",
+ "hfw-gcode",
+ "hfw-plate",
+]
+
+[[package]]
 name = "hfw-cli"
 version = "0.8.0"
 dependencies = [
  "hfw-config",
  "hfw-engine",
  "hfw-gcode",
+ "hfw-plate",
 ]
 
 [[package]]
@@ -167,6 +178,7 @@ version = "0.8.0"
 name = "hfw-engine"
 version = "0.8.0"
 dependencies = [
+ "hfw-config",
  "hfw-geometry",
  "hfw-infill",
  "hfw-kernel",
@@ -216,6 +228,16 @@ version = "0.8.0"
 dependencies = [
  "hfw-geometry",
  "zip",
+]
+
+[[package]]
+name = "hfw-plate"
+version = "0.8.0"
+dependencies = [
+ "hfw-config",
+ "hfw-engine",
+ "hfw-gcode",
+ "hfw-mesh",
 ]
 
 [[package]]

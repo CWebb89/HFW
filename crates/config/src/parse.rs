@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::dialect::Preset;
 use crate::error::ConfigError;
 use crate::{Flavor, PrintSequence, PrinterConfig, Seam, Substitution, Thumbnail};
 
@@ -424,11 +425,21 @@ impl PrinterConfig {
 
 impl PrinterConfig {
     /// Reads and validates a profile from disk.
+    ///
+    /// A file opening with `{` is a settings document — what this application dumps
+    /// and what another slicer exports as JSON — and is read through the dialect
+    /// intake, exactly as the command line's `--preset` reads it. Every other file
+    /// is a profile in this engine's own `key = value` form.
     pub fn load(path: &Path) -> Result<PrinterConfig, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
             path: path.display().to_string(),
             message: e.to_string(),
         })?;
+        if text.trim_start().starts_with('{') {
+            let preset = Preset::parse(&text)?;
+            let (config, _) = PrinterConfig::from_preset(&preset);
+            return Ok(config);
+        }
         PrinterConfig::parse(&text)
     }
 
@@ -2030,6 +2041,23 @@ fn thumbnails(value: &str) -> Result<Vec<Thumbnail>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_settings_document_loads_as_a_profile() {
+        let path = std::env::temp_dir().join(format!(
+            "hfw-config-document-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "{\"configuration\":{\"print_settings\":{\"layer_height\":0.3,\"perimeters\":3},\"printer_settings\":{\"nozzle_diameter\":0.4}}}",
+        )
+        .expect("the settings document is written");
+        let config = PrinterConfig::load(&path).expect("a settings document loads as a profile");
+        let _ = std::fs::remove_file(&path);
+        assert!((config.layer_height - 0.3).abs() < 1e-9);
+        assert_eq!(config.walls, 3);
+    }
 
     #[test]
     fn a_profile_written_in_the_engine_dialect_parses() {

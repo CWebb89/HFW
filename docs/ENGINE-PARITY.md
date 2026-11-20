@@ -1,16 +1,23 @@
-# Engine parity — what HFW must do before it can replace libslic3r in next-layer
+# Engine parity — the capability checklist HFW is measured against
 
-`next-layer` ships today on PrusaSlicer's `libslic3r` 3.0.0-alpha12 (see
-`../../../next-layer/THIRD-PARTY.md`). The plan is for this engine to replace it.
-This file is that plan's pass/fail list, so "is HFW ready?" has an answer that is
-not a feeling.
+`next-layer` sliced through PrusaSlicer's `libslic3r` 3.0.0-alpha12 until
+2026-11-18, when HFW took that job over (see `../../next-layer/THIRD-PARTY.md` and
+`../../next-layer/docs/rust-engine-plan.md`). This file is the pass/fail list for
+slicing parity, so "is this engine right?" has an answer that is not a feeling.
 
 Two rules make it checkable:
 
 1. **Every item names how it is measured.** A line here that cannot be measured
    does not belong here.
-2. **The swap happens once, behind a boundary, at the end.** Not incrementally
-   into the app, and never while both sides are moving.
+2. **Parity is proved by comparison, not by assertion.** Against two other slicers
+   (`ORACLE.md`) and against the reference dialect (`SETTINGS-LEDGER.md`).
+
+> **Rewrite pending (2026-11-19).** The framing below still describes the planned
+> swap: "the swap happens once, at the end", "`next-layer` already ships 154
+> features", "§1 blocks everything else". Slicing has since moved and the C++
+> engine's remaining job is the plate model, settings, arrange, preview and
+> project files — tracked in `../../next-layer/docs/engine-boundary.md`. The list
+> itself is still the gate; its introduction is history.
 
 ## Why the order is what it is
 
@@ -103,7 +110,7 @@ libslic3r: a 0.30 mm per-object layer height must reduce the layer count from
 
 ### 3. Arrange
 
-**Today.** `crates/cli/src/arrange.rs` packs a plate: MaxRects with a
+**Today.** `crates/plate/src/arrange.rs` packs a plate, and the command line and the C ABI both call it (`hfw_plate_arrange` is the same code a panel uses): MaxRects with a
 best-short-side-fit score, a quarter turn allowed per object, spacing as air
 between footprints, and the finished arrangement centred on the bed. Scaling
 (units, `--scale`, shrinkage) is applied *before* packing, so the packer works in
@@ -149,11 +156,21 @@ a fan of very short segments is approximated by the one-junction model.
 **Today.** 3MF import works: the ZIP is opened, the model part parsed, `unit`
 honoured, components resolved recursively, and every build item placed by its own
 4x3 transform. A 3MF that is a *project* also carries settings
-(`Metadata/Slic3r_PE.config` or Bambu's flat JSON) and those are applied. AMF is
-not read at all.
+(`Metadata/Slic3r_PE.config` or Bambu's flat JSON) and those are applied.
 
-**What is still needed.** AMF, and a check that a project 3MF round-trips the way
-libslic3r does — plates, instances, per-object config, paint.
+3MF **export** works too (`Plate::to_project`, `hfw_plate_project_bytes`): the
+layout goes in the standard model part, so other slicers can open it, and the
+enabled flags and every object's own settings go in `Metadata/hfw_project.xml`
+beside it. Settings are written as the name and value an operator would type, via
+`Settings::key_value`, which is the inverse of the parser — a value the file holds
+always reads back to the settings it came from, and every published key is tested
+for it. A plate that is saved and reopened slices to byte-identical G-code, which is
+what the gate and the plate tests assert.
+
+**What is still needed.** AMF; plate-wide settings in the project part (only the
+print-level per-object keys travel today, because those are the ones with an
+inverse); instances, so one mesh shared by four build items is stored once; and
+paint, which the plan puts out of scope.
 
 **Check.** A multi-plate 3MF imports with the same object count, transforms and
 layer counts as libslic3r produces from the same file.
@@ -198,6 +215,21 @@ from HFW and from libslic3r agree within a stated tolerance on: extruded volume
 per feature class, layer count, per-layer path length, and total time estimate.
 Divergences beyond tolerance are listed with a cause, exactly as `docs/ORACLE.md`
 does for the two reference slicers.
+
+## Out of scope
+
+Seven features the reference slicers ship and this engine will not build: painting,
+text embossing, cut and hollow, STEP import, SLA, MMU colour mixing, and a nesting
+arranger. The list, what each would cost, and the setting that stands in for it is
+`docs/SCOPE.md`, generated from the same table that gives the application's panel its
+`capabilities` rows — so a control marked unavailable in the UI and a paragraph in
+this repository cannot disagree. The disposition is a product decision with stated
+reversal conditions, not an oversight: DECISION-16.
+
+The complement is what matters for parity. Nothing on that list has a setting the
+engine parses and ignores: MMU's keys are `n/a` or `missing` in
+`SETTINGS-LEDGER.md`, and every key the ledger calls `applied` is read by the
+pipeline somewhere outside `crates/config`.
 
 ## How the swap happens
 

@@ -19,7 +19,7 @@ Written for someone who does not write Rust. Every command is copy-paste. Every 
 Every command below assumes you are in the project directory. Fish:
 
 ```fish
-cd ~/dev/HFW/HFW-final
+cd ~/dev/HFW
 ```
 
 If `cd` fails, the path is wrong — stop there, nothing else will work.
@@ -29,7 +29,7 @@ If `cd` fails, the path is wrong — stop there, nothing else will work.
 There is no window. The program is one executable file, built from source, sitting at:
 
 ```
-~/dev/HFW/HFW-final/target/debug/hfw-cli
+~/dev/HFW/target/debug/hfw-cli
 ```
 
 That is the slicer. You run it like any terminal command: give it a model, a profile, and tell it
@@ -265,7 +265,7 @@ sets are correct; only compare numbers produced the same way.
 Give the slicer both paths. Order matters only for plate position:
 
 ```fish
-cd ~/dev/HFW/HFW-final
+cd ~/dev/HFW
 ./target/debug/hfw-cli fixtures/cube.stl fixtures/cube.stl --profile profiles/voron_klipper.cfg --layer-height 0.2 --out-dir /tmp/p2 --gcode /tmp/p2.gcode
 ```
 

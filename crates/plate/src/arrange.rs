@@ -13,6 +13,118 @@
 //! turn, because a part that is 200 mm long and 30 mm wide across is a different
 //! problem on a 250 mm bed than on a 350 mm one.
 
+use hfw_engine::MeshTransform;
+
+/// One object as the arranger sees it: where its box is now, and whether a file
+/// put it there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Footprint {
+    /// Lowest and highest X and Y of the object, in millimetres.
+    pub bounds: (f64, f64, f64, f64),
+    /// True when the file placed this object, so its coordinates are kept.
+    pub positioned: bool,
+}
+
+/// The transform that puts an object whose bounds are `bounds` where `placement`
+/// says, turning it a quarter turn when the packer did.
+pub fn transform_for(bounds: (f64, f64, f64, f64), placement: Placement) -> MeshTransform {
+    let (min_x, min_y, max_x, max_y) = bounds;
+    if !placement.rotated {
+        return MeshTransform {
+            translation_mm: [placement.x - min_x, placement.y - min_y, 0.0],
+            ..MeshTransform::default()
+        };
+    }
+    let (centre_x, centre_y) = (0.5 * (min_x + max_x), 0.5 * (min_y + max_y));
+    MeshTransform {
+        rotation_degrees: [0.0, 0.0, 90.0],
+        translation_mm: [
+            placement.x + 0.5 * (max_y - min_y) - centre_x,
+            placement.y + 0.5 * (max_x - min_x) - centre_y,
+            0.0,
+        ],
+        ..MeshTransform::default()
+    }
+}
+
+/// Where every object goes: one transform per footprint, in the order given.
+///
+/// Objects a file positioned keep their coordinates, and the rest are laid out to
+/// their right, wrapping as the bed runs out. When nothing was positioned the
+/// packer takes the whole bed instead, turning a part a quarter turn where that is
+/// what makes it fit. The two rules are here together because they are one
+/// decision: a plate with a file's layout keeps it.
+pub fn layout(
+    items: &[Footprint],
+    bed: (f64, f64),
+    spacing: f64,
+) -> Result<Vec<MeshTransform>, TooLarge> {
+    if !items.iter().any(|item| item.positioned) {
+        let boxes: Vec<Item> = items
+            .iter()
+            .map(|item| Item {
+                width: item.bounds.2 - item.bounds.0,
+                height: item.bounds.3 - item.bounds.1,
+            })
+            .collect();
+        let placements = pack(&boxes, bed, spacing)?;
+        return Ok(items
+            .iter()
+            .zip(placements)
+            .map(|(item, placement)| transform_for(item.bounds, placement))
+            .collect());
+    }
+
+    let row_start = items
+        .iter()
+        .filter(|item| item.positioned)
+        .map(|item| item.bounds.2)
+        .fold(None::<f64>, |worst, right| {
+            Some(worst.map_or(right, |worst: f64| worst.max(right)))
+        })
+        .map_or(0.0, |right| right + spacing);
+    let row_y = items
+        .iter()
+        .filter(|item| item.positioned)
+        .map(|item| item.bounds.1)
+        .fold(None::<f64>, |best, low| {
+            Some(best.map_or(low, |best: f64| best.min(low)))
+        })
+        .unwrap_or(0.0);
+
+    let mut transforms = Vec::with_capacity(items.len());
+    let mut cursor_x = row_start;
+    let mut cursor_y = row_y;
+    let mut row_height: f64 = 0.0;
+    for (index, item) in items.iter().enumerate() {
+        if item.positioned {
+            transforms.push(MeshTransform::default());
+            continue;
+        }
+        let (min_x, min_y, max_x, max_y) = item.bounds;
+        let (width, height) = (max_x - min_x, max_y - min_y);
+        if cursor_x > row_start && cursor_x + width > bed.0 {
+            cursor_x = row_start;
+            cursor_y += row_height + spacing;
+            row_height = 0.0;
+        }
+        if cursor_x + width > bed.0 || cursor_y + height > bed.1 {
+            return Err(TooLarge {
+                item: index,
+                footprint: (width, height),
+                bed,
+            });
+        }
+        transforms.push(MeshTransform {
+            translation_mm: [cursor_x - min_x, cursor_y - min_y, 0.0],
+            ..MeshTransform::default()
+        });
+        cursor_x += width + spacing;
+        row_height = row_height.max(height);
+    }
+    Ok(transforms)
+}
+
 /// Footprint of one object, in millimetres.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Item {

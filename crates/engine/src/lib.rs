@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+use hfw_config::PrinterConfig;
 use hfw_geometry::Contour;
 use hfw_infill::{infill_layer as generate_infill, Combine};
 use hfw_kernel::Region;
@@ -19,6 +20,7 @@ use hfw_toolpath::{evaluate, evaluate_full, extruded_volume, PlannedLayer};
 use hfw_walls::BrimSide;
 
 pub use hfw_geometry::{Contour as SliceContour, Point2};
+mod settings_key;
 pub use hfw_infill::{
     infill_layer, InfillParams, InfillParams as InfillSettings, IroningTarget, MaskCache,
     Pattern as InfillPattern, SkinPattern, VerticalShell,
@@ -40,6 +42,7 @@ pub use hfw_toolpath::{
 pub use hfw_walls::{
     generate as generate_walls, Kind as PathKind, Line as Path, WallMode as Mode, WallParams,
 };
+pub use settings_key::{KeyError, PER_OBJECT_KEYS};
 
 /// Engine-wide settings for one job.
 #[derive(Clone, Debug)]
@@ -193,6 +196,303 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings::new(0.4, 3)
     }
+}
+
+impl Settings {
+    /// Layers a preset's process keys onto these settings.
+    ///
+    /// This is the one reader every front end uses: the command line calls it
+    /// after parsing its own flags, the C ABI calls it for the profile a caller
+    /// handed over. A key added here reaches both at once, and a key missed here
+    /// is missed by both — which is what keeps a preset from meaning two things.
+    /// Machine and filament keys that only the G-code writer reads stay on the
+    /// [`PrinterConfig`] itself.
+    pub fn apply_printer(&mut self, cfg: &PrinterConfig) {
+        self.spiral_vase = cfg.spiral_vase;
+        if cfg.variable_layer_height {
+            self.layer_profile = cfg.layer_height_profile.clone();
+        }
+        self.min_layer_height = cfg.min_layer_height;
+        self.max_layer_height = cfg.max_layer();
+        self.wall.w = if cfg.wall_width > 0.0 {
+            cfg.wall_width
+        } else {
+            cfg.line_width
+        };
+        self.wall.w_outer = cfg.outer_wall_width;
+        self.ironing = cfg.ironing;
+        self.ironing_target = match cfg.ironing_type.as_str() {
+            "all_solid" => IroningTarget::AllSolid,
+            "topmost_only" => IroningTarget::TopmostOnly,
+            _ => IroningTarget::TopSurfaces,
+        };
+        self.ironing_spacing = cfg.ironing_spacing;
+        self.wall.walls = cfg.walls;
+        self.wall.thin_walls = cfg.thin_walls;
+        self.wall.gap_fill = cfg.gap_fill_enabled;
+        self.wall.distribution = cfg.wall_distribution_count;
+        self.nozzle = cfg.nozzle_diameter;
+        self.first_layer_width = cfg.first_layer_width;
+        self.extra_perimeters = cfg.extra_perimeters;
+        self.extra_perimeters_overhangs = cfg.extra_perimeters_on_overhangs;
+        self.one_perimeter_first_layer = cfg.only_one_perimeter_first_layer;
+        self.one_perimeter_top = if cfg.top_one_perimeter_type == "none" {
+            String::new()
+        } else {
+            cfg.top_one_perimeter_type.clone()
+        };
+        self.measure_overhang =
+            cfg.overhangs && (cfg.dynamic_overhang_speeds || cfg.dynamic_fan_speeds);
+        if cfg.wall_transition_angle > 0.0 {
+            self.wall.corner_deg = cfg.wall_transition_angle;
+        }
+        if cfg.perimeter_generator == "classic" {
+            self.mode = Mode::Classic;
+        }
+        self.wall.min_feature = if cfg.min_feature_size >= 0.0 {
+            cfg.min_feature_size
+        } else {
+            0.25 * cfg.nozzle_diameter
+        };
+        self.brim_loops = cfg.adhesion_brim_loops();
+        self.brim_gap = cfg.brim_gap;
+        self.elephant_foot = cfg.elefant_foot_compensation;
+        self.xy_size = cfg.xy_size_compensation;
+        self.closing_radius = cfg.slice_closing_radius;
+        self.resolution = cfg.resolution;
+        if let Some(ip) = self.infill.as_mut() {
+            ip.density = cfg.infill_density;
+            ip.width = if cfg.infill_width > 0.0 {
+                cfg.infill_width
+            } else {
+                cfg.line_width
+            };
+            ip.solid_width = cfg.solid_infill_width;
+            ip.top_width = cfg.top_infill_width;
+            ip.top_pattern = skin_pattern(&cfg.top_fill_pattern).unwrap_or(SkinPattern::Monotonic);
+            ip.bottom_pattern =
+                skin_pattern(&cfg.bottom_fill_pattern).unwrap_or(SkinPattern::Monotonic);
+            ip.solid_every = cfg.solid_infill_every_layers;
+            ip.solid_below_area = cfg.solid_infill_below_area;
+            ip.combine_layers = cfg.infill_every_layers.max(1);
+            ip.combine_auto = cfg.automatic_infill_combination;
+            ip.combine_max_height = cfg.infill_combination_max_layer_height;
+            ip.top_layers = solid_layers(
+                cfg.top_layers,
+                cfg.top_solid_min_thickness,
+                cfg.layer_height,
+            );
+            ip.bottom_layers = solid_layers(
+                cfg.bottom_layers,
+                cfg.bottom_solid_min_thickness,
+                cfg.layer_height,
+            );
+            ip.vertical_shell = match cfg.ensure_vertical_shell_thickness.as_str() {
+                "disabled" => VerticalShell::Disabled,
+                "partial" => VerticalShell::Partial,
+                _ => VerticalShell::Enabled,
+            };
+            ip.overlap = if cfg.infill_overlap >= 0.0 {
+                cfg.infill_overlap * ip.width
+            } else {
+                0.1 * ip.width
+            };
+            ip.pattern = infill_pattern(&cfg.infill_pattern).unwrap_or(InfillPattern::Rectilinear);
+            ip.fill_angle = cfg.fill_angle;
+            ip.bridge.density = cfg.bridge_density;
+            ip.bridge.cross_hatch = cfg.bridge_cross_hatch;
+            ip.bridge.width = if cfg.bridge_line_width > 0.0 {
+                cfg.bridge_line_width
+            } else {
+                cfg.line_width
+            };
+            ip.bridge.angle = if cfg.bridge_angle >= 0.0 {
+                Some(cfg.bridge_angle)
+            } else {
+                None
+            };
+            ip.bridge.max_length = cfg.max_bridge_length;
+            ip.anchor = if cfg.infill_anchor >= 0.0 {
+                cfg.infill_anchor
+            } else {
+                6.0 * ip.width
+            };
+            ip.anchor_max = cfg.infill_anchor_max;
+        }
+        self.support = if cfg.support {
+            Some(support_from(cfg))
+        } else {
+            None
+        };
+    }
+}
+
+/// Maps a profile's infill-pattern name onto the geometry this engine draws.
+///
+/// The dialect names are Orca's and PrusaSlicer's, and a profile may carry a
+/// pattern this engine has no geometry for. Those are reported as unapplied by
+/// the intake rather than silently printed as something else, so this returns
+/// `None` and the caller decides.
+pub fn infill_pattern(name: &str) -> Option<InfillPattern> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "grid" => Some(InfillPattern::Grid),
+        "rectilinear" | "rectilinear_infill" => Some(InfillPattern::Rectilinear),
+        "line" | "lines" => Some(InfillPattern::Line),
+        "triangle" | "triangles" => Some(InfillPattern::Triangle),
+        "cubic" => Some(InfillPattern::Cubic),
+        "gyroid" => Some(InfillPattern::Gyroid),
+        "3d_honeycomb" | "3dhoneycomb" | "honeycomb_3d" => Some(InfillPattern::Honeycomb3D),
+        "concentric" => Some(InfillPattern::Concentric),
+        "zigzag" | "zig_zag" => Some(InfillPattern::ZigZag),
+        "crosshatch" | "cross_hatch" => Some(InfillPattern::CrossHatch),
+        "honeycomb" | "hexagon" => Some(InfillPattern::Honeycomb),
+        "monotonic" => Some(InfillPattern::Monotonic),
+        "monotonicline" | "monotoniclines" | "monotonic_line" => {
+            Some(InfillPattern::MonotonicLines)
+        }
+        _ => None,
+    }
+}
+
+/// The dialect name of an infill pattern: what [`infill_pattern`] reads back.
+///
+/// A project file records settings as names, so the pair lives here; a name this
+/// returns is always one the parser accepts.
+pub fn infill_pattern_name(pattern: InfillPattern) -> &'static str {
+    match pattern {
+        InfillPattern::Grid => "grid",
+        InfillPattern::Rectilinear => "rectilinear",
+        InfillPattern::Line => "line",
+        InfillPattern::Triangle => "triangle",
+        InfillPattern::Cubic => "cubic",
+        InfillPattern::Gyroid => "gyroid",
+        InfillPattern::Honeycomb3D => "3d_honeycomb",
+        InfillPattern::Concentric => "concentric",
+        InfillPattern::ZigZag => "zigzag",
+        InfillPattern::CrossHatch => "crosshatch",
+        InfillPattern::Honeycomb => "honeycomb",
+        InfillPattern::Monotonic => "monotonic",
+        InfillPattern::MonotonicLines => "monotoniclines",
+    }
+}
+
+/// Maps a profile's skin-pattern name onto the skin fill this engine draws.
+///
+/// The parser has already refused anything outside this list, so the caller
+/// decides what an unknown name means: the profile path takes the default,
+/// while a per-object key refuses it and says so.
+fn skin_pattern(name: &str) -> Option<SkinPattern> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "rectilinear" => Some(SkinPattern::Rectilinear),
+        "monotoniclines" => Some(SkinPattern::MonotonicLines),
+        "alignedrectilinear" => Some(SkinPattern::AlignedRectilinear),
+        "concentric" => Some(SkinPattern::Concentric),
+        "hilbertcurve" => Some(SkinPattern::HilbertCurve),
+        "archimedeanchords" => Some(SkinPattern::ArchimedeanChords),
+        "octagramspiral" => Some(SkinPattern::OctagramSpiral),
+        "monotonic" => Some(SkinPattern::Monotonic),
+        _ => None,
+    }
+}
+
+/// The dialect name of a skin pattern: what [`skin_pattern`] reads back.
+pub fn skin_pattern_name(pattern: SkinPattern) -> &'static str {
+    match pattern {
+        SkinPattern::Rectilinear => "rectilinear",
+        SkinPattern::MonotonicLines => "monotoniclines",
+        SkinPattern::AlignedRectilinear => "alignedrectilinear",
+        SkinPattern::Concentric => "concentric",
+        SkinPattern::HilbertCurve => "hilbertcurve",
+        SkinPattern::ArchimedeanChords => "archimedeanchords",
+        SkinPattern::OctagramSpiral => "octagramspiral",
+        SkinPattern::Monotonic => "monotonic",
+    }
+}
+
+/// Solid top and bottom layer count, raised to the thickness the profile asks
+/// for when that needs more layers than the count states.
+fn solid_layers(configured: usize, min_thickness: f64, layer_height: f64) -> usize {
+    if min_thickness <= 0.0 || layer_height <= 0.0 {
+        return configured;
+    }
+    let from_thickness = (min_thickness / layer_height).ceil() as usize;
+    configured.max(from_thickness)
+}
+
+/// Turns a profile's support keys into the support generator's parameters.
+fn support_from(cfg: &PrinterConfig) -> SupportParams {
+    let mut sp = SupportParams::new(if cfg.support_width > 0.0 {
+        cfg.support_width
+    } else {
+        cfg.line_width
+    });
+    sp.interface_width = cfg.support_interface_width;
+    let interface_width = if sp.interface_width > 0.0 {
+        sp.interface_width
+    } else {
+        sp.width
+    };
+    let density_from_spacing = |width: f64, spacing: f64| {
+        if spacing == 0.0 {
+            1.0
+        } else {
+            (width / spacing).min(1.0)
+        }
+    };
+    sp.threshold_angle = cfg.support_threshold_angle;
+    sp.xy_gap = cfg.support_xy_gap;
+    sp.z_gap = cfg.support_z_gap;
+    sp.interface_layers = cfg.support_interface_layers;
+    sp.density = if cfg.support_spacing >= 0.0 {
+        density_from_spacing(sp.width, cfg.support_spacing)
+    } else {
+        cfg.support_density
+    };
+    sp.interface_density = if cfg.support_interface_spacing >= 0.0 {
+        density_from_spacing(interface_width, cfg.support_interface_spacing)
+    } else {
+        cfg.support_interface_density
+    };
+    sp.on_build_plate_only = cfg.support_on_build_plate_only;
+    sp.min_area = cfg.support_min_area;
+    sp.style = if cfg.support_style == "tree" {
+        SupportStyle::Tree
+    } else {
+        SupportStyle::Normal
+    };
+    sp.branch_angle = cfg.support_branch_angle;
+    sp.branch_distance = cfg.support_branch_distance;
+    sp.tip_diameter = cfg.support_tip_diameter;
+    sp.branch_diameter_angle = cfg.support_branch_diameter_angle;
+    sp.max_branch_diameter = cfg.support_max_branch_diameter;
+    sp.pattern = if cfg.support_pattern == "grid" {
+        SupportFill::Grid
+    } else {
+        SupportFill::Rectilinear
+    };
+    sp.first_layer_density = cfg.support_first_layer_density;
+    sp.interface_pattern = match cfg.support_interface_pattern.as_str() {
+        "grid" => Some(SupportFill::Grid),
+        "rectilinear" => Some(SupportFill::Rectilinear),
+        _ => None,
+    };
+    sp.interface_loops = if cfg.support_interface_shells {
+        cfg.support_interface_loops.max(2)
+    } else {
+        cfg.support_interface_loops
+    };
+    sp.sheath = cfg.support_sheath;
+    sp.first_layer_expansion = cfg.support_first_layer_expansion;
+    sp.enforce_layers = cfg.support_enforce_layers;
+    sp.bottom_interface_layers = cfg.support_bottom_interface_layers;
+    sp.tree_angle_slow = cfg.support_tree_angle_slow;
+    sp.tree_top_rate = cfg.support_tree_top_rate;
+    sp.tree_double_wall = cfg.support_tree_double_wall;
+    sp.closing_radius = cfg.support_closing_radius;
+    sp.bottom_contact_distance = cfg.support_bottom_contact_distance;
+    sp.skip_bridges = cfg.support_skip_bridges;
+    sp.bridge_span = cfg.max_bridge_length;
+    sp
 }
 
 /// Errors that can stop a job.
@@ -354,6 +654,95 @@ pub struct Job {
     pub worst_layer: usize,
     /// Layers that produced no closed cross-section, with the reason.
     pub skipped: Vec<(usize, String)>,
+}
+
+/// How a plate of objects becomes one file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlateOrder {
+    /// Every object's layer N, then every object's layer N+1.
+    ByLayer,
+    /// One object's whole stack, then the next object's.
+    ByObject,
+}
+
+/// Composes objects sliced on their own into one plate job.
+///
+/// Each object is sliced and planned independently, which is what lets two
+/// objects on one plate carry different settings; the stacks are interleaved into
+/// print order here. Paths are relabelled with the object they belong to, because
+/// that label is the only thing that changes their order within a layer, and the
+/// per-object counters, metrics and skipped layers are folded into the job's.
+pub fn merge_stacks(mut stacks: Vec<Job>, order: PlateOrder, diagnostics: MeshDiagnostics) -> Job {
+    let mut job = Job {
+        mesh_diagnostics: diagnostics,
+        repair: MeshRepairReport::default(),
+        layers: Vec::new(),
+        metrics: Vec::new(),
+        volume: (0.0, 0.0),
+        stats: JobStats::default(),
+        worst_layer_ms: 0.0,
+        worst_layer: 0,
+        skipped: Vec::new(),
+    };
+    let tallest = stacks
+        .iter()
+        .map(|stack| stack.layers.len())
+        .max()
+        .unwrap_or(0);
+    for step in 0..stacks.len() * tallest {
+        let (object, layer_index) = match order {
+            PlateOrder::ByObject => (step / tallest.max(1), step % tallest.max(1)),
+            PlateOrder::ByLayer => (step % stacks.len(), step / stacks.len().max(1)),
+        };
+        let Some(stack) = stacks.get_mut(object) else {
+            continue;
+        };
+        let base = job.layers.len();
+        let Some(mut layer) = stack.layers.get(layer_index).cloned() else {
+            continue;
+        };
+        if layer.paths.is_empty() && !layer.first {
+            continue;
+        }
+        layer.first = layer_index == 0;
+        layer.index = base;
+        let label = u16::try_from(object).unwrap_or(u16::MAX);
+        for line in &mut layer.paths {
+            line.object = label;
+        }
+        job.layers.push(layer);
+    }
+    for stack in stacks.iter_mut() {
+        let base = job.layers.len();
+        for (offset, reason) in std::mem::take(&mut stack.skipped) {
+            job.skipped.push((base + offset, reason));
+        }
+        job.metrics.append(&mut stack.metrics);
+        job.volume.0 += stack.volume.0;
+        job.volume.1 += stack.volume.1;
+        add_stats(&mut job.stats, &stack.stats);
+        if stack.worst_layer_ms > job.worst_layer_ms {
+            job.worst_layer_ms = stack.worst_layer_ms;
+            job.worst_layer = base + stack.worst_layer;
+        }
+    }
+    job
+}
+
+/// Adds one object's counters into the plate's.
+fn add_stats(total: &mut JobStats, extra: &JobStats) {
+    total.layers += extra.layers;
+    total.processed_layers += extra.processed_layers;
+    total.triangles_tested += extra.triangles_tested;
+    total.wall_loops += extra.wall_loops;
+    total.gap_strands += extra.gap_strands;
+    total.wall_points += extra.wall_points;
+    total.ms_slice += extra.ms_slice;
+    total.ms_walls += extra.ms_walls;
+    total.ms_infill += extra.ms_infill;
+    total.ms_support += extra.ms_support;
+    total.ms_metrics += extra.ms_metrics;
+    total.ms_offset += extra.ms_offset;
 }
 
 /// True when an ironing pass belongs on this layer.

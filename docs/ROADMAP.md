@@ -42,14 +42,34 @@ each phase lands as a crate here:
 
 | Phase | Crate | What it is |
 | --- | --- | --- |
-| 1 | `crates/capi` | The C ABI: mesh handles in, slice out, so the application can hold geometry without a process |
-| 2 | `crates/plate` | The plate model: object, mesh, transform, per-object settings, instances |
-| 3 | — (extends `crates/config`) | The settings surface next-layer's panel reads, as JSON |
-| 5 | — (extends `crates/mesh`, `crates/geometry`) | Load, transform, scale, rotate, shelf layout |
-| 6 | — (extends `crates/mesh/threemf.rs`) | Writing a `.3mf` project, not only reading one |
+| 1 | `crates/capi` — **landed 2026-11-20** | The C ABI: mesh handles in, slice out, so the application can hold geometry without a process. `include/hfw.h` is the promise; the gate compiles a C program against it and runs it. |
+| 2 | `crates/plate` — **landed 2026-11-20** | The plate model: object, mesh, transform, per-object settings, instances |
+| 4 | — (extends `crates/plate` and `crates/capi`) — **landed 2026-11-20** | The preview document: `hfw_plate_preview_json` returns every planned bead per layer with position, per-vertex width, flow and the writer's own `;TYPE:` label, so the application's viewer draws from the engine instead of linking `libvgcode`. Progress and cancel are here too: `hfw_job_start` plans on its own thread, `hfw_job_poll` reports the stage and counters, `hfw_job_cancel` stops between objects, and a cancelled job yields no G-code. Progress is polled, not delivered by callback — see DECISION-13 |
+| 6 | — (extends `crates/mesh`, `crates/plate`, `crates/capi`) — **landed 2026-11-20** | A plate saved as a `.3mf` reopens as the same plate and slices to the same bytes. The plan called for `crates/threemf`; 3MF lives in `crates/mesh/src/threemf.rs` and grew the write side there. Still open: plate-wide settings in the project part (only the per-object print keys travel, the ones `key_value` can invert), instances, and a `--project-out` flag on the command line — the application drives this through the ABI, which is where it is proved |
+| 5 | — (extends `crates/plate` and `crates/capi`) — **landed 2026-11-20** | Load, scale, rotate, translate, mirror, delete and duplicate are in the document and the ABI; the arranging packer moved out of `cli` into `crates/plate`, so a panel and the command line lay a plate out with the same code. Shelf layout only, as the plan says: a nesting arranger stays out of scope |
+| 3 | — (extends `crates/config` and `crates/engine`) — **landed 2026-11-20** | The settings surface next-layer's panel reads, as JSON: `--settings-surface`, `hfw_settings_surface_json`, `hfw_config::surface::json()`, generated beside the ledger so the two numbers cannot drift. Plus per-object settings over the ABI: `Settings::apply_key` sets one print-level setting on one object, accepting either spelling, backed by `hfw_plate_object_set` and `--object-settings`, with 52 published keys and a refusal that names the key and what it accepts |
+| 7 | — (extends `tools/gen-settings-ledger.py`) — **settled 2026-11-20** | Paint, text embossing, cut/hollow, STEP import, SLA, MMU and a nesting arranger are not built, and now say so in one place: the settings surface carries seven `capabilities` rows with `disposition: out_of_scope`, `panel: unavailable` and the setting to use instead, and the same run writes `docs/SCOPE.md`. The gate checks the list from outside Rust. Nothing in the engine pretends: none of the seven has a setting that parses, and every setting the ledger calls applied is read by the pipeline — fuzzy skin included, which the first draft of this row got wrong |
+
+`AGENTS.md`'s "generated documents are generated" now covers four artifacts from
+one run: `docs/SETTINGS-LEDGER.md`, `docs/SETTINGS-GAPS.md`, `docs/SCOPE.md` and
+`crates/config/assets/settings-surface.json`.
 
 These are additions to what is here, not a rewrite of it: the slicing path those
 crates serve is the one already tested by the gate.
+
+Phase 1 left two things to the phases that own them: per-object settings on the
+ABI (phase 3) and the structured toolpath buffer a preview wants (phase 4, so the
+ABI returns the G-code file and its verifier verdict, not paths).
+
+Phase 2 landed the document and its ABI: `crates/plate` holds objects with a
+stable id, a name, geometry, a placement and per-object settings, and `capi`
+carries them as `hfw_plate_*` handles. What it does not have, and phase 5 owns: an
+arranger (the CLI still packs its own plate), copies of one object as separate
+instances, and the transform gestures a view drives. `hfw-cli` still assembles its
+plate with its own `PlatePart`; moving it onto `crates/plate` belongs to phase 5,
+when the CLI's load path becomes the app's plate operations, and is deliberately
+not riding along with the model's landing because its geometry-in-place order is
+what the gate's plate sections pin.
 
 ## The order of work
 

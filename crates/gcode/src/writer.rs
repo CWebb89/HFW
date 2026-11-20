@@ -1026,7 +1026,11 @@ fn trim_open(pts: &[V2], width: &[f64], floor: f64) -> Option<(Vec<V2>, Vec<f64>
     Some((out_pts, out_width))
 }
 
-fn feature_of(kind: Kind) -> Feature {
+/// The `;TYPE:` feature a bead belongs to.
+///
+/// The preview and the file share this one mapping, so a viewer cannot group a
+/// path differently from the G-code a printer runs.
+pub fn feature_of(kind: Kind) -> Feature {
     match kind {
         Kind::Side(0) => Feature::Outer,
         Kind::Side(_) => Feature::Inner,

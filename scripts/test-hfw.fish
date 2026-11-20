@@ -36,6 +36,19 @@ cargo test --workspace --all-targets --release; or fail 'tests failed'
 section 'Release build'
 cargo build --release --workspace; or fail 'release build failed'
 
+section 'The C ABI holds a mesh and a plate document, and slices either'
+if not command -q cc
+    printf 'skipped: no C compiler is installed.\n'
+else
+    set -l libdir (realpath target/release)
+    cc -std=c11 -Wall -Wextra -Werror -I crates/capi/include crates/capi/tests/smoke.c \
+        -L "$libdir" -lhfw_capi -Wl,-rpath,"$libdir" -o "$tmp/hfw-smoke"
+    or fail 'the C smoke program did not compile against crates/capi/include/hfw.h'
+    "$tmp/hfw-smoke" fixtures/cube.stl profiles/voron_klipper.cfg >"$tmp/abi.log"
+    or fail 'the C ABI smoke program failed'
+    cat "$tmp/abi.log"
+end
+
 section 'One layer, exact geometry'
 $bin fixtures/cube_20mm_ascii.stl --z 10 --svg "$tmp/one.svg" >"$tmp/one.log"
 or fail 'slicing one layer failed'
@@ -402,13 +415,21 @@ printf 'Verified: profile validation runs before slicing.\n'
 
 section 'Generated tables are current'
 python3 tools/gen-settings-ledger.py --check
-or fail 'the settings ledger is stale'
+or fail 'the settings ledger or the settings surface is stale'
 python3 tools/gen-dialect-table.py --check
 or fail 'the dialect table is stale'
 python3 tools/gen-alias-table.py --check
 or fail 'the alias table is stale'
 python3 tools/gen-settings-gaps.py --check
 or fail 'the gap breakdown is stale'
+
+section 'The settings surface is one document the panel can read'
+python3 -c 'import json; d = json.load(open("crates/config/assets/settings-surface.json")); assert d["surface"] == "hfw-settings"; assert len(d["settings"]) == d["counts"]["settings"]; assert all(row["status"] in d["statuses"] for row in d["settings"]); caps = d["capabilities"]; assert len(caps) == 7 and len({c["id"] for c in caps}) == 7, "the out-of-scope list is malformed"; assert all(c["disposition"] == "out_of_scope" and c["panel"] == "unavailable" and c["note"] for c in caps), "a capability is missing its disposition"; assert not {c["id"] for c in caps} & {row["name"] for row in d["settings"]}, "a capability is also a setting"; print("Verified: the surface describes", len(d["settings"]), "settings,", d["counts"]["applied"], "of them applied,", len(caps), "capabilities declined.")'
+or fail 'the settings surface is not valid JSON, or its counts disagree with its rows'
+$bin --settings-surface "$tmp/surface.json" >/dev/null
+or fail 'the command line could not write the settings surface'
+cmp -s "$tmp/surface.json" crates/config/assets/settings-surface.json
+or fail 'the surface the command line writes is not the one in the build'
 printf 'Verified: ledger, dialect, alias and gap tables all regenerate identically.\n'
 
 section '3MF import slices the same cube as STL'
@@ -1885,6 +1906,24 @@ $bin fixtures/cube.stl fixtures/sphere.stl --preset "$tmp/base.cfg" --layer-heig
  or fail 'the same plate without per-object settings failed to slice'
 cmp -s "$tmp/os.gcode" "$tmp/os-plain.gcode"
  and fail 'per-object settings changed nothing in the output'
+
+printf '1 support_xy_gap = 0.2\n1 support_threshold_angle = 40\n' >"$tmp/objset2.txt"
+$bin fixtures/cube.stl fixtures/sphere.stl --preset "$tmp/base.cfg" --layer-height 0.2 \
+    --object-settings "$tmp/objset2.txt" --no-arrange \
+    --out-dir "$tmp/os-support" --gcode "$tmp/os-support.gcode" >"$tmp/os2.out" 2>&1
+ or fail 'support settings on one object failed to slice'
+grep -q 'overrides: support_xy_gap, support_threshold_angle' "$tmp/os2.out"
+ or fail 'the support settings did not reach the object they name'
+cmp -s "$tmp/os-support.gcode" "$tmp/os-plain.gcode"
+ and fail 'per-object support settings changed nothing in the output'
+
+printf '1 layer_height = 0.3\n' >"$tmp/objset3.txt"
+$bin fixtures/cube.stl fixtures/sphere.stl --preset "$tmp/base.cfg" --layer-height 0.2 \
+    --object-settings "$tmp/objset3.txt" --no-arrange \
+    --out-dir "$tmp/os-refused" --gcode "$tmp/os-refused.gcode" >"$tmp/os3.out" 2>&1
+ or fail 'a plate with a per-object key this engine cannot apply failed to slice'
+grep -q 'need a feature this engine does not have per object: layer_height = 0.3' "$tmp/os3.out"
+ or fail 'a per-object key the engine cannot apply was not reported by name and value'
 
 section 'Per-layer expressions'
 

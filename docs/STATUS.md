@@ -3,8 +3,9 @@
 Written to be read in two minutes, by someone who does not work on this code.
 Every number here is measured, and the command that measures it is named.
 
-Updated 2026-11-19 (fifth pass: walls back to polygon offsets, the gap pass and the
-infill scanline measured and made cheaper, the G-code router de-quadraticked).
+Updated 2026-11-20 (thirteenth pass: the out-of-scope list — seven features declined
+in writing, in the same document the application's panel reads — which settles phase
+7 of the engine-replacement plan; the slicing path itself is untouched).
 
 ## In one paragraph
 
@@ -27,7 +28,7 @@ deciding whether to swap.
 |---|---|---|---|
 | Settings coverage | **299 of 364** (82%) | of every setting the reference slicers define and a one-extruder machine can use, 299 change the output | `python3 tools/gen-settings-ledger.py --check` |
 | Single-extruder coverage | **299 of 307** (97%) | the same, ignoring the 57 rows that need a second extruder | same |
-| Automated gate | **80 sections, all passing** | every feature is exercised by running the real program and reading the real file | `fish scripts/test-hfw.fish` |
+| Automated gate | **82 sections, all passing** | every feature is exercised by running the real program and reading the real file | `fish scripts/test-hfw.fish` |
 
 Two more that matter when deciding whether to trust the output:
 
@@ -64,6 +65,52 @@ Two more that matter when deciding whether to trust the output:
 - Seams and surface: scarf ramps, staggered seams, fuzzy skin.
 - Emission: two dialects, machine limits, pressure advance, cooling, thumbnails,
   pauses, substitutions, and a verifier that re-reads the file and checks it.
+- The C ABI (`crates/capi`, version 1): the application holds a mesh or a plate
+  without a process, moves it, and asks for G-code, receiving the file plus the
+  verifier's own verdict. `crates/capi/include/hfw.h` is the promise; the gate
+  compiles a C program against it and runs it. See `NEXTLAYER-BRIDGE.md`.
+- The plate document (`crates/plate`): objects with a name, a placement and
+  per-object settings, enabled or not, sliced into one job. This is the object
+  phase 3 (settings), phase 4 (preview) and phase 6 (project files) attach to.
+- A job on its own thread (`hfw_job_start`, `hfw_job_poll`, `hfw_job_cancel`,
+  `hfw_job_wait`, `hfw_job_take_gcode`, `hfw_job_free`): progress per object while
+  planning and per layer while writing, cancellation observed between objects and
+  before the write. A cancelled job yields no file. The threaded job writes
+  byte-identical G-code to the synchronous slice — the gate compares the two.
+- Scope: `docs/SCOPE.md` (generated) and the surface's `capabilities` array — paint,
+  text, cut/hollow, STEP, SLA, MMU and nesting, each with the setting that stands in.
+  None of the seven has a setting the engine parses, so asking for one is refused by
+  name.
+- Project files: `Plate::to_project`/`from_project`/`save_project`/`open_project`,
+  `hfw_plate_project_bytes`/`hfw_plate_open_project`/`hfw_buffer_free`. A saved plate
+  reopened slices to byte-identical G-code — asserted in the plate tests, in the ABI
+  tests and in the C smoke program. `Settings::key_value` inverts `apply_key` for
+  every published key, and a test walks all 52 to prove the value written reads back.
+- Plate operations: `hfw_plate_object_duplicate`, `hfw_plate_object_rotate` (about
+  the object's own centre), `hfw_plate_object_mirror` (in place, winding corrected)
+  and `hfw_plate_arrange` over a bed and a spacing. Scale, translate and any
+  placement remain `hfw_plate_object_placement`. The arranger is one implementation
+  in `crates/plate/src/arrange.rs`, used by the command line and by the ABI alike;
+  it packs unpositioned objects on a MaxRects layout and leaves objects a project
+  file positioned where they are. A part that does not fit is refused with its size
+  rather than dropped.
+- The preview document (`hfw_plate_preview_json`, `hfw_string_free`): every planned
+  bead with its position, per-vertex width, flow multiplier and the label the G-code
+  writer gives it, grouped per layer. The label comes from the writer's own mapping,
+  so a viewer cannot group a path differently from the `;TYPE:` marker in the file a
+  printer runs.
+- Per-object settings from one key at a time (`Settings::apply_key`, the ABI's
+  `hfw_plate_object_set`, the command line's `--object-settings`): 52 print-level
+  settings can be set on a single object, by this engine's name or the dialect's, and
+  a key or value that cannot be applied is refused with the reason rather than
+  silently dropped.
+- The settings surface (`--settings-surface`, `hfw_settings_surface_json`): one JSON
+  document describing all 383 settings an engine is expected to understand, of which
+  299 are honoured here, with the key, location, type, default, unit and status of
+  each, and marks the 47 of them a panel may set on one object. It is generated by
+  the same run that writes `docs/SETTINGS-LEDGER.md`, so the panel and the ledger
+  cannot disagree, and the `per_object` flag is read from the engine's own published
+  list rather than restated by hand.
 
 ## What is not finished, and what it costs
 

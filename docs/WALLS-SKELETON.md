@@ -1,5 +1,17 @@
 # Walls: replacing the offset ladder with a skeletal generator
 
+> **Status 2026-11-19 — read the first paragraph with care.** The skeletal generator
+> described here is `crates/skeleton`, and it is **not** what the default wall path
+> runs. The modes today are `Mode::Hfw` (the default: polygon offset ladder plus the
+> gap pass, `crates/walls/src/poly.rs`), `Mode::Classic` (the ladder alone) and
+> `Mode::Field` (beads traced from a rasterised distance field,
+> `crates/walls/src/beads.rs`). The paragraph below names the first two the other
+> way round, from when the bead generator was the default. The document is kept in
+> `docs/` rather than archived because `PROVENANCE.md`, `DECISIONS.md` and
+> `ROADMAP.md` cite it for the clean-room record and for what the skeleton could
+> express that the ladder cannot.
+
+
 The wall generator is `crates/walls`. It runs in one of two modes: `Mode::Hfw`
 (`crates/walls/src/beads.rs`), the default, which divides each layer's measured section
 among the beads that section holds; and `Mode::Classic` (`crates/walls/src/poly.rs`), the

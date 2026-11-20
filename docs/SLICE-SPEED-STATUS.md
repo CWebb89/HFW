@@ -1,7 +1,7 @@
 # Slice speed and parity: where HFW stands, 2026-11-19
 
-Supersedes the plan and status sections of `docs/SLICE-SPEED-BRIEF.md` and closes
-`docs/OFFSET-BRIEF.md`. Every number here was measured on this machine, in a release
+Supersedes the plan and status sections of `docs/archive/SLICE-SPEED-BRIEF.md` and closes
+`docs/archive/OFFSET-BRIEF.md`. Every number here was measured on this machine, in a release
 build, with the commands given.
 
 ## Where the clock stands after the fifth pass, 2026-11-19
@@ -72,7 +72,7 @@ below.
 The plate's own volume is 118298 mm³, so the three slicers deposit 70%, 67% and
 63% of it respectively.
 
-**The 6.3 s PrusaSlicer figure in `SLICE-SPEED-BRIEF.md` was wrong.** It came from
+**The 6.3 s PrusaSlicer figure in `archive/SLICE-SPEED-BRIEF.md` was wrong.** It came from
 a run against PrusaSlicer's default bed, which is smaller than this plate: 19566 mm
 of filament against OrcaSlicer's 33047 says plainly that parts were dropped. With a
 350 mm machine and the same settings PrusaSlicer takes 9.4 s.
