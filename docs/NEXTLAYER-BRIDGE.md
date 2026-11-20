@@ -158,6 +158,11 @@ whose text is written verbatim. A tool-change marker is not in the set: HFW has 
 extruder and no per-tool filament, so emitting `T{n}` would name a tool the engine
 cannot know exists.
 
+A modifier volume is the fifth kind: it prints the part of the object it covers with its
+own settings, and those arrive as settings keys through `hfw_plate_volume_set`. A
+modifier with no settings is refused at slice time instead of being weakened to a part,
+because a part-shaped copy of the region would print every bead in it twice.
+
 In-layer strokes are the calibration channel: beads printed inside a layer that the
 model does not describe, because no slice can produce them and each band is printed at
 its own width, height and speed on purpose. They are written as real beads — travel,

@@ -1608,6 +1608,8 @@ pub const HFW_VOLUME_NEGATIVE: c_int = 1;
 pub const HFW_VOLUME_SUPPORT_BLOCKER: c_int = 2;
 /// A volume support has to reach.
 pub const HFW_VOLUME_SUPPORT_ENFORCER: c_int = 3;
+/// A volume that prints the part of the object it covers with its own settings.
+pub const HFW_VOLUME_MODIFIER: c_int = 4;
 
 fn volume_kind(kind: c_int) -> Result<VolumeKind, String> {
     match kind {
@@ -1615,9 +1617,10 @@ fn volume_kind(kind: c_int) -> Result<VolumeKind, String> {
         HFW_VOLUME_NEGATIVE => Ok(VolumeKind::Negative),
         HFW_VOLUME_SUPPORT_BLOCKER => Ok(VolumeKind::SupportBlocker),
         HFW_VOLUME_SUPPORT_ENFORCER => Ok(VolumeKind::SupportEnforcer),
+        HFW_VOLUME_MODIFIER => Ok(VolumeKind::Modifier),
         other => Err(format!(
             "volume kind {other} does not exist: it is one of 0 part, 1 negative, 2 support \
-             blocker or 3 support enforcer"
+             blocker, 3 support enforcer or 4 modifier"
         )),
     }
 }
@@ -1628,6 +1631,7 @@ fn volume_code(kind: VolumeKind) -> c_int {
         VolumeKind::Negative => HFW_VOLUME_NEGATIVE,
         VolumeKind::SupportBlocker => HFW_VOLUME_SUPPORT_BLOCKER,
         VolumeKind::SupportEnforcer => HFW_VOLUME_SUPPORT_ENFORCER,
+        VolumeKind::Modifier => HFW_VOLUME_MODIFIER,
     }
 }
 
@@ -1671,6 +1675,49 @@ pub unsafe extern "C" fn hfw_plate_object_add_volume(
             .map_err(|error| error.to_string())
     };
     report(add(), -1)
+}
+
+/// Sets one setting on modifier volume `index` of object `id`.
+///
+/// Only a modifier volume has a region of its own to print differently, so a key set on
+/// any other kind is refused rather than stored and ignored. The key is a settings key,
+/// the same one an object override uses, and it is applied on top of the object's
+/// settings and of whatever the volume already carries.
+///
+/// Returns 0 on success and -1 when the object or volume does not exist, the volume is
+/// not a modifier, or the key or value is not a setting this engine knows.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call, and `key`/`value` live C
+/// strings.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_volume_set(
+    plate: *mut HfwPlate,
+    id: u64,
+    index: usize,
+    key: *const c_char,
+    value: *const c_char,
+) -> c_int {
+    let set = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let key = unsafe { text_of(key, "key") }?;
+        let value = unsafe { text_of(value, "value") }?;
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let plate = unsafe { &mut *plate };
+        let settings = plate.plate.settings().clone();
+        plate
+            .plate
+            .object_mut(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?
+            .set_volume_setting(index, &key, &value, &settings)
+            .map(|()| 0)
+            .map_err(|error| error.to_string())
+    };
+    report(set(), -1)
 }
 
 /// Detaches volume `index` from object `id`, counted from zero.

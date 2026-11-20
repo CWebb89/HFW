@@ -31,9 +31,10 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 /// Version of the project part's own format.
 ///
 /// Version 2 added per-object paint, version 3 volumes, version 4 per-object layer
-/// heights, version 5 the plate's timeline markers, version 6 its in-layer strokes.
-/// Older files still open: they simply carry none of what they predate.
-pub const PROJECT_VERSION: u32 = 6;
+/// heights, version 5 the plate's timeline markers, version 6 its in-layer strokes,
+/// version 7 the settings a modifier volume prints its region with. Older files still
+/// open: they simply carry none of what they predate.
+pub const PROJECT_VERSION: u32 = 7;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -68,7 +69,7 @@ impl Plate {
             for volume in object.volumes() {
                 let mesh = volume.mesh().transformed(object.placement())?;
                 placed.push((
-                    format!("{} ({} volume)", object.name, volume_name(volume.kind())),
+                    format!("{} ({} volume)", object.name, volume.kind().name()),
                     mesh,
                 ));
             }
@@ -126,7 +127,7 @@ impl Plate {
             .into_iter()
             .map(|object| Some((object.name, object.mesh)))
             .collect();
-        let mut volumes: Vec<(usize, VolumeKind, Option<Mesh>)> = Vec::new();
+        let mut volumes: Vec<SavedPlacement> = Vec::new();
         for saved in &extras.volumes {
             let geometry = parts
                 .get_mut(saved.model)
@@ -138,22 +139,32 @@ impl Plate {
                         saved.model
                     ))
                 })?;
-            volumes.push((saved.object, saved.kind, Some(geometry)));
+            volumes.push((
+                saved.object,
+                saved.kind,
+                saved.overrides.clone(),
+                Some(geometry),
+            ));
         }
 
         let mut plate = Plate::new(settings);
         for (index, (name, mesh)) in parts.into_iter().flatten().enumerate() {
             let id = plate.add_positioned(name, mesh)?;
-            for (_, kind, geometry) in volumes.iter_mut().filter(|saved| saved.0 == index) {
+            for (_, kind, overrides, geometry) in
+                volumes.iter_mut().filter(|saved| saved.0 == index)
+            {
                 let geometry = geometry.take().ok_or_else(|| {
                     PlateError::Slice(format!(
                         "volume of object {index} appears twice in the file"
                     ))
                 })?;
-                plate
-                    .object_mut(id)
-                    .ok_or(PlateError::NoSuchObject(id))?
-                    .add_volume(*kind, geometry)?;
+                let settings = plate.settings().clone();
+                let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
+                object.add_volume(*kind, geometry)?;
+                for (key, value) in overrides.iter() {
+                    let index = object.volumes().len() - 1;
+                    object.set_volume_setting(index, key, value, &settings)?;
+                }
             }
             let saved = extras.objects.iter().find(|saved| saved.index == index);
             if let Some(saved) = saved {
@@ -215,24 +226,17 @@ struct SavedObject {
     layer_heights: Vec<(f64, f64)>,
 }
 
-/// The name a volume's kind is written and read under.
-fn volume_name(kind: VolumeKind) -> &'static str {
-    match kind {
-        VolumeKind::Part => "part",
-        VolumeKind::Negative => "negative",
-        VolumeKind::SupportBlocker => "support-blocker",
-        VolumeKind::SupportEnforcer => "support-enforcer",
-    }
-}
-
 fn volume_kind(name: &str) -> Option<VolumeKind> {
-    match name {
-        "part" => Some(VolumeKind::Part),
-        "negative" => Some(VolumeKind::Negative),
-        "support-blocker" => Some(VolumeKind::SupportBlocker),
-        "support-enforcer" => Some(VolumeKind::SupportEnforcer),
-        _ => None,
-    }
+    let name = name.trim();
+    [
+        VolumeKind::Part,
+        VolumeKind::Negative,
+        VolumeKind::SupportBlocker,
+        VolumeKind::SupportEnforcer,
+        VolumeKind::Modifier,
+    ]
+    .into_iter()
+    .find(|kind| kind.name() == name)
 }
 
 /// The channels a project part writes, with the names it writes them under.
@@ -281,10 +285,24 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
     let mut model = plate.objects.len();
     for (owner, object) in plate.objects.iter().enumerate() {
         for volume in object.volumes() {
-            xml.push_str(&format!(
-                "  <volume object=\"{owner}\" model=\"{model}\" kind=\"{}\"/>\n",
-                volume_name(volume.kind())
-            ));
+            let mut block = format!(
+                "  <volume object=\"{owner}\" model=\"{model}\" kind=\"{}\"",
+                volume.kind().name()
+            );
+            if volume.overrides().is_empty() {
+                block.push_str("/>\n");
+            } else {
+                block.push_str(">\n");
+                for (key, value) in volume.overrides() {
+                    block.push_str(&format!(
+                        "    <setting key=\"{}\" value=\"{}\"/>\n",
+                        escape(key),
+                        escape(value)
+                    ));
+                }
+                block.push_str("  </volume>\n");
+            }
+            xml.push_str(&block);
             model += 1;
         }
     }
@@ -349,11 +367,15 @@ struct SavedProject {
 
 /// Where one volume came from: which object owns it, which model-part object holds
 /// its geometry, and what it does.
+/// Where a volume's geometry and settings are waiting to be rebuilt on the plate.
+type SavedPlacement = (usize, VolumeKind, Vec<(String, String)>, Option<Mesh>);
+
 #[derive(Debug)]
 struct SavedVolume {
     object: usize,
     model: usize,
     kind: VolumeKind,
+    overrides: Vec<(String, String)>,
 }
 
 fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
@@ -438,10 +460,19 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
                 PlateError::Slice(format!("a volume's {what} is not a number: {text:?}"))
             })
         };
+        let mut overrides = Vec::new();
+        for setting in elements(&block, "setting") {
+            let key = attribute_in(&setting, "setting", "key")
+                .ok_or_else(|| PlateError::Slice("a volume setting names no key".to_owned()))?;
+            let value = attribute_in(&setting, "setting", "value")
+                .ok_or_else(|| PlateError::Slice("a volume setting has no value".to_owned()))?;
+            overrides.push((key.trim().to_owned(), value));
+        }
         volumes.push(SavedVolume {
             object: number(&object, "object")?,
             model: number(&model, "model")?,
             kind,
+            overrides,
         });
     }
     let mut markers = Vec::new();
@@ -726,7 +757,7 @@ mod tests {
             Err(PlateError::Slice(message)) => {
                 assert!(message.contains("version 9"), "message was `{message}`");
                 assert!(
-                    message.contains("versions 1 to 6"),
+                    message.contains("versions 1 to 7"),
                     "the refusal names the range it reads: `{message}`"
                 );
             }

@@ -292,6 +292,18 @@ int32_t hfw_plate_object_add_volume(HfwPlate *plate, uint64_t id, int32_t kind,
                                    const HfwMesh *mesh);
 
 /**
+ * Sets one setting on modifier volume `index` of object `id`.
+ *
+ * Only a modifier volume has a region of its own to print differently, so a key set on
+ * any other kind is refused rather than stored and ignored. The key is a settings key,
+ * the same one an object override uses, applied on top of the object's settings and of
+ * whatever the volume already carries. Returns 0 on success, -1 when the object or
+ * volume does not exist, the volume is not a modifier, or the key or value is unknown.
+ */
+int32_t hfw_plate_volume_set(HfwPlate *plate, uint64_t id, size_t index, const char *key,
+                             const char *value);
+
+/**
  * Detaches volume `index` from object `id`, counted from zero.
  *
  * Returns 0 on success, -1 when the object is not on the plate or it has no volume

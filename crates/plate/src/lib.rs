@@ -249,6 +249,7 @@ pub struct PlateObject {
 pub struct PlateVolume {
     kind: VolumeKind,
     mesh: Mesh,
+    overrides: Vec<(String, String)>,
 }
 
 impl PlateVolume {
@@ -260,6 +261,15 @@ impl PlateVolume {
     /// The volume's geometry, in the object's own frame.
     pub fn mesh(&self) -> &Mesh {
         &self.mesh
+    }
+
+    /// The settings this volume's region prints with, as key/value rows.
+    ///
+    /// Rows rather than a snapshot of the settings, so a plate preset that changes
+    /// after the volume was placed still reaches the region: the rows are applied on
+    /// top of whatever the object prints with at slice time.
+    pub fn overrides(&self) -> &[(String, String)] {
+        &self.overrides
     }
 }
 
@@ -416,8 +426,85 @@ impl PlateObject {
                 "a volume has no triangles, so it would change nothing".to_owned(),
             ));
         }
-        self.volumes.push(PlateVolume { kind, mesh });
+        self.volumes.push(PlateVolume {
+            kind,
+            mesh,
+            overrides: Vec::new(),
+        });
         Ok(())
+    }
+
+    /// Sets one setting on a modifier volume, counted in the order [`Self::volumes`]
+    /// returns them.
+    ///
+    /// Only a modifier volume reads its own settings, so a key set on any other kind is
+    /// refused rather than stored and ignored: a support blocker that quietly accepted
+    /// `sparse_infill_density` would look like it had been applied.
+    pub fn set_volume_setting(
+        &mut self,
+        index: usize,
+        key: &str,
+        value: &str,
+        plate: &Settings,
+    ) -> Result<(), PlateError> {
+        let volume = self.volumes.get(index).ok_or_else(|| {
+            PlateError::Volume(format!(
+                "volume {index} does not exist: this object has {}",
+                self.volumes.len()
+            ))
+        })?;
+        if volume.kind != VolumeKind::Modifier {
+            return Err(PlateError::Volume(format!(
+                "volume {index} is a {} volume, and only a modifier volume has settings of its own",
+                volume.kind.name()
+            )));
+        }
+        let mut settings = self.settings.clone().unwrap_or_else(|| plate.clone());
+        for (key, value) in &volume.overrides {
+            settings
+                .apply_key(key, value)
+                .map_err(PlateError::Setting)?;
+        }
+        settings
+            .apply_key(key, value)
+            .map_err(PlateError::Setting)?;
+        let volume = self.volumes.get_mut(index).ok_or_else(|| {
+            PlateError::Volume(format!(
+                "volume {index} disappeared while it was being changed"
+            ))
+        })?;
+        volume.overrides.push((key.to_owned(), value.to_owned()));
+        Ok(())
+    }
+
+    /// The settings this volume's region prints with, resolved over the object's own.
+    ///
+    /// `None` for every kind that has no settings of its own.
+    pub fn resolved_volume_settings(
+        &self,
+        index: usize,
+        plate: &Settings,
+    ) -> Result<Option<Settings>, PlateError> {
+        let Some(volume) = self.volumes.get(index) else {
+            return Ok(None);
+        };
+        if volume.kind != VolumeKind::Modifier {
+            return Ok(None);
+        }
+        if volume.overrides.is_empty() {
+            return Err(PlateError::Volume(format!(
+                "volume {index} is a modifier with no settings: its region would print with \
+                 the object's own settings, which is what that region prints with anyway, and \
+                 the layer would carry every bead in it twice"
+            )));
+        }
+        let mut settings = self.settings.clone().unwrap_or_else(|| plate.clone());
+        for (key, value) in &volume.overrides {
+            settings
+                .apply_key(key, value)
+                .map_err(PlateError::Setting)?;
+        }
+        Ok(Some(settings))
     }
 
     /// Removes one volume, counted in the order [`Self::volumes`] returns them.
@@ -926,23 +1013,30 @@ impl Plate {
             .zip(&moved)
             .zip(&moved_volumes)
             .zip(&stepped)
-            .map(|(((object, moved), volumes), stepped)| PlacedObject {
-                mesh: moved.as_ref().unwrap_or(&object.mesh),
-                paint: Some(&object.paint),
-                settings: stepped
-                    .as_ref()
-                    .unwrap_or_else(|| object.settings().unwrap_or(settings)),
-                volumes: object
+            .map(|(((object, moved), volumes), stepped)| {
+                let modifiers = object
                     .volumes()
                     .iter()
+                    .enumerate()
                     .zip(volumes)
-                    .map(|(volume, moved)| Volume {
-                        mesh: moved.as_ref().unwrap_or(volume.mesh()),
-                        kind: volume.kind(),
+                    .map(|((index, volume), moved)| {
+                        Ok(PlacedVolume {
+                            mesh: moved.as_ref().unwrap_or(volume.mesh()),
+                            kind: volume.kind(),
+                            settings: object.resolved_volume_settings(index, settings)?,
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>, PlateError>>()?;
+                Ok(PlacedObject {
+                    mesh: moved.as_ref().unwrap_or(&object.mesh),
+                    paint: Some(&object.paint),
+                    settings: stepped
+                        .as_ref()
+                        .unwrap_or_else(|| object.settings().unwrap_or(settings)),
+                    volumes: modifiers,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, PlateError>>()?;
         let mut job =
             slice_placed_with_progress(placed, first_layer_height, layer_height, order, progress)?;
         job.markers = self.markers.clone();
@@ -961,7 +1055,21 @@ pub struct PlacedObject<'a> {
     /// The settings this object prints with.
     pub settings: &'a Settings,
     /// Volumes attached to it, already placed in its frame.
-    pub volumes: Vec<Volume<'a>>,
+    pub volumes: Vec<PlacedVolume<'a>>,
+}
+
+/// One volume as the slicer takes it: geometry, what it does, and the settings its
+/// region prints with.
+pub struct PlacedVolume<'a> {
+    /// The geometry, already placed in the object's frame.
+    pub mesh: &'a Mesh,
+    /// What the volume does.
+    pub kind: VolumeKind,
+    /// Settings this volume's region prints with, resolved over the object's own.
+    ///
+    /// `None` for every kind that has no region of its own, and an error rather than a
+    /// pass-through for a modifier, whose whole purpose is to carry them.
+    pub settings: Option<Settings>,
 }
 
 impl<'a> PlacedObject<'a> {
@@ -1048,11 +1156,20 @@ pub fn slice_placed_with_progress<'a>(
         }
         add_diagnostics(&mut diagnostics, object.mesh.diagnostics());
         let paint = object.paint.cloned().unwrap_or_default();
+        let volumes: Vec<Volume> = object
+            .volumes
+            .iter()
+            .map(|volume| Volume {
+                mesh: volume.mesh,
+                kind: volume.kind,
+                settings: volume.settings.as_ref(),
+            })
+            .collect();
         stacks.push(
             run_with_volumes(
                 object.mesh,
                 &paint,
-                &object.volumes,
+                &volumes,
                 first_layer_height,
                 layer_height,
                 object.settings,

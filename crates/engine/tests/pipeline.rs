@@ -397,3 +397,87 @@ fn a_vase_and_support_are_refused_together() {
         "got {error}"
     );
 }
+
+#[test]
+fn a_modifier_region_prints_with_its_own_settings() {
+    use hfw_engine::{run_with_volumes, Paint, Volume, VolumeKind};
+    let object = Mesh::box_mm(20.0, 20.0, 4.0).expect("box");
+    let modifier = Mesh::box_mm(10.0, 10.0, 4.0).expect("box");
+    let mut base = settings(2);
+    let mut ip = InfillParams::new(0.4);
+    ip.density = 0.25;
+    ip.pattern = InfillPattern::Grid;
+    base.infill = Some(ip);
+
+    let inside = |path: &hfw_engine::PathKind, p: hfw_kernel::V2| {
+        p.x > 0.5 && p.y > 0.5 && p.x < 9.5 && p.y < 9.5 && *path == PathKind::Infill
+    };
+    let count = |job: &hfw_engine::Job| -> usize {
+        job.layers[10]
+            .paths
+            .iter()
+            .filter(|path| path.pts.iter().any(|p| inside(&path.kind, *p)))
+            .count()
+    };
+
+    let plain = run(&object, 0.2, 0.2, &base).expect("job");
+    assert!(
+        count(&plain) > 0,
+        "the unmodified part should fill the region the modifier covers"
+    );
+
+    let mut sparse = base.clone();
+    sparse.infill.as_mut().unwrap().density = 0.0;
+    let volumes = [Volume {
+        mesh: &modifier,
+        kind: VolumeKind::Modifier,
+        settings: Some(&sparse),
+    }];
+    let job = run_with_volumes(&object, &Paint::default(), &volumes, 0.2, 0.2, &base).expect("job");
+    assert_eq!(
+        job.layers.len(),
+        plain.layers.len(),
+        "the stack is unchanged"
+    );
+    assert_eq!(
+        count(&job),
+        0,
+        "the modifier's region carries its own infill setting"
+    );
+
+    let walls_inside = job.layers[10]
+        .paths
+        .iter()
+        .filter(|path| path.kind.is_wall() && path.pts.iter().any(|p| p.x < 9.0 && p.y < 9.0))
+        .count();
+    assert!(
+        walls_inside > 0,
+        "the region still has walls of its own: it is planned, not deleted"
+    );
+
+    let outer = job.layers[10]
+        .paths
+        .iter()
+        .filter(|path| path.kind == PathKind::Infill)
+        .count();
+    assert!(outer > 0, "the part outside the modifier keeps its infill");
+}
+
+#[test]
+fn a_modifier_without_settings_is_refused() {
+    use hfw_engine::{run_with_volumes, Paint, Volume, VolumeKind};
+    let object = Mesh::box_mm(10.0, 10.0, 2.0).expect("box");
+    let modifier = Mesh::box_mm(5.0, 5.0, 2.0).expect("box");
+    let volumes = [Volume {
+        mesh: &modifier,
+        kind: VolumeKind::Modifier,
+        settings: None,
+    }];
+    let error = run_with_volumes(&object, &Paint::default(), &volumes, 0.2, 0.2, &settings(2))
+        .err()
+        .expect("a modifier with nothing to modify is refused");
+    assert!(
+        error.to_string().contains("nothing for it to modify"),
+        "{error}"
+    );
+}

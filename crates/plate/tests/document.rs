@@ -880,3 +880,65 @@ fn a_stroke_with_no_length_is_refused_by_the_plate() {
         .expect_err("one point has no length");
     assert!(refused.to_string().contains("no length"), "{refused}");
 }
+
+#[test]
+fn a_modifier_volume_carries_its_own_settings_and_survives_a_project() {
+    let mut plate = Plate::new(Settings::default());
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let modifier = Mesh::box_mm(5.0, 5.0, 5.0).expect("a box builds");
+    let settings = plate.settings().clone();
+    let object = plate.object_mut(id).expect("the object is there");
+    object
+        .add_volume(hfw_engine::VolumeKind::Modifier, modifier)
+        .expect("a modifier volume adds");
+    object
+        .set_volume_setting(0, "sparse_infill_density", "0.9", &settings)
+        .expect("a modifier takes settings");
+    assert_eq!(
+        object.volumes()[0].overrides(),
+        [("sparse_infill_density".to_owned(), "0.9".to_owned())]
+    );
+
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    let object = reopened.object(id).expect("the object came back");
+    assert_eq!(object.volumes()[0].kind(), hfw_engine::VolumeKind::Modifier);
+    assert_eq!(
+        object.volumes()[0].overrides(),
+        [("sparse_infill_density".to_owned(), "0.9".to_owned())],
+        "the volume's settings survive the round trip"
+    );
+}
+
+#[test]
+fn a_modifier_with_no_settings_is_refused_at_slice_time() {
+    let mut plate = Plate::new(Settings::default());
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let modifier = Mesh::box_mm(5.0, 5.0, 5.0).expect("a box builds");
+    plate
+        .object_mut(id)
+        .expect("the object is there")
+        .add_volume(hfw_engine::VolumeKind::Modifier, modifier)
+        .expect("a modifier volume adds");
+    let error = match plate.slice(0.2, 0.2, PlateOrder::ByLayer) {
+        Ok(_) => panic!("a modifier that overrides nothing is refused"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("no settings"), "{error}");
+}
+
+#[test]
+fn a_volume_that_is_not_a_modifier_refuses_settings() {
+    let mut plate = Plate::new(Settings::default());
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let hole = Mesh::box_mm(5.0, 5.0, 5.0).expect("a box builds");
+    let settings = plate.settings().clone();
+    let object = plate.object_mut(id).expect("the object is there");
+    object
+        .add_volume(hfw_engine::VolumeKind::Negative, hole)
+        .expect("a negative volume adds");
+    let error = object
+        .set_volume_setting(0, "sparse_infill_density", "0.9", &settings)
+        .expect_err("a negative volume has no region to print differently");
+    assert!(error.to_string().contains("modifier"), "{error}");
+}

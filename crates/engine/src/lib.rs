@@ -532,6 +532,13 @@ pub enum EngineError {
     VaseWithSupport,
     /// A painted state the engine does not know.
     Paint(String),
+    /// A modifier volume arrived with nothing to modify.
+    ///
+    /// Its whole purpose is to print its region with its own settings, so without
+    /// settings it would be a part volume that changes nothing — the shape would be
+    /// planned twice, once per group, and the file would print every bead in it
+    /// twice. Refused rather than silently weakened to a part.
+    ModifierWithoutSettings,
 }
 
 impl From<SliceError> for EngineError {
@@ -556,6 +563,10 @@ impl std::fmt::Display for EngineError {
                 "spiral vase mode cannot carry support; clear one of the two"
             ),
             EngineError::Paint(message) => write!(f, "paint: {message}"),
+            EngineError::ModifierWithoutSettings => write!(
+                f,
+                "a modifier volume carries no settings, so there is nothing for it to modify"
+            ),
         }
     }
 }
@@ -675,6 +686,26 @@ pub enum VolumeKind {
     SupportBlocker,
     /// Requires support under the volume's footprint, over its height.
     SupportEnforcer,
+    /// Prints the part of the object it covers with its own settings.
+    ///
+    /// A modifier is not geometry: the object's own shape is unchanged, and only the
+    /// settings of the region it covers change — infill density, walls, skin, speed.
+    /// It is the one volume kind that must carry settings, because that is the whole
+    /// of what it does.
+    Modifier,
+}
+
+impl VolumeKind {
+    /// The name this kind is written and read under, in a project file and in a report.
+    pub fn name(self) -> &'static str {
+        match self {
+            VolumeKind::Part => "part",
+            VolumeKind::Negative => "negative",
+            VolumeKind::SupportBlocker => "support-blocker",
+            VolumeKind::SupportEnforcer => "support-enforcer",
+            VolumeKind::Modifier => "modifier",
+        }
+    }
 }
 
 /// A volume with the mesh it is made of.
@@ -684,6 +715,12 @@ pub struct Volume<'a> {
     pub mesh: &'a Mesh,
     /// What the volume does.
     pub kind: VolumeKind,
+    /// Settings the volume's region prints with, for a modifier volume.
+    ///
+    /// The caller passes the settings the region should print with, already layered
+    /// over the object's, because the layering rule lives in the plate: an object
+    /// override beats the job's profile, and a modifier volume's beats the object's.
+    pub settings: Option<&'a Settings>,
 }
 
 /// A sliced and planned job.
@@ -1022,7 +1059,7 @@ fn volume_support_paint(volumes: &[Volume<'_>]) -> Result<PaintRegions, EngineEr
         let states = match volume.kind {
             VolumeKind::SupportEnforcer => PAINT_SUPPORT_ENFORCER,
             VolumeKind::SupportBlocker => PAINT_SUPPORT_BLOCKER,
-            VolumeKind::Part | VolumeKind::Negative => continue,
+            VolumeKind::Part | VolumeKind::Negative | VolumeKind::Modifier => continue,
         };
         let paint = Paint {
             support: vec![states; volume.mesh.triangle_count()],
@@ -1077,6 +1114,74 @@ fn apply_volumes(
     Ok(())
 }
 
+/// Splits a layer's region into the object's own settings group and one group per
+/// modifier volume covering it.
+///
+/// A modifier volume is settings scoped to a region: the part of the layer it covers
+/// prints with its own walls, infill and skin instead of the object's. Two things make
+/// that work. The volume's cross-section is taken on the object's own slicing planes,
+/// so a region boundary lands on the layer it belongs to instead of half a layer off.
+/// And the modifier's area is *removed* from the object's group, because the two groups
+/// are planned independently -- left in both, the same bead would be planned twice and
+/// printed twice.
+///
+/// Intersecting with the object's own region first keeps a modifier from printing
+/// outside the part it modifies: geometry that hangs off the part is dropped, not
+/// commissioned as new material. `Part` and `Negative` volumes act on the outline
+/// before this runs, so a modifier over a hole sees the hole.
+///
+/// Two consequences are worth knowing before reading a file. The shared boundary gets
+/// each region's own perimeters, back to back, because neither group knows the other
+/// exists — that is what both reference slicers do too, and it is why a modifier seam
+/// shows as a wall. And the modifier's stack of top and bottom skin is its own: a
+/// region that starts above the bed has a bottom skin at its own first layer. Both are
+/// the price of planning a region as a region rather than approximating it.
+///
+/// The brim stays with the object: a bed adhesion line around a region that sits on
+/// top of the part would be a line drawn in mid-air.
+fn split_modifiers(
+    regions: &mut [Region],
+    schedule: &LayerSchedule,
+    volumes: &[Volume<'_>],
+    settings: &Settings,
+    out: &mut Vec<(Vec<Region>, Settings)>,
+) -> Result<(), EngineError> {
+    for volume in volumes {
+        if volume.kind != VolumeKind::Modifier {
+            continue;
+        }
+        let Some(modifier) = volume.settings else {
+            return Err(EngineError::ModifierWithoutSettings);
+        };
+        let slices = hfw_slicing::slice_mesh_layers_with(
+            volume.mesh,
+            schedule,
+            hfw_slicing::SliceOptions {
+                close_gaps: settings.close_gaps,
+            },
+        );
+        let mut own = Vec::with_capacity(regions.len());
+        for (index, region) in regions.iter_mut().enumerate() {
+            let body = match slices.get(index) {
+                Some(Ok(slice)) => region_from_contours(&slice.contours),
+                _ => Region::default(),
+            };
+            if body.is_empty() || region.is_empty() {
+                own.push(Region::default());
+                continue;
+            }
+            let inside = hfw_kernel::intersect_rings(&region.rings, &body.rings);
+            let rest = hfw_kernel::difference_rings(&region.rings, &inside);
+            *region = Region::new(rest);
+            own.push(Region::new(inside));
+        }
+        let mut modifier = modifier.clone();
+        modifier.brim_loops = 0;
+        out.push((own, modifier));
+    }
+    Ok(())
+}
+
 fn run_with_paint(
     mesh: &Mesh,
     paint: &Paint,
@@ -1117,9 +1222,93 @@ fn run_with_paint(
         }
     }
 
-    let step = settings.every.max(1);
-
     apply_volumes(&mut regions, &schedule, volumes, settings)?;
+    let mut modifiers = Vec::new();
+    split_modifiers(&mut regions, &schedule, volumes, settings, &mut modifiers)?;
+
+    let mut base = plan_regions(&schedule, regions, settings, support_paint)?;
+    for (regions, modifier_settings) in modifiers {
+        base.absorb(plan_regions(&schedule, regions, &modifier_settings, None)?);
+    }
+
+    Ok(Job {
+        mesh_diagnostics: prepared.diagnostics(),
+        repair,
+        layers: base.layers,
+        metrics: base.metrics,
+        volume: base.volume,
+        stats: JobStats {
+            triangles_tested: slices
+                .iter()
+                .filter_map(|s| s.as_ref().ok())
+                .map(|s| s.diagnostics.triangles_tested)
+                .sum(),
+            ms_slice,
+            ..base.stats
+        },
+        worst_layer_ms: base.worst_layer_ms,
+        worst_layer: base.worst_layer,
+        skipped,
+        markers: Vec::new(),
+        in_layer: Vec::new(),
+        seam_paint: match seam_paint {
+            Some(paint) => vec![paint],
+            None => Vec::new(),
+        },
+    })
+}
+
+/// One settings group planned over a whole stack.
+///
+/// A stack is one body of material with one set of print settings: the object
+/// itself, or the part of it a modifier volume covers. Splitting the plan this way
+/// is what makes per-region settings possible at all -- top and bottom skin, support
+/// and infill combination all read the stack's own neighbours, so a region planned
+/// against another region's masks would put skin in the wrong place.
+struct PlanPass {
+    /// Layers in print order.
+    layers: Vec<PlannedLayer>,
+    /// Per-layer coverage metrics, when the profile asks for them.
+    metrics: Vec<Metrics>,
+    /// Perimeter volume and interior volume.
+    volume: (f64, f64),
+    /// Counters and timings for this group.
+    stats: JobStats,
+    /// Largest per-layer wall generation time, in milliseconds.
+    worst_layer_ms: f64,
+    /// Index of the layer that took [`PlanPass::worst_layer_ms`].
+    worst_layer: usize,
+}
+
+impl PlanPass {
+    /// Folds a modifier group's beads into this group's layers.
+    ///
+    /// The layers line up by index because both groups were sliced with the object's
+    /// own schedule, and `first` is deliberately not copied: sitting on layer 0 does
+    /// not make a modifier region the object's first layer, so the brim and the bed
+    /// still belong to the object.
+    fn absorb(&mut self, extra: PlanPass) {
+        for (index, layer) in extra.layers.into_iter().enumerate() {
+            let Some(slot) = self.layers.get_mut(index) else {
+                continue;
+            };
+            slot.paths.extend(layer.paths);
+            slot.recount();
+        }
+        self.volume.0 += extra.volume.0;
+        self.volume.1 += extra.volume.1;
+        add_stats(&mut self.stats, &extra.stats);
+    }
+}
+
+/// Plans walls, skin, support and infill for one settings group over a whole stack.
+fn plan_regions(
+    schedule: &LayerSchedule,
+    mut regions: Vec<Region>,
+    settings: &Settings,
+    support_paint: Option<&PaintRegions>,
+) -> Result<PlanPass, EngineError> {
+    let step = settings.every.max(1);
 
     let t_offset = std::time::Instant::now();
     compensate_all(&mut regions, settings)?;
@@ -1147,6 +1336,7 @@ fn run_with_paint(
         } else {
             None
         };
+
     let support_ms;
     let supports = match (settings.support.as_ref(), cache.as_mut()) {
         (Some(sp), Some(cache)) => {
@@ -1187,12 +1377,6 @@ fn run_with_paint(
         ms_support: support_ms,
         ms_offset,
         layers: schedule.len(),
-        triangles_tested: slices
-            .iter()
-            .filter_map(|s| s.as_ref().ok())
-            .map(|s| s.diagnostics.triangles_tested)
-            .sum(),
-        ms_slice,
         ..JobStats::default()
     };
     let mut metrics = Vec::new();
@@ -1384,7 +1568,7 @@ fn run_with_paint(
     stats.ms_walls_elapsed = t_walls.elapsed().as_secs_f64() * 1e3;
     stats.threads = threads;
 
-    for (k, (spec, _slice)) in schedule.layers().iter().zip(slices.iter()).enumerate() {
+    for (k, spec) in schedule.layers().iter().enumerate() {
         let mut planned = PlannedLayer {
             index: k,
             bottom_z: spec.bottom_z as f64 / 1e6,
@@ -1467,22 +1651,13 @@ fn run_with_paint(
         volume.1 += i;
     }
 
-    Ok(Job {
-        mesh_diagnostics: mesh.diagnostics(),
-        repair,
+    Ok(PlanPass {
         layers,
         metrics,
         volume,
         stats,
         worst_layer_ms: worst_ms,
         worst_layer,
-        skipped,
-        markers: Vec::new(),
-        in_layer: Vec::new(),
-        seam_paint: match seam_paint {
-            Some(paint) => vec![paint],
-            None => Vec::new(),
-        },
     })
 }
 

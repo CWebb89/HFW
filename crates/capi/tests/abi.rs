@@ -18,9 +18,9 @@ use hfw_capi::{
     hfw_plate_object_remove_volume, hfw_plate_object_rotate, hfw_plate_object_set,
     hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_open_project,
     hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers,
-    hfw_plate_slice, hfw_slice_meshes, hfw_string_free, HfwBounds, HfwJobProgress, HfwTransform,
-    HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE,
-    HFW_VOLUME_NEGATIVE,
+    hfw_plate_slice, hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free, HfwBounds,
+    HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED,
+    HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -1163,4 +1163,49 @@ fn in_layer_strokes_cross_the_abi_and_read_back() {
     );
     assert_eq!(unsafe { hfw_plate_in_layer_count(plate) }, 0);
     unsafe { hfw_plate_free(plate) };
+}
+
+#[test]
+fn a_modifier_volume_takes_settings_across_the_abi() {
+    let plate = hfw_plate_new();
+    let bytes = fs::read(fixture("cube.stl")).unwrap();
+    let cube = unsafe { hfw_mesh_from_bytes(bytes.as_ptr(), bytes.len()) };
+    assert!(!cube.is_null(), "a cube loads: {}", last_error());
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(id, 0, "the object is on the plate: {}", last_error());
+    let modifier = unsafe { hfw_mesh_from_bytes(bytes.as_ptr(), bytes.len()) };
+    assert!(!modifier.is_null(), "a second cube loads: {}", last_error());
+    assert_eq!(
+        unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_MODIFIER, modifier) },
+        0,
+        "a modifier volume adds: {}",
+        last_error()
+    );
+    let mut kind = -1;
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_kind(plate, id, 0, &mut kind) },
+        0,
+        "the kind reads back: {}",
+        last_error()
+    );
+    assert_eq!(kind, HFW_VOLUME_MODIFIER);
+    let key = c_string("sparse_infill_density");
+    let value = c_string("0.9");
+    assert_eq!(
+        unsafe { hfw_plate_volume_set(plate, id, 0, key.as_ptr(), value.as_ptr()) },
+        0,
+        "a modifier takes its own settings: {}",
+        last_error()
+    );
+    let unknown = c_string("no_such_setting");
+    assert_eq!(
+        unsafe { hfw_plate_volume_set(plate, id, 0, unknown.as_ptr(), value.as_ptr()) },
+        -1,
+        "an unknown key is refused"
+    );
+    unsafe {
+        hfw_mesh_free(modifier);
+        hfw_mesh_free(cube);
+        hfw_plate_free(plate);
+    }
 }
