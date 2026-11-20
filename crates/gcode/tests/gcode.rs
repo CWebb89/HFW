@@ -2463,3 +2463,112 @@ fn a_painted_seam_face_takes_the_seam_and_an_unpainted_one_takes_none() {
         "the painted seam sits on the right-hand face, at x={seamed_x}"
     );
 }
+
+#[test]
+fn a_plate_marker_fires_once_at_its_own_layer() {
+    use hfw_toolpath::{Marker, MarkerKind};
+    let mut cfg = voron();
+    cfg.pause_print_gcode = "PAUSE".to_owned();
+    let job = plan("cube.stl", &cfg);
+    let markers = vec![
+        Marker {
+            z: 2.0,
+            kind: MarkerKind::Custom,
+            text: "M117 check the seam {layer_z}".to_owned(),
+        },
+        Marker {
+            z: 1.0,
+            kind: MarkerKind::Pause,
+            text: String::new(),
+        },
+    ];
+    let gcode = hfw_gcode::generate_with_markers(&job.layers, &cfg, Some("part"), &[], &markers)
+        .expect("the job writes");
+    assert_eq!(gcode.text.matches("M117 check the seam").count(), 1);
+    assert_eq!(
+        gcode.text.matches("PAUSE").count(),
+        1,
+        "the profile's pause template is written for the pause marker"
+    );
+    let custom = gcode
+        .text
+        .find("M117 check the seam 2.000")
+        .expect("the marker's own layer Z fills its placeholders");
+    let pause = gcode.text.find("PAUSE").expect("the pause is written");
+    assert!(
+        pause < custom,
+        "markers come out in Z order regardless of the list order"
+    );
+    let layer_of = |at: usize| {
+        let before = &gcode.text[..at];
+        let marker = before.rfind(";Z:").expect("a layer marker precedes it");
+        before[marker + 3..]
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(layer_of(pause), "1.000");
+    assert_eq!(layer_of(custom), "2.000");
+}
+
+#[test]
+fn a_marker_that_carries_nothing_is_a_note_not_a_command() {
+    use hfw_toolpath::{Marker, MarkerKind};
+    let cfg = voron();
+    let job = plan("cube.stl", &cfg);
+    let markers = vec![Marker {
+        z: 1.0,
+        kind: MarkerKind::ColourChange,
+        text: "M600".to_owned(),
+    }];
+    let gcode = hfw_gcode::generate_with_markers(&job.layers, &cfg, Some("part"), &[], &markers)
+        .expect("the job writes");
+    assert_eq!(
+        gcode.text.matches("M600").count(),
+        0,
+        "a colour change marker without a profile template writes nothing"
+    );
+    assert_eq!(
+        gcode
+            .text
+            .matches("; colour change requested at Z1.000 with no g-code set")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn a_marker_below_the_bed_or_without_g_code_is_refused() {
+    use hfw_toolpath::{Marker, MarkerKind};
+    let below = Marker::sorted(vec![Marker {
+        z: -1.0,
+        kind: MarkerKind::Pause,
+        text: String::new(),
+    }])
+    .expect_err("a height under the bed is refused");
+    assert!(below.to_string().contains("below the bed"), "{below}");
+    let empty = Marker::sorted(vec![Marker {
+        z: 1.0,
+        kind: MarkerKind::Custom,
+        text: "   ".to_owned(),
+    }])
+    .expect_err("a custom marker with no g-code is refused");
+    assert!(empty.to_string().contains("carries no G-code"), "{empty}");
+    let sorted = Marker::sorted(vec![
+        Marker {
+            z: 4.0,
+            kind: MarkerKind::Pause,
+            text: String::new(),
+        },
+        Marker {
+            z: 1.0,
+            kind: MarkerKind::Custom,
+            text: "M117 hi".to_owned(),
+        },
+    ])
+    .expect("a usable list sorts");
+    assert_eq!(sorted[0].z, 1.0);
+    assert_eq!(sorted[1].z, 4.0);
+}

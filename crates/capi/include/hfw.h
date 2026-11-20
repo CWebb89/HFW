@@ -313,6 +313,42 @@ ptrdiff_t hfw_plate_object_volume_count(const HfwPlate *plate, uint64_t id);
 int32_t hfw_plate_object_volume_kind(const HfwPlate *plate, uint64_t id, size_t index,
                                      int32_t *out);
 
+/** A marker that writes its own G-code at its height. */
+#define HFW_MARKER_CUSTOM 0
+/** A marker that stops the print, with the profile's `pause_print_gcode`. */
+#define HFW_MARKER_PAUSE 1
+/** A marker that changes filament, with the profile's `color_change_gcode`. */
+#define HFW_MARKER_COLOUR 2
+
+/**
+ * Sets the plate's timeline markers, sorted by Z.
+ *
+ * `kinds` holds one `HFW_MARKER_CUSTOM`/`HFW_MARKER_PAUSE`/`HFW_MARKER_COLOUR` per
+ * marker, `zs` its print heights in millimetres, and `texts` its G-code -- read only
+ * for `HFW_MARKER_CUSTOM`, where a marker with no G-code in it is refused. A `count`
+ * of zero clears the timeline. Markers are a property of the plate rather than the
+ * profile, so two plates on one printer can pause at different heights.
+ *
+ * Returns 0 on success, -1 when a kind is not one of the three, a Z is not a finite
+ * height above the bed, a custom marker has no text, or a pointer is null.
+ */
+int32_t hfw_plate_set_markers(HfwPlate *plate, const int32_t *kinds, const double *zs,
+                              const char *const *texts, size_t count);
+
+/** Number of markers on the plate's timeline, or -1 when the handle is null. */
+ptrdiff_t hfw_plate_marker_count(const HfwPlate *plate);
+
+/**
+ * Reads marker `index` back: its kind, its Z, and its G-code.
+ *
+ * `text` receives up to `len` bytes of the marker's G-code including the terminator,
+ * truncated to fit. `kind`, `z` and `text` may each be NULL to skip that field.
+ *
+ * Returns 0 on success, -1 when the handle is null or the index is past the end.
+ */
+int32_t hfw_plate_marker_get(const HfwPlate *plate, size_t index, int32_t *kind, double *z,
+                             char *text, size_t len);
+
 /**
  * Sets object `id`'s own layer heights, as `count` interleaved `(z, height)` pairs of
  * millimetres; a `count` of 0 clears them back to the plate's uniform layer height.

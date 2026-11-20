@@ -1769,8 +1769,9 @@ fn write_gcode(o: &Options, job: &Job, path: &Path, positioned: bool) -> Result<
     let object = std::path::Path::new(o.inputs.first().map(String::as_str).unwrap_or("plate"))
         .file_stem()
         .and_then(|s| s.to_str());
-    let written = hfw_gcode::generate_with_paint(&job.layers, cfg, object, &job.seam_paint)
-        .map_err(|error| error.to_string())?;
+    let written =
+        hfw_gcode::generate_with_markers(&job.layers, cfg, object, &job.seam_paint, &job.markers)
+            .map_err(|error| error.to_string())?;
     let path = output_path(cfg, o, path)?;
     fs::write(&path, &written.text)
         .map_err(|error| format!("could not write {}: {error}", path.display()))?;

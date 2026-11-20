@@ -104,6 +104,10 @@ hfw_plate_object_add_volume(*HfwPlate, id, kind, const *HfwMesh) -> i32
 hfw_plate_object_remove_volume(*HfwPlate, id, index) -> i32
 hfw_plate_object_volume_count(const *HfwPlate, id) -> ptrdiff_t
 hfw_plate_object_volume_kind(const *HfwPlate, id, index, *i32) -> i32
+hfw_plate_set_markers(*HfwPlate, const i32 *kinds, const double *zs,
+                      const char *const *texts, count) -> i32
+hfw_plate_marker_count(const *HfwPlate) -> ptrdiff_t
+hfw_plate_marker_get(const *HfwPlate, index, *i32 kind, *f64 z, char *text, len) -> i32
 hfw_plate_object_layer_heights(*HfwPlate, id, const double *pairs, count) -> i32
 hfw_plate_object_layer_heights_get(const *HfwPlate, id, double *out, len) -> ptrdiff_t
 hfw_plate_slice(const *HfwPlate, profile_path, first_layer_height, layer_height) -> *mut HfwGcode
@@ -137,6 +141,15 @@ means the plate's uniform height. `by layer` merges the objects on **Z**, not on
 layer number — two objects stepping differently do not agree on what layer 7 is —
 so the file changes Z whenever either object's next layer is higher. Objects that
 step alike therefore come out exactly as a round-robin put them.
+
+Markers are the plate's timeline: a command at a print height, of the three kinds the
+writer knows — custom G-code, a pause, a colour change. They belong to the plate and
+not to the profile, because two plates on one printer can pause at different heights.
+A typed marker takes its command from the printer profile (`pause_print_gcode`,
+`color_change_gcode`); a user with their own line to write wants a custom marker,
+whose text is written verbatim. A tool-change marker is not in the set: HFW has one
+extruder and no per-tool filament, so emitting `T{n}` would name a tool the engine
+cannot know exists.
 
 `hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
 called `hfw_plate_slice` for the first hour of its life, before the document existed

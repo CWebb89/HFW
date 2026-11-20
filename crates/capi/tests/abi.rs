@@ -1,6 +1,6 @@
 //! The C surface, exercised the way a C caller would exercise it.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{c_char, CStr, CString};
 use std::fs;
 
 use hfw_capi::{
@@ -9,16 +9,17 @@ use hfw_capi::{
     hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_free, hfw_mesh_from_bytes,
     hfw_mesh_load_file, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_transform,
     hfw_mesh_triangle_count, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
-    hfw_plate_free, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
-    hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
-    hfw_plate_object_enabled, hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get,
-    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_paint,
-    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_remove,
-    hfw_plate_object_remove_volume, hfw_plate_object_rotate, hfw_plate_object_set,
-    hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_open_project,
-    hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_slice, hfw_slice_meshes,
+    hfw_plate_free, hfw_plate_marker_count, hfw_plate_marker_get, hfw_plate_new,
+    hfw_plate_object_add_volume, hfw_plate_object_bounds, hfw_plate_object_clear_settings,
+    hfw_plate_object_count, hfw_plate_object_duplicate, hfw_plate_object_enabled,
+    hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mirror,
+    hfw_plate_object_name, hfw_plate_object_paint, hfw_plate_object_paint_get,
+    hfw_plate_object_placement, hfw_plate_object_remove, hfw_plate_object_remove_volume,
+    hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_volume_count,
+    hfw_plate_object_volume_kind, hfw_plate_open_project, hfw_plate_preview_json,
+    hfw_plate_project_bytes, hfw_plate_set_markers, hfw_plate_slice, hfw_slice_meshes,
     hfw_string_free, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE,
-    HFW_JOB_STAGE_FINISHED, HFW_VOLUME_NEGATIVE,
+    HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -944,4 +945,88 @@ fn per_object_layer_heights_cross_the_abi_and_read_back() {
 
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(cube) };
+}
+
+#[test]
+fn plate_markers_cross_the_abi_sorted_and_read_back() {
+    let plate = hfw_plate_new();
+    let custom = c_string("M117 check the seam");
+    let kinds = [HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE];
+    let zs = [4.0, 1.0];
+    let texts = [custom.as_ptr(), std::ptr::null()];
+    assert_eq!(
+        unsafe { hfw_plate_set_markers(plate, kinds.as_ptr(), zs.as_ptr(), texts.as_ptr(), 2) },
+        0,
+        "the timeline is accepted: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_marker_count(plate) }, 2);
+
+    let mut kind = -1i32;
+    let mut z = 0.0f64;
+    let mut text = [0 as c_char; 64];
+    assert_eq!(
+        unsafe { hfw_plate_marker_get(plate, 0, &mut kind, &mut z, text.as_mut_ptr(), text.len()) },
+        0,
+        "marker 0 reads: {}",
+        last_error()
+    );
+    assert_eq!(
+        kind, HFW_MARKER_PAUSE,
+        "the timeline reads back sorted by Z"
+    );
+    assert_eq!(z, 1.0);
+    assert_eq!(unsafe { std::ffi::CStr::from_ptr(text.as_ptr()) }, c"");
+    assert_eq!(
+        unsafe { hfw_plate_marker_get(plate, 1, &mut kind, &mut z, text.as_mut_ptr(), text.len()) },
+        0
+    );
+    assert_eq!(kind, HFW_MARKER_CUSTOM);
+    assert_eq!(z, 4.0);
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(text.as_ptr()) }
+            .to_str()
+            .unwrap(),
+        "M117 check the seam"
+    );
+    assert_eq!(
+        unsafe { hfw_plate_marker_get(plate, 2, &mut kind, &mut z, text.as_mut_ptr(), text.len()) },
+        -1,
+        "a marker past the end is refused"
+    );
+
+    let unknown = [9];
+    let one = [1.0];
+    let empty = [std::ptr::null()];
+    assert_eq!(
+        unsafe { hfw_plate_set_markers(plate, unknown.as_ptr(), one.as_ptr(), empty.as_ptr(), 1) },
+        -1,
+        "an unknown kind is refused"
+    );
+    assert!(
+        last_error().contains("custom"),
+        "the refusal lists the kinds it does know: {}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_plate_marker_count(plate) },
+        2,
+        "a refused list left the timeline alone"
+    );
+
+    assert_eq!(
+        unsafe {
+            hfw_plate_set_markers(
+                plate,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            )
+        },
+        0,
+        "an empty list clears the timeline"
+    );
+    assert_eq!(unsafe { hfw_plate_marker_count(plate) }, 0);
+    unsafe { hfw_plate_free(plate) };
 }

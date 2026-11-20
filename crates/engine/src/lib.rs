@@ -41,6 +41,7 @@ pub use hfw_toolpath::{
     evaluate as evaluate_perimeter, evaluate_full as evaluate_all, line_volume, JobTotals, Metrics,
     PlannedLayer as PlannedSlice, MANIFEST_HEADER,
 };
+pub use hfw_toolpath::{Marker, MarkerError, MarkerKind};
 pub use hfw_toolpath::{Painted, SeamPaint};
 pub use hfw_walls::{
     generate as generate_walls, Kind as PathKind, Line as Path, WallMode as Mode, WallParams,
@@ -704,6 +705,12 @@ pub struct Job {
     pub worst_layer: usize,
     /// Layers that produced no closed cross-section, with the reason.
     pub skipped: Vec<(usize, String)>,
+    /// Commands the plate runs at a height, earliest first.
+    ///
+    /// The job carries them rather than the settings because they belong to this
+    /// plate, not to the profile: two plates on one printer can pause at different
+    /// heights. The writer emits them at the layer that reaches their Z.
+    pub markers: Vec<Marker>,
     /// Seam paint, one entry per object label a path can carry.
     ///
     /// Empty when nothing on the plate was painted. The writer indexes it by
@@ -745,6 +752,7 @@ pub fn merge_stacks(mut stacks: Vec<Job>, order: PlateOrder, diagnostics: MeshDi
         worst_layer_ms: 0.0,
         worst_layer: 0,
         skipped: Vec::new(),
+        markers: Vec::new(),
         seam_paint: Vec::new(),
     };
     let mut sequence: Vec<(usize, usize)> = Vec::new();
@@ -1460,6 +1468,7 @@ fn run_with_paint(
         worst_layer_ms: worst_ms,
         worst_layer,
         skipped,
+        markers: Vec::new(),
         seam_paint: match seam_paint {
             Some(paint) => vec![paint],
             None => Vec::new(),

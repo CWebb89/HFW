@@ -771,3 +771,65 @@ fn layer_heights_survive_a_project_round_trip() {
         "the object kept its own step heights"
     );
 }
+
+#[test]
+fn the_plate_carries_its_timeline_into_the_job_and_through_a_project() {
+    let mut plate = plate();
+    plate.add("cube", cube()).expect("a cube adds");
+    plate
+        .set_markers(vec![
+            hfw_engine::Marker {
+                z: 4.0,
+                kind: hfw_engine::MarkerKind::Custom,
+                text: "M117 check the seam".to_owned(),
+            },
+            hfw_engine::Marker {
+                z: 1.0,
+                kind: hfw_engine::MarkerKind::Pause,
+                text: String::new(),
+            },
+        ])
+        .expect("the timeline is accepted");
+    assert_eq!(
+        plate.markers()[0].z,
+        1.0,
+        "the timeline sorts on the way in"
+    );
+
+    let job = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the plate slices");
+    assert_eq!(
+        job.markers,
+        plate.markers(),
+        "the job carries them in order"
+    );
+
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    assert_eq!(
+        reopened.markers(),
+        plate.markers(),
+        "the timeline survives the round trip"
+    );
+}
+
+#[test]
+fn a_marker_with_no_g_code_is_refused_by_the_plate() {
+    let mut plate = plate();
+    let refused = plate
+        .set_markers(vec![hfw_engine::Marker {
+            z: 2.0,
+            kind: hfw_engine::MarkerKind::Custom,
+            text: "  ".to_owned(),
+        }])
+        .expect_err("a custom marker with no G-code is refused");
+    assert!(
+        refused.to_string().contains("carries no G-code"),
+        "{refused}"
+    );
+    assert!(
+        plate.markers().is_empty(),
+        "the refused list changed nothing"
+    );
+}

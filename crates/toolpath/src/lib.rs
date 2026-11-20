@@ -441,6 +441,84 @@ mod tests {
     }
 }
 
+/// A command the file has to run at a print height.
+///
+/// This is the plate's timeline, not the profile's: a marker belongs to the job a
+/// user is looking at, the way a pause does, so it lives on the plate and travels
+/// into the file at its own Z rather than in the settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Marker {
+    /// Print Z the marker fires at, in millimetres. It fires on the first layer whose
+    /// bottom is below it and whose top reaches it.
+    pub z: f64,
+    /// What the marker does when it fires.
+    pub kind: MarkerKind,
+    /// G-code for [`MarkerKind::Custom`]; ignored for the kinds whose command comes
+    /// from the printer profile.
+    pub text: String,
+}
+
+/// What a [`Marker`] does when its height comes up.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MarkerKind {
+    /// Write `text` verbatim.
+    Custom,
+    /// Stop with the profile's `pause_print_gcode`.
+    Pause,
+    /// Change filament with the profile's `color_change_gcode`.
+    ColourChange,
+}
+
+/// Why a marker list cannot be used.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkerError {
+    /// The offending marker, by its index in the list.
+    pub index: usize,
+    /// What is wrong with it.
+    pub reason: String,
+}
+
+impl std::fmt::Display for MarkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "marker {}: {}", self.index, self.reason)
+    }
+}
+
+impl std::error::Error for MarkerError {}
+
+impl Marker {
+    /// Returns the markers sorted by Z, refusing any that cannot be written.
+    ///
+    /// A marker needs a finite Z. `Custom` also needs text: a custom marker with no
+    /// G-code in it is a note in the file rather than a command, which is what a pause
+    /// whose profile template is empty already becomes.
+    pub fn sorted(markers: Vec<Marker>) -> Result<Vec<Marker>, MarkerError> {
+        for (index, marker) in markers.iter().enumerate() {
+            if !marker.z.is_finite() {
+                return Err(MarkerError {
+                    index,
+                    reason: format!("Z {} is not a number", marker.z),
+                });
+            }
+            if marker.z < 0.0 {
+                return Err(MarkerError {
+                    index,
+                    reason: format!("Z {} mm is below the bed", marker.z),
+                });
+            }
+            if marker.kind == MarkerKind::Custom && marker.text.trim().is_empty() {
+                return Err(MarkerError {
+                    index,
+                    reason: "a custom marker carries no G-code".to_owned(),
+                });
+            }
+        }
+        let mut markers = markers;
+        markers.sort_by(|a, b| a.z.total_cmp(&b.z));
+        Ok(markers)
+    }
+}
+
 /// Seam paint, as the writer consumes it.
 ///
 /// The facets are triangles in model millimetres: an enforced one says the seam

@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use hfw_config::{Flavor, PrintSequence, PrinterConfig, Seam};
 use hfw_kernel::{Bounds, V2};
 use hfw_toolpath::PlannedLayer;
-use hfw_toolpath::{Painted, SeamPaint};
+use hfw_toolpath::{Marker, MarkerKind, Painted, SeamPaint};
 use hfw_walls::{Kind, Line};
 
 use crate::error::GcodeError;
@@ -3124,6 +3124,23 @@ pub fn generate_with_paint(
     object_name: Option<&str>,
     seam_paint: &[SeamPaint],
 ) -> Result<Gcode, GcodeError> {
+    generate_with_markers(layers, cfg, object_name, seam_paint, &[])
+}
+
+/// Writes G-code, honouring painted seam facets and the plate's timeline markers.
+///
+/// `markers` are the commands the plate runs at a height — a custom G-code line, a
+/// pause, a colour change. They are written at the first layer whose span reaches
+/// their Z, which is also where the profile's own pause and colour-change heights
+/// fire, and the two lists are merged so a marker the user placed and one the
+/// profile asked for cannot come out in different orders.
+pub fn generate_with_markers(
+    layers: &[PlannedLayer],
+    cfg: &PrinterConfig,
+    object_name: Option<&str>,
+    seam_paint: &[SeamPaint],
+    markers: &[Marker],
+) -> Result<Gcode, GcodeError> {
     cfg.validate()?;
     if layers.is_empty() {
         return Err(GcodeError::NoLayers);
@@ -3546,21 +3563,19 @@ pub fn generate_with_paint(
                 w.out.push('\n');
             }
         }
-        let markers = [
-            ("pause", &cfg.pause_heights, &cfg.pause_print_gcode),
-            (
-                "colour change",
-                &cfg.colour_change_heights,
-                &cfg.color_change_gcode,
-            ),
-        ];
-        for (kind, heights, text) in markers {
-            if !marker_fires(heights, z_bottom - z_shift + z_shift, z) {
-                continue;
-            }
-            let text = text.trim();
+        for marker in fired_markers(cfg, markers, z_bottom, z) {
+            let label = match marker.kind {
+                MarkerKind::Custom => "custom g-code",
+                MarkerKind::Pause => "pause",
+                MarkerKind::ColourChange => "colour change",
+            };
+            let text = marker.text.trim();
             if text.is_empty() {
-                let _ = writeln!(w.out, "; {kind} requested at Z{:.3} with no g-code set", z);
+                let _ = writeln!(
+                    w.out,
+                    "; {label} requested at Z{:.3} with no g-code set",
+                    marker.z
+                );
                 continue;
             }
             let per = [
@@ -3836,10 +3851,58 @@ fn substitute(text: &str, cfg: &PrinterConfig) -> Result<String, GcodeError> {
 }
 
 /// True when a requested height falls inside the layer being emitted.
-fn marker_fires(heights: &[f64], z_bottom: f64, z: f64) -> bool {
-    heights
+fn marker_fires(height: f64, z_bottom: f64, z: f64) -> bool {
+    height > z_bottom + 1e-9 && height <= z + 1e-9
+}
+
+/// The markers that fire on the layer spanning `z_bottom` to `z`, earliest first.
+///
+/// The profile's own pause and colour-change heights become markers here, so one
+/// ordering rule covers both: a marker placed at a height and one the profile asks
+/// for at the same height come out in the order the user's list gives, and two at
+/// different heights always come out lowest first.
+///
+/// A typed marker takes its command from the printer profile, never from the
+/// marker's own text: a pause is whatever `pause_print_gcode` says it is, so the same
+/// plate pauses correctly on two printers. A user with their own line to write wants
+/// a custom marker.
+fn fired_markers<'a>(
+    cfg: &'a PrinterConfig,
+    markers: &'a [Marker],
+    z_bottom: f64,
+    z: f64,
+) -> Vec<Marker> {
+    let mut fired: Vec<Marker> = cfg
+        .pause_heights
         .iter()
-        .any(|marker| *marker > z_bottom + 1e-9 && *marker <= z + 1e-9)
+        .map(|height| Marker {
+            z: *height,
+            kind: MarkerKind::Pause,
+            text: cfg.pause_print_gcode.clone(),
+        })
+        .chain(cfg.colour_change_heights.iter().map(|height| Marker {
+            z: *height,
+            kind: MarkerKind::ColourChange,
+            text: cfg.color_change_gcode.clone(),
+        }))
+        .filter(|marker| marker_fires(marker.z, z_bottom, z))
+        .collect();
+    fired.extend(
+        markers
+            .iter()
+            .filter(|marker| marker_fires(marker.z, z_bottom, z))
+            .map(|marker| Marker {
+                z: marker.z,
+                kind: marker.kind,
+                text: match marker.kind {
+                    MarkerKind::Custom => marker.text.clone(),
+                    MarkerKind::Pause => cfg.pause_print_gcode.clone(),
+                    MarkerKind::ColourChange => cfg.color_change_gcode.clone(),
+                },
+            }),
+    );
+    fired.sort_by(|a, b| a.z.total_cmp(&b.z));
+    fired
 }
 
 fn sanitise(name: &str) -> String {

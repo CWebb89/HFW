@@ -24,8 +24,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use hfw_engine::{
-    merge_stacks, run_with_volumes, Job, Mesh, MeshDiagnostics, MeshError, MeshTransform, Paint,
-    PlateOrder, Settings, Volume, VolumeKind,
+    merge_stacks, run_with_volumes, Job, Marker, Mesh, MeshDiagnostics, MeshError, MeshTransform,
+    Paint, PlateOrder, Settings, Volume, VolumeKind,
 };
 
 pub mod arrange;
@@ -517,6 +517,7 @@ pub fn is_identity(placement: &MeshTransform) -> bool {
 pub struct Plate {
     settings: Settings,
     objects: Vec<PlateObject>,
+    markers: Vec<Marker>,
     next_id: u64,
 }
 
@@ -526,8 +527,27 @@ impl Plate {
         Self {
             settings,
             objects: Vec::new(),
+            markers: Vec::new(),
             next_id: 0,
         }
+    }
+
+    /// The plate's timeline: what runs at a height, earliest first.
+    pub fn markers(&self) -> &[Marker] {
+        &self.markers
+    }
+
+    /// Replaces the plate's timeline, sorted by Z.
+    ///
+    /// A marker is a property of the plate rather than of the profile: it belongs to
+    /// the job in front of the user, so two plates on one printer can pause at
+    /// different heights. A custom marker with no G-code in it, or a Z that is not a
+    /// finite height above the bed, is refused here rather than written into a file
+    /// that would silently do nothing.
+    pub fn set_markers(&mut self, markers: Vec<Marker>) -> Result<(), PlateError> {
+        self.markers =
+            Marker::sorted(markers).map_err(|error| PlateError::Slice(error.to_string()))?;
+        Ok(())
     }
 
     /// The settings the job prints with, which an object may override.
@@ -901,7 +921,10 @@ impl Plate {
                     .collect(),
             })
             .collect();
-        slice_placed_with_progress(placed, first_layer_height, layer_height, order, progress)
+        let mut job =
+            slice_placed_with_progress(placed, first_layer_height, layer_height, order, progress)?;
+        job.markers = self.markers.clone();
+        Ok(job)
     }
 }
 

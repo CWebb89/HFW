@@ -37,7 +37,9 @@ mod job;
 mod preview;
 
 use hfw_config::PrinterConfig;
-use hfw_engine::{Job, Mesh, MeshTransform, Paint, PlateOrder, Settings, VolumeKind};
+use hfw_engine::{
+    Job, Marker, MarkerKind, Mesh, MeshTransform, Paint, PlateOrder, Settings, VolumeKind,
+};
 use hfw_plate::{ObjectId, Plate, PlateObject};
 
 /// Version of the surface this library exports.
@@ -227,9 +229,14 @@ fn bounds_from(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> HfwBound
 pub(crate) fn write_job(job: &Job, profile: &PrinterConfig) -> Result<HfwGcode, String> {
     let mut write_cfg = profile.clone();
     write_cfg.keep_position = true;
-    let written =
-        hfw_gcode::generate_with_paint(&job.layers, &write_cfg, Some("plate"), &job.seam_paint)
-            .map_err(|error| error.to_string())?;
+    let written = hfw_gcode::generate_with_markers(
+        &job.layers,
+        &write_cfg,
+        Some("plate"),
+        &job.seam_paint,
+        &job.markers,
+    )
+    .map_err(|error| error.to_string())?;
     let verified = hfw_gcode::verify(&written.text, &write_cfg).ok();
     let bytes = written.text.len();
     let text = CString::new(written.text)
@@ -1582,6 +1589,14 @@ pub unsafe extern "C" fn hfw_gcode_free(gcode: *mut HfwGcode) {
 }
 
 /// A volume that adds material to its object.
+/// A marker that writes its own G-code at its height.
+pub const HFW_MARKER_CUSTOM: c_int = 0;
+/// A marker that stops the print, with the profile's `pause_print_gcode`.
+pub const HFW_MARKER_PAUSE: c_int = 1;
+/// A marker that changes filament, with the profile's `color_change_gcode`.
+pub const HFW_MARKER_COLOUR: c_int = 2;
+
+/// A volume that adds material to its object.
 pub const HFW_VOLUME_PART: c_int = 0;
 /// A volume that removes material from its object.
 pub const HFW_VOLUME_NEGATIVE: c_int = 1;
@@ -1848,4 +1863,137 @@ pub unsafe extern "C" fn hfw_plate_object_layer_heights_get(
         Ok(heights.len() as isize)
     };
     report(get(), -1)
+}
+
+/// Sets the plate's timeline markers, sorted by Z.
+///
+/// `kinds` holds one [`HFW_MARKER_CUSTOM`]/`HFW_MARKER_PAUSE`/`HFW_MARKER_COLOUR` per
+/// marker, `zs` its print heights in millimetres, and `texts` its G-code — read only
+/// for `HFW_MARKER_CUSTOM`, where a marker with no G-code in it is refused rather
+/// than written into the file doing nothing. `count` of zero clears the timeline.
+///
+/// Returns 0 on success and -1 when a kind is not one of the three, a Z is not a
+/// finite height above the bed, a custom marker has no text, or a pointer is null.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call; `kinds`, `zs` and `texts` must
+/// point at `count` readable elements each, with every `texts` entry a live C string.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_set_markers(
+    plate: *mut HfwPlate,
+    kinds: *const i32,
+    zs: *const f64,
+    texts: *const *const c_char,
+    count: usize,
+) -> c_int {
+    let set = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        if count > 0 && (kinds.is_null() || zs.is_null() || texts.is_null()) {
+            return Err("a marker array is null".to_owned());
+        }
+        let mut markers = Vec::with_capacity(count);
+        for index in 0..count {
+            let (kind, z, text) = unsafe { (*kinds.add(index), *zs.add(index), *texts.add(index)) };
+            let kind = match kind {
+                HFW_MARKER_CUSTOM => MarkerKind::Custom,
+                HFW_MARKER_PAUSE => MarkerKind::Pause,
+                HFW_MARKER_COLOUR => MarkerKind::ColourChange,
+                other => {
+                    return Err(format!(
+                        "marker {index} has kind {other}, which is not one of \
+                         {HFW_MARKER_CUSTOM} (custom), {HFW_MARKER_PAUSE} (pause) or \
+                         {HFW_MARKER_COLOUR} (colour change)"
+                    ))
+                }
+            };
+            let text = if text.is_null() {
+                String::new()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(text) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            markers.push(Marker { z, kind, text });
+        }
+        unsafe { &mut *plate }
+            .plate
+            .set_markers(markers)
+            .map(|()| 0)
+            .map_err(|error| error.to_string())
+    };
+    report(set(), -1)
+}
+
+/// Number of markers on the plate's timeline, or -1 when the handle is null.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_marker_count(plate: *const HfwPlate) -> isize {
+    let count = || -> Result<isize, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        Ok(unsafe { &*plate }.plate.markers().len() as isize)
+    };
+    report(count(), -1)
+}
+
+/// Reads marker `index` back: its kind, its Z, and its G-code.
+///
+/// `text` receives up to `len` bytes of the marker's G-code including the terminator,
+/// truncated to fit. Returns 0 on success and -1 when the handle is null or the index
+/// is past the end.
+///
+/// # Safety
+///
+/// `plate` must be a live handle; `kind` and `z` must be writable, and `text` must be
+/// writable for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_marker_get(
+    plate: *const HfwPlate,
+    index: usize,
+    kind: *mut i32,
+    z: *mut f64,
+    text: *mut c_char,
+    len: usize,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let plate = unsafe { &*plate };
+        let marker = plate.plate.markers().get(index).ok_or_else(|| {
+            format!(
+                "the plate has {} markers, so marker {index} does not exist",
+                plate.plate.markers().len()
+            )
+        })?;
+        if !kind.is_null() {
+            unsafe {
+                *kind = match marker.kind {
+                    MarkerKind::Custom => HFW_MARKER_CUSTOM,
+                    MarkerKind::Pause => HFW_MARKER_PAUSE,
+                    MarkerKind::ColourChange => HFW_MARKER_COLOUR,
+                };
+            }
+        }
+        if !z.is_null() {
+            unsafe { *z = marker.z };
+        }
+        if !text.is_null() && len > 0 {
+            let mut bytes = marker.text.as_bytes().to_vec();
+            bytes.truncate(len - 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), text.cast::<u8>(), bytes.len());
+                *text.add(bytes.len()) = 0;
+            }
+        }
+        Ok(0)
+    };
+    report(read(), -1)
 }

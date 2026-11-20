@@ -18,7 +18,7 @@
 //! poses, and a reader that expected a pose would need to know our transform
 //! convention to place a part.
 
-use hfw_engine::{Mesh, Paint, PlateOrder, Settings, VolumeKind};
+use hfw_engine::{Marker, MarkerKind, Mesh, Paint, PlateOrder, Settings, VolumeKind};
 use hfw_mesh::{archive_parts, model_part_xml, objects_from_3mf_text};
 
 use crate::{ObjectId, Plate, PlateError};
@@ -29,8 +29,9 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 /// Version of the project part's own format.
 ///
 /// Version 2 added per-object paint, version 3 volumes, version 4 per-object layer
-/// heights. Older files still open: they simply carry none of what they predate.
-pub const PROJECT_VERSION: u32 = 4;
+/// heights, version 5 the plate's timeline markers. Older files still open: they
+/// simply carry none of what they predate.
+pub const PROJECT_VERSION: u32 = 5;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -166,6 +167,7 @@ impl Plate {
                 object.set_layer_heights(saved.layer_heights.clone())?;
             }
         }
+        plate.set_markers(extras.markers)?;
         Ok(plate)
     }
 
@@ -283,8 +285,37 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
             model += 1;
         }
     }
+    for marker in plate.markers() {
+        xml.push_str(&format!(
+            "  <marker z=\"{:.6}\" kind=\"{}\" text=\"{}\"/>\n",
+            marker.z,
+            marker_name(marker.kind),
+            escape(&marker.text)
+        ));
+    }
     xml.push_str("</hfwProject>\n");
     Ok(xml)
+}
+
+/// The name a marker's kind is written under.
+fn marker_name(kind: MarkerKind) -> &'static str {
+    match kind {
+        MarkerKind::Custom => "custom",
+        MarkerKind::Pause => "pause",
+        MarkerKind::ColourChange => "colour",
+    }
+}
+
+/// The kind a written name stands for.
+fn marker_kind(name: &str) -> Result<MarkerKind, PlateError> {
+    match name.trim() {
+        "custom" => Ok(MarkerKind::Custom),
+        "pause" => Ok(MarkerKind::Pause),
+        "colour" | "color" => Ok(MarkerKind::ColourChange),
+        other => Err(PlateError::Slice(format!(
+            "{other:?} is not a marker kind this engine writes"
+        ))),
+    }
 }
 
 /// A project part, split into what describes an object and what describes a volume.
@@ -292,6 +323,7 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
 struct SavedProject {
     objects: Vec<SavedObject>,
     volumes: Vec<SavedVolume>,
+    markers: Vec<Marker>,
 }
 
 /// Where one volume came from: which object owns it, which model-part object holds
@@ -391,9 +423,25 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
             kind,
         });
     }
+    let mut markers = Vec::new();
+    for marker in elements(xml, "marker") {
+        let z = attribute_in(&marker, "marker", "z")
+            .ok_or_else(|| PlateError::Slice("a marker has no z".to_owned()))?;
+        let kind = attribute_in(&marker, "marker", "kind")
+            .ok_or_else(|| PlateError::Slice("a marker has no kind".to_owned()))?;
+        let text = attribute_in(&marker, "marker", "text").unwrap_or_default();
+        markers.push(Marker {
+            z: z.trim()
+                .parse()
+                .map_err(|_| PlateError::Slice(format!("a marker's z is not a number: {z:?}")))?,
+            kind: marker_kind(&kind)?,
+            text,
+        });
+    }
     Ok(SavedProject {
         objects: saved,
         volumes,
+        markers,
     })
 }
 
@@ -617,7 +665,7 @@ mod tests {
             Err(PlateError::Slice(message)) => {
                 assert!(message.contains("version 9"), "message was `{message}`");
                 assert!(
-                    message.contains("versions 1 to 4"),
+                    message.contains("versions 1 to 5"),
                     "the refusal names the range it reads: `{message}`"
                 );
             }
