@@ -218,6 +218,70 @@ fn takes_free_text(code: &str) -> bool {
     )
 }
 
+/// True when a line came from one of the profile's own G-code blocks.
+///
+/// A machine's start G-code is the profile's text, not the writer's: a vendor prime
+/// that extrudes 25 mm in one move is what that profile asked for, and a vendor end
+/// block retracts without ever unretracting. The invariants below judge the generated
+/// toolpath, so they do not apply to these lines. Each template line is matched with
+/// every `{placeholder}` treated as a wildcard, which is what the writer substituted
+/// into it.
+fn from_profile_template(line: &str, template: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || template.trim().is_empty() {
+        return false;
+    }
+    template
+        .lines()
+        .any(|candidate| wildcard_line(candidate.trim(), line))
+}
+
+fn wildcard_line(template: &str, line: &str) -> bool {
+    let mut literals: Vec<&str> = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        literals.push(&rest[..open]);
+        rest = &rest[open + close + 1..];
+    }
+    literals.push(rest);
+    let mut cursor = 0usize;
+    for (index, literal) in literals.iter().enumerate() {
+        if literal.is_empty() {
+            continue;
+        }
+        if index == 0 {
+            let Some(stripped) = line.strip_prefix(literal) else {
+                return false;
+            };
+            cursor = line.len() - stripped.len();
+            continue;
+        }
+        let Some(found) = line[cursor..].find(literal) else {
+            return false;
+        };
+        cursor += found + literal.len();
+    }
+    match literals.last() {
+        Some(last) if !last.is_empty() => line.ends_with(last),
+        _ => true,
+    }
+}
+
+fn from_profile(line: &str, cfg: &PrinterConfig) -> bool {
+    [
+        cfg.start_gcode.as_str(),
+        cfg.start_filament_gcode.as_str(),
+        cfg.end_filament_gcode.as_str(),
+        cfg.end_gcode.as_str(),
+        cfg.layer_gcode.as_str(),
+    ]
+    .iter()
+    .any(|template| from_profile_template(line, template))
+}
+
 /// Checks a G-code file against a printer profile.
 pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
     let mut r = VerifyReport::default();
@@ -579,7 +643,7 @@ pub fn verify(gcode: &str, cfg: &PrinterConfig) -> VerifyReport {
                             high[i] = high[i].max(*value).max(from);
                         }
                     }
-                    Some(delta) if distance <= 1e-6 => {
+                    Some(delta) if distance <= 1e-6 && !from_profile(line, cfg) => {
                         retract_state += delta;
                         if delta.abs() > 10.0 {
                             push(

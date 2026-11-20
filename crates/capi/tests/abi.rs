@@ -7,7 +7,7 @@ use hfw_capi::{
     hfw_abi_version, hfw_buffer_free, hfw_gcode_free, hfw_gcode_len, hfw_gcode_text,
     hfw_gcode_verified, hfw_job_cancel, hfw_job_poll, hfw_job_start, hfw_job_take_gcode,
     hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_free, hfw_mesh_from_bytes,
-    hfw_mesh_load_file, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_transform,
+    hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_transform,
     hfw_mesh_triangle_count, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
     hfw_plate_free, hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count,
     hfw_plate_marker_get, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
@@ -1208,4 +1208,37 @@ fn a_modifier_volume_takes_settings_across_the_abi() {
         hfw_mesh_free(cube);
         hfw_plate_free(plate);
     }
+}
+
+#[test]
+fn a_mesh_builds_from_arrays_with_its_triangle_order_kept() {
+    let vertices: Vec<f64> = vec![
+        0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0, 10.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0, 10.0, 0.0,
+        10.0, 10.0, 10.0, 10.0, 0.0, 10.0, 10.0,
+    ];
+    let indices: Vec<u32> = vec![
+        0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6,
+        3, 0, 4, 3, 4, 7,
+    ];
+    let mesh = unsafe { hfw_mesh_new(vertices.as_ptr(), 8, indices.as_ptr(), 12) };
+    assert!(!mesh.is_null(), "a cube builds: {}", last_error());
+    assert_eq!(unsafe { hfw_mesh_triangle_count(mesh) }, 12);
+    let volume = unsafe { hfw_mesh_volume(mesh) };
+    assert!(
+        (volume - 1000.0).abs() < 0.5,
+        "a 10 mm cube is 1000 mm^3: {volume}"
+    );
+    let mut bounds = HfwBounds::default();
+    assert_eq!(
+        unsafe { hfw_mesh_bounds(mesh, &mut bounds) },
+        0,
+        "{}",
+        last_error()
+    );
+    assert_eq!(bounds.max, [10.0, 10.0, 10.0]);
+    assert!(
+        unsafe { hfw_mesh_new(vertices.as_ptr(), 8, indices.as_ptr(), 0) }.is_null(),
+        "a mesh with no triangles is refused"
+    );
+    unsafe { hfw_mesh_free(mesh) };
 }

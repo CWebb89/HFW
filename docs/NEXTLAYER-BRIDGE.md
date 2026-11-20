@@ -182,6 +182,13 @@ drops every one of those capabilities. The run reports what the document carried
 about an in-layer stroke whose Z matches no printed layer instead of dropping it in
 silence.
 
+A plate prints where the document put it, so `--plate` keeps every object's position;
+`--place` centres the whole document on the bed instead, which is what the application
+asks for when the model came from a command line and has no document around it. With a
+profile, the profile decides every setting the job prints with and the document adds the
+objects, their overrides, their volumes, their layer heights, the timeline and the
+strokes; without one, the plate is sliced on the settings it carries.
+
 `hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
 called `hfw_plate_slice` for the first hour of its life, before the document existed
 and the name was needed for the real thing; nothing outside this repository has been

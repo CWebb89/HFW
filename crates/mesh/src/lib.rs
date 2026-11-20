@@ -317,6 +317,24 @@ impl Mesh {
         })
     }
 
+    /// Creates a mesh from millimetre coordinates and triangle indices.
+    ///
+    /// Nothing is welded and no triangle is dropped, so index `i` of `triangles` is
+    /// triangle `i` of the result. A caller that holds per-triangle data -- paint, a
+    /// selection, a colour -- needs that guarantee, which is why this bypasses the
+    /// welding a triangle soup goes through.
+    pub fn from_millimetres(
+        vertices: &[[f64; 3]],
+        triangles: &[[u32; 3]],
+    ) -> Result<Self, MeshError> {
+        let mut points = Vec::with_capacity(vertices.len());
+        for vertex in vertices {
+            points.push(Point3::from_mm(vertex[0], vertex[1], vertex[2])?);
+        }
+        let faces = triangles.iter().map(|index| Triangle(*index)).collect();
+        Self::new(points, faces)
+    }
+
     /// Creates a mesh from triangle soup, welding coordinates after nanometre
     /// quantization. Vertex IDs follow first appearance in the input; ordered
     /// lookup avoids hash iteration affecting the result.

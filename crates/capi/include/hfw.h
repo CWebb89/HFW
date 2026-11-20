@@ -78,6 +78,19 @@ HfwMesh *hfw_mesh_load_file(const char *path);
 HfwMesh *hfw_mesh_from_bytes(const uint8_t *bytes, size_t len);
 
 /**
+ * Builds a mesh from millimetre coordinates and triangle indices.
+ *
+ * `vertices` holds `vertex_count` interleaved x, y, z triples, `indices`
+ * `triangle_count` triples of vertex numbers. Nothing is welded and no triangle is
+ * dropped, so triangle `i` of the handle is triangle `i` of `indices`: per-triangle
+ * data a caller holds in its own order stays aligned with it.
+ *
+ * Release the result with hfw_mesh_free(). Returns NULL on failure.
+ */
+HfwMesh *hfw_mesh_new(const double *vertices, size_t vertex_count, const uint32_t *indices,
+                      size_t triangle_count);
+
+/**
  * Returns a new handle holding `mesh` moved by `transform`.
  *
  * `mesh` is unchanged and stays the caller's to free. Rotation is in degrees,
@@ -275,6 +288,8 @@ ptrdiff_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
 #define HFW_VOLUME_SUPPORT_BLOCKER 2
 /** A volume support has to reach, over the volume's whole height. */
 #define HFW_VOLUME_SUPPORT_ENFORCER 3
+/** A volume that prints the part of the object it covers with its own settings. */
+#define HFW_VOLUME_MODIFIER 4
 
 /**
  * Attaches a volume to object `id`, in the object's own coordinates, and copies the

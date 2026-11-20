@@ -823,6 +823,57 @@ pub unsafe extern "C" fn hfw_mesh_from_bytes(bytes: *const u8, len: usize) -> *m
     report(build(), ptr::null_mut())
 }
 
+/// Builds a mesh from millimetre coordinates and triangle indices.
+///
+/// `vertices` holds `vertex_count` interleaved x, y, z triples and `indices`
+/// `triangle_count` triples of vertex numbers. Nothing is welded and no triangle is
+/// dropped, so triangle `i` of the handle is triangle `i` of `indices` -- which is what
+/// a caller that holds per-triangle data in its own order needs.
+///
+/// # Safety
+///
+/// `vertices` must point at `3 * vertex_count` readable doubles and `indices` at
+/// `3 * triangle_count` readable numbers, and neither may be null. The returned
+/// handle must be released with [`hfw_mesh_free`], and never used after it.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_new(
+    vertices: *const f64,
+    vertex_count: usize,
+    indices: *const u32,
+    triangle_count: usize,
+) -> *mut HfwMesh {
+    let build = || -> Result<*mut HfwMesh, String> {
+        if vertices.is_null() {
+            return Err("vertices is null".to_owned());
+        }
+        if indices.is_null() {
+            return Err("indices is null".to_owned());
+        }
+        if vertex_count == 0 {
+            return Err("the mesh has no vertices".to_owned());
+        }
+        if triangle_count == 0 {
+            return Err("the mesh has no triangles".to_owned());
+        }
+        let coordinates = unsafe { std::slice::from_raw_parts(vertices, vertex_count * 3) };
+        let corners = unsafe { std::slice::from_raw_parts(indices, triangle_count * 3) };
+        let points: Vec<[f64; 3]> = coordinates
+            .chunks_exact(3)
+            .map(|vertex| [vertex[0], vertex[1], vertex[2]])
+            .collect();
+        let faces: Vec<[u32; 3]> = corners
+            .chunks_exact(3)
+            .map(|face| [face[0], face[1], face[2]])
+            .collect();
+        let mesh = Mesh::from_millimetres(&points, &faces).map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(HfwMesh {
+            mesh,
+            paint: Paint::default(),
+        })))
+    };
+    report(build(), ptr::null_mut())
+}
+
 /// Returns a new handle holding `mesh` moved by `transform`.
 ///
 /// The source handle is unchanged and stays the caller's to free. A mirroring

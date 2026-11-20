@@ -150,8 +150,10 @@ Printer:
                               and enforcer, modifier with its own settings), the
                               plate's timeline markers and its in-layer strokes. This
                               is the only input that carries paint and volumes; STL
-                              cannot. Needs --gcode, and a --profile or --layer-height
-                              for the layers it prints at.
+                              cannot. A plate prints where the document put it, so
+                              its objects are not moved; --place centres the whole
+                              document on the bed instead. Needs --gcode, and a
+                              --profile or --layer-height for the layers it prints at.
   --in-layer <path>           Strokes printed inside a layer that the model does not
                               describe: one `<z> <width> <height> <speed> x y x y ...`
                               per line, with `| <gcode>` written first. Calibration
@@ -253,6 +255,9 @@ struct Options {
     /// A plate file the app wrote: objects, paint, volumes, heights and the plate's own
     /// timeline, read as a document rather than as a pile of meshes.
     plate: Option<PathBuf>,
+    /// Centre a plate file's objects on the bed instead of printing them where the
+    /// document put them.
+    place: bool,
     json: bool,
     json_paths: bool,
     /// Where the intake report goes as JSON, one entry per key the preset stated.
@@ -312,6 +317,7 @@ impl Options {
             markers: Vec::new(),
             in_layer: Vec::new(),
             plate: None,
+            place: false,
             json: false,
             json_paths: false,
             intake_json: None,
@@ -733,6 +739,7 @@ fn parse_arguments() -> Result<Option<Options>, String> {
                     heights(&value).map_err(|e| format!("--colour-change-at: {e}"))?;
             }
             "--plate" => o.plate = Some(PathBuf::from(next_value(&mut arguments, "--plate")?)),
+            "--place" => o.place = true,
             "--in-layer" => {
                 let path = PathBuf::from(next_value(&mut arguments, "--in-layer")?);
                 o.in_layer = read_in_layer(&path)?;
@@ -999,8 +1006,19 @@ fn run_plate(o: &Options, path: &Path) -> Result<(), String> {
         Some(PrintSequence::ByObject) => PlateOrder::ByObject,
         _ => PlateOrder::ByLayer,
     };
+    // A plate is what sits on the bed; the printer and the process are the profile.
+    // So a profile decides every setting a job prints with, and the document adds
+    // the objects, their overrides, their volumes, their layer heights, the timeline
+    // and the strokes on top. Without a profile a plate file is sliced on its own
+    // settings, which is what a file written by the engine carries.
+    let settings = if o.profile_config.is_some() {
+        o.settings.clone()
+    } else {
+        outln!("No profile given: slicing on the plate file's own settings.");
+        plate.settings().clone()
+    };
     let job = plate
-        .slice(first_layer_height, layer_height, order)
+        .slice_using(&settings, first_layer_height, layer_height, order)
         .map_err(|error| error.to_string())?;
     let names: Vec<String> = plate
         .objects()
@@ -1033,7 +1051,7 @@ fn run_plate(o: &Options, path: &Path) -> Result<(), String> {
         job.layers.len(),
         per_object.join(", ")
     );
-    let written = write_gcode(o, &job, gcode, true)?;
+    let written = write_gcode(o, &job, gcode, !o.place)?;
     let _ = written;
     Ok(())
 }
