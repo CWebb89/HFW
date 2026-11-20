@@ -303,6 +303,9 @@ pub struct PrinterConfig {
     pub support_interface_density: f64,
     /// Drop support columns that would have to rest on the part.
     pub support_on_build_plate_only: bool,
+    /// Support only where the part is painted (`enforcers_only` in the dialect's
+    /// spelling), rather than under every overhang.
+    pub support_painted_only: bool,
     /// Smallest overhang patch worth supporting, in square millimetres.
     pub support_min_area: f64,
     /// Support body shape: `normal` or `tree`.
@@ -1075,6 +1078,7 @@ impl Default for PrinterConfig {
             support_density: 0.15,
             support_interface_density: 0.8,
             support_on_build_plate_only: false,
+            support_painted_only: false,
             support_min_area: 2.0,
             support_style: "normal".to_owned(),
             support_branch_angle: 40.0,

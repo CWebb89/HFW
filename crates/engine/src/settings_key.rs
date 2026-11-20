@@ -317,8 +317,25 @@ impl Settings {
                 self.infill_mut(refused)?.anchor_max = anchor
             }
             "support" => {
-                self.support = if boolean(value).ok_or_else(|| refused(ON_OFF))? {
-                    Some(crate::SupportSettings::new(self.wall.w))
+                // The dialect names what to support rather than whether to: `none`,
+                // `everywhere` and `buildplate` are the switches, and `enforcers_only`
+                // turns support on with the painted facets as its only seeds.
+                let text = lower(value);
+                let painted_only = text == "enforcers_only";
+                let on = if painted_only {
+                    true
+                } else {
+                    match text.as_str() {
+                        "enabled" | "enable" | "everywhere" | "auto" | "buildplate"
+                        | "build_plate" => true,
+                        "disabled" | "disable" | "none" => false,
+                        _ => boolean(&text).ok_or_else(|| refused(ON_OFF))?,
+                    }
+                };
+                self.support = if on {
+                    let mut params = crate::SupportSettings::new(self.wall.w);
+                    params.painted_only = painted_only;
+                    Some(params)
                 } else {
                     None
                 }
@@ -687,6 +704,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_dialects_support_spellings_say_what_to_support() {
+        let mut settings = Settings::new(0.4, 3);
+        settings.apply_key("support", "everywhere").unwrap();
+        let everywhere = settings.support.expect("everywhere turns support on");
+        assert!(!everywhere.painted_only);
+
+        settings.apply_key("support", "none").unwrap();
+        assert!(settings.support.is_none(), "`none` turns support off");
+
+        settings.apply_key("support", "enforcers_only").unwrap();
+        let painted = settings.support.expect("`enforcers_only` turns support on");
+        assert!(
+            painted.painted_only,
+            "`enforcers_only` supports only what the painter marked"
+        );
+
+        let refused = settings.apply_key("support", "sometimes");
+        assert!(
+            refused.is_err(),
+            "an unknown spelling is refused, not guessed"
+        );
     }
 
     #[test]

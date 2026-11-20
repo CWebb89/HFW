@@ -476,6 +476,7 @@ fn support_from(cfg: &PrinterConfig) -> SupportParams {
         cfg.support_interface_density
     };
     sp.on_build_plate_only = cfg.support_on_build_plate_only;
+    sp.painted_only = cfg.support_painted_only;
     sp.min_area = cfg.support_min_area;
     sp.style = if cfg.support_style == "tree" {
         SupportStyle::Tree

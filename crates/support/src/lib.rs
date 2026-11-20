@@ -61,6 +61,13 @@ pub struct SupportParams {
     pub first_layer_expansion: f64,
     /// Layers from the bed that are supported whether they overhang or not.
     pub enforce_layers: usize,
+    /// Support only where the part is painted, not under every overhang.
+    ///
+    /// The reference dialects spell this `support_material = enforcers_only`: a
+    /// painter marks the facets that need support and nothing else is supported. The
+    /// painted enforcers are the only seeds, so a part with no painted overhang gets
+    /// no support at all.
+    pub painted_only: bool,
     /// Dense layers where a column meets whatever it stands on.
     pub bottom_interface_layers: usize,
     /// Steepest lean of a branch at the tip, in degrees.
@@ -133,6 +140,7 @@ impl SupportParams {
             sheath: false,
             first_layer_expansion: 0.0,
             enforce_layers: 0,
+            painted_only: false,
             bottom_interface_layers: 0,
             tree_angle_slow: 40.0,
             tree_top_rate: 30.0,
@@ -391,6 +399,10 @@ fn seed_masks(
     let n = regions.len();
     let mut seeds = Vec::with_capacity(n);
     for k in 0..n {
+        if p.painted_only {
+            seeds.push(vec![0_u64; words]);
+            continue;
+        }
         let reach = height_at(heights, k) * p.threshold_angle.to_radians().tan();
         let own = cache.own_bits(k);
         let below = cache.below_bits(k);
@@ -409,7 +421,7 @@ fn seed_masks(
         drop_small(&mut seed, &grid.grid, p.min_area);
         seeds.push(seed);
     }
-    if p.enforce_layers > 0 {
+    if p.enforce_layers > 0 && !p.painted_only {
         for (k, seed) in seeds.iter_mut().enumerate().take(n.min(p.enforce_layers)) {
             let own = cache.own_bits(k);
             let mut onto: Vec<u64> = seed.clone();
@@ -417,7 +429,7 @@ fn seed_masks(
             *seed = onto;
         }
     }
-    if p.first_layer_expansion > 0.0 && n > 0 {
+    if p.first_layer_expansion > 0.0 && n > 0 && !p.painted_only {
         seeds[0] = dilate(&seeds[0], &grid.grid, p.first_layer_expansion, words);
     }
     if let Some(enforced) = enforced {
@@ -1465,6 +1477,43 @@ mod tests {
         assert!(
             cell(&columns(&cleared).0[0], &grid, 27.0, 10.0),
             "a blocker removes support only inside its own footprint"
+        );
+    }
+
+    #[test]
+    fn painted_only_supports_nothing_but_what_was_painted() {
+        let regions = post_and_table(20, 10, 4.0, 30.0);
+        let cache = MaskCache::new(&regions, 0.2, 12);
+        let heights = flat(&regions, 0.2);
+        let p = SupportParams {
+            painted_only: true,
+            ..SupportParams::new(0.4)
+        };
+        let grid = *cache.grid();
+        let unpainted = Supports::build_with_paint(&regions, &cache, &p, &heights, None);
+        assert!(
+            columns(&unpainted)
+                .0
+                .iter()
+                .all(|layer| layer.iter().all(|w| *w == 0)),
+            "`enforcers_only` with nothing painted supports nothing at all"
+        );
+        let painted = PaintRegions {
+            enforcers: vec![PaintSpan {
+                footprint: square(18.0, 8.0, 22.0, 12.0),
+                bottom: 2.0,
+                top: 2.1,
+            }],
+            blockers: Vec::new(),
+        };
+        let built = Supports::build_with_paint(&regions, &cache, &p, &heights, Some(&painted));
+        assert!(
+            cell(&columns(&built).0[0], &grid, 20.0, 10.0),
+            "the painted facet is the only seed, and it is supported"
+        );
+        assert!(
+            !cell(&columns(&built).0[0], &grid, 27.0, 10.0),
+            "the table's far end overhangs and is left unsupported: nothing seeded it"
         );
     }
 

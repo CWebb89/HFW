@@ -686,7 +686,18 @@ impl PrinterConfig {
             "top_solid_speed" => self.top_solid_speed = number(key, value)?,
             "support_speed" => self.support_speed = number(key, value)?,
             "support_interface_speed" => self.support_interface_speed = number(key, value)?,
-            "support" => self.support = boolean(key, value)?,
+            "support" => {
+                // `enforcers_only` is the dialect's "support what the painter marked
+                // and nothing else": it turns support on with the painted facets as
+                // the only seeds, rather than saying nothing about support at all.
+                let text = value.trim().to_ascii_lowercase();
+                self.support_painted_only = text == "enforcers_only";
+                self.support = if self.support_painted_only {
+                    true
+                } else {
+                    boolean(key, value)?
+                }
+            }
             "support_threshold_angle" => self.support_threshold_angle = number(key, value)?,
             "support_xy_gap" => self.support_xy_gap = number(key, value)?,
             "support_z_gap" => self.support_z_gap = number(key, value)?,
