@@ -11,13 +11,14 @@ use hfw_capi::{
     hfw_mesh_triangle_count, hfw_mesh_volume, hfw_plate_add, hfw_plate_arrange, hfw_plate_bounds,
     hfw_plate_free, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
     hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
-    hfw_plate_object_enabled, hfw_plate_object_mirror, hfw_plate_object_name,
-    hfw_plate_object_paint, hfw_plate_object_paint_get, hfw_plate_object_placement,
-    hfw_plate_object_remove, hfw_plate_object_remove_volume, hfw_plate_object_rotate,
-    hfw_plate_object_set, hfw_plate_object_volume_count, hfw_plate_object_volume_kind,
-    hfw_plate_open_project, hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_slice,
-    hfw_slice_meshes, hfw_string_free, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED,
-    HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_VOLUME_NEGATIVE,
+    hfw_plate_object_enabled, hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get,
+    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_paint,
+    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_remove,
+    hfw_plate_object_remove_volume, hfw_plate_object_rotate, hfw_plate_object_set,
+    hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_open_project,
+    hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_slice, hfw_slice_meshes,
+    hfw_string_free, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE,
+    HFW_JOB_STAGE_FINISHED, HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -889,4 +890,58 @@ fn a_volume_crosses_the_abi_and_its_kind_reads_back() {
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(cube) };
     unsafe { hfw_mesh_free(cutter) };
+}
+
+#[test]
+fn per_object_layer_heights_cross_the_abi_and_read_back() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(id, 0);
+
+    let round_trip = || -> Vec<(f64, f64)> {
+        let mut out = vec![0.0f64; 8];
+        let written =
+            unsafe { hfw_plate_object_layer_heights_get(plate, id, out.as_mut_ptr(), out.len()) };
+        assert!(written >= 0, "read failed: {}", last_error());
+        out.truncate(written as usize * 2);
+        out.chunks_exact(2).map(|pair| (pair[0], pair[1])).collect()
+    };
+    assert!(
+        round_trip().is_empty(),
+        "an object has no profile by default"
+    );
+
+    let pairs = [0.0, 0.2, 4.0, 0.12];
+    assert_eq!(
+        unsafe { hfw_plate_object_layer_heights(plate, id, pairs.as_ptr(), 2) },
+        0,
+        "the profile is accepted: {}",
+        last_error()
+    );
+    assert_eq!(round_trip(), vec![(0.0, 0.2), (4.0, 0.12)]);
+
+    let backwards = [8.0, 0.2, 2.0, 0.12];
+    assert_eq!(
+        unsafe { hfw_plate_object_layer_heights(plate, id, backwards.as_ptr(), 2) },
+        -1,
+        "a descending profile is refused"
+    );
+    assert!(
+        last_error().contains("does not come after"),
+        "the refusal says what is wrong: {}",
+        last_error()
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_object_layer_heights(plate, id, std::ptr::null(), 0) },
+        0,
+        "an empty list clears the profile: {}",
+        last_error()
+    );
+    assert!(round_trip().is_empty());
+
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
 }

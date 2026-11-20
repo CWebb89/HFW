@@ -28,9 +28,9 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 
 /// Version of the project part's own format.
 ///
-/// Version 2 added per-object paint, version 3 volumes. Older files still open:
-/// they simply carry none of what they predate.
-pub const PROJECT_VERSION: u32 = 3;
+/// Version 2 added per-object paint, version 3 volumes, version 4 per-object layer
+/// heights. Older files still open: they simply carry none of what they predate.
+pub const PROJECT_VERSION: u32 = 4;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -163,6 +163,7 @@ impl Plate {
                     support: saved.support.clone(),
                     seam: saved.seam.clone(),
                 })?;
+                object.set_layer_heights(saved.layer_heights.clone())?;
             }
         }
         Ok(plate)
@@ -206,6 +207,7 @@ struct SavedObject {
     settings: Vec<(String, String)>,
     support: Vec<u8>,
     seam: Vec<u8>,
+    layer_heights: Vec<(f64, f64)>,
 }
 
 /// The name a volume's kind is written and read under.
@@ -253,6 +255,11 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
                 "    <setting key=\"{}\" value=\"{}\"/>\n",
                 escape(key),
                 escape(&value)
+            ));
+        }
+        for (z, height) in object.layer_heights() {
+            xml.push_str(&format!(
+                "    <layer z=\"{z:.6}\" height=\"{height:.6}\"/>\n"
             ));
         }
         for (channel, states) in paint_channels(&object.paint) {
@@ -337,12 +344,26 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
                 _ => continue,
             }
         }
+        let mut layer_heights = Vec::new();
+        for layer in elements(&block, "layer") {
+            let z = attribute_in(&layer, "layer", "z")
+                .ok_or_else(|| PlateError::Slice("a layer height has no z".to_owned()))?;
+            let height = attribute_in(&layer, "layer", "height")
+                .ok_or_else(|| PlateError::Slice("a layer height has no height".to_owned()))?;
+            let number = |text: &str, what: &str| -> Result<f64, PlateError> {
+                text.trim().parse().map_err(|_| {
+                    PlateError::Slice(format!("a layer height's {what} is not a number: {text:?}"))
+                })
+            };
+            layer_heights.push((number(&z, "z")?, number(&height, "height")?));
+        }
         saved.push(SavedObject {
             index,
             enabled: enabled.trim() != "0",
             settings,
             support,
             seam,
+            layer_heights,
         });
     }
     saved.sort_by_key(|saved| saved.index);
@@ -596,7 +617,7 @@ mod tests {
             Err(PlateError::Slice(message)) => {
                 assert!(message.contains("version 9"), "message was `{message}`");
                 assert!(
-                    message.contains("versions 1 to 3"),
+                    message.contains("versions 1 to 4"),
                     "the refusal names the range it reads: `{message}`"
                 );
             }

@@ -93,6 +93,8 @@ pub enum PlateError {
     Paint(MeshError),
     /// A volume could not be attached or removed.
     Volume(String),
+    /// An object's own layer heights were not usable.
+    LayerHeights(String),
 }
 
 impl fmt::Display for PlateError {
@@ -107,6 +109,7 @@ impl fmt::Display for PlateError {
             PlateError::NoSuchObject(id) => write!(f, "no object on the plate has id {id}"),
             PlateError::Setting(error) => write!(f, "{error}"),
             PlateError::Volume(message) => write!(f, "{message}"),
+            PlateError::LayerHeights(message) => write!(f, "{message}"),
             PlateError::Cancelled => write!(f, "the job was cancelled"),
             PlateError::DoesNotFit {
                 object,
@@ -232,6 +235,7 @@ pub struct PlateObject {
     settings: Option<Settings>,
     paint: Paint,
     volumes: Vec<PlateVolume>,
+    layer_heights: Vec<(f64, f64)>,
     overrides: BTreeSet<String>,
     ignored_overrides: BTreeSet<String>,
 }
@@ -363,6 +367,42 @@ impl PlateObject {
     /// The volumes attached to this object, in the order they were added.
     pub fn volumes(&self) -> &[PlateVolume] {
         &self.volumes
+    }
+
+    /// The object's own layer heights, as `(z, height)` pairs in millimetres.
+    ///
+    /// Empty when the object prints at the plate's uniform layer height. This is
+    /// the object's own answer, not the plate's: two parts on one bed can step at
+    /// different heights, and the file interleaves them on Z rather than on layer
+    /// number.
+    pub fn layer_heights(&self) -> &[(f64, f64)] {
+        &self.layer_heights
+    }
+
+    /// Sets the object's own layer heights, or clears them with an empty list.
+    ///
+    /// Pairs are `(z, height)`: a layer whose bottom sits at or above `z` uses that
+    /// height until the next pair takes over. They are checked for a rising `z` and
+    /// a positive height here, and against the profile's thinnest and thickest
+    /// allowed step when the object is sliced — the same place the plate's own
+    /// profile is checked, so both are refused by the same code.
+    pub fn set_layer_heights(&mut self, heights: Vec<(f64, f64)>) -> Result<(), PlateError> {
+        let mut last = f64::NEG_INFINITY;
+        for (z, height) in &heights {
+            if !z.is_finite() || !height.is_finite() || *height <= 0.0 {
+                return Err(PlateError::LayerHeights(format!(
+                    "{z} mm at {height} mm: a layer height has to be a positive finite number"
+                )));
+            }
+            if *z <= last {
+                return Err(PlateError::LayerHeights(format!(
+                    "{z} mm does not come after {last} mm: the pairs have to rise"
+                )));
+            }
+            last = *z;
+        }
+        self.layer_heights = heights;
+        Ok(())
     }
 
     /// Attaches a volume to this object.
@@ -555,6 +595,7 @@ impl Plate {
             settings: None,
             paint: Paint::default(),
             volumes: Vec::new(),
+            layer_heights: Vec::new(),
             overrides: BTreeSet::new(),
             ignored_overrides: BTreeSet::new(),
         });
@@ -808,6 +849,7 @@ impl Plate {
         }
         let mut moved: Vec<Option<Mesh>> = Vec::with_capacity(objects.len());
         let mut moved_volumes: Vec<Vec<Option<Mesh>>> = Vec::with_capacity(objects.len());
+        let mut stepped: Vec<Option<Settings>> = Vec::with_capacity(objects.len());
         for object in &objects {
             let identity = is_identity(&object.placement);
             moved.push(if identity {
@@ -829,15 +871,25 @@ impl Plate {
                 });
             }
             moved_volumes.push(volumes);
+            stepped.push(if object.layer_heights().is_empty() {
+                None
+            } else {
+                let mut own = object.settings().unwrap_or(settings).clone();
+                own.layer_profile = object.layer_heights().to_vec();
+                Some(own)
+            });
         }
         let placed: Vec<PlacedObject> = objects
             .iter()
             .zip(&moved)
             .zip(&moved_volumes)
-            .map(|((object, moved), volumes)| PlacedObject {
+            .zip(&stepped)
+            .map(|(((object, moved), volumes), stepped)| PlacedObject {
                 mesh: moved.as_ref().unwrap_or(&object.mesh),
                 paint: Some(&object.paint),
-                settings: object.settings().unwrap_or(settings),
+                settings: stepped
+                    .as_ref()
+                    .unwrap_or_else(|| object.settings().unwrap_or(settings)),
                 volumes: object
                     .volumes()
                     .iter()

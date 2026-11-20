@@ -1746,3 +1746,106 @@ pub unsafe extern "C" fn hfw_plate_object_volume_kind(
     };
     report(kind(), -1)
 }
+
+/// Sets object `id`'s own layer heights, as `count` interleaved `(z, height)` pairs
+/// of millimetres.
+///
+/// A layer whose bottom sits at or above a `z` uses that height until the next pair
+/// takes over; a `count` of zero clears the object back to the plate's uniform
+/// layer height. The pairs are checked here for a rising `z` and a positive height,
+/// and against the profile's thinnest and thickest allowed step when the object is
+/// sliced. Two objects on one plate may step differently: the file is interleaved on
+/// Z, so a layer change happens when either object's next layer is higher.
+///
+/// Returns 0 on success and -1 when the object is not on the plate, the pairs do not
+/// rise, or a height is not positive.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call and `pairs` must point at
+/// `count * 2` readable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_layer_heights(
+    plate: *mut HfwPlate,
+    id: u64,
+    pairs: *const f64,
+    count: usize,
+) -> c_int {
+    let set = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        if count > 0 && pairs.is_null() {
+            return Err("layer height pointer is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let flat = if count == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(pairs, count * 2) }.to_vec()
+        };
+        let heights: Vec<(f64, f64)> = flat
+            .chunks_exact(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect();
+        unsafe { &mut *plate }
+            .plate
+            .object_mut(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?
+            .set_layer_heights(heights)
+            .map(|()| 0)
+            .map_err(|error| error.to_string())
+    };
+    report(set(), -1)
+}
+
+/// Reads object `id`'s own layer heights back as interleaved `(z, height)` pairs.
+///
+/// Returns the number of pairs on success, 0 when the object prints at the plate's
+/// uniform height, and -1 when the object is not on the plate or `len` pairs do not
+/// fit in `out`.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` must point at `len * 2` writable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_layer_heights_get(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut f64,
+    len: usize,
+) -> isize {
+    let get = || -> Result<isize, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let object = unsafe { &*plate }
+            .plate
+            .object(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        let heights = object.layer_heights();
+        if heights.is_empty() {
+            return Ok(0);
+        }
+        if out.is_null() {
+            return Err("layer height pointer is null".to_owned());
+        }
+        if len < heights.len() {
+            return Err(format!(
+                "object {id} has {} layer height pairs, more than the {len} asked for",
+                heights.len()
+            ));
+        }
+        for (index, (z, height)) in heights.iter().enumerate() {
+            unsafe {
+                *out.add(index * 2) = *z;
+                *out.add(index * 2 + 1) = *height;
+            }
+        }
+        Ok(heights.len() as isize)
+    };
+    report(get(), -1)
+}

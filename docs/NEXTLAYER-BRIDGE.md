@@ -104,6 +104,8 @@ hfw_plate_object_add_volume(*HfwPlate, id, kind, const *HfwMesh) -> i32
 hfw_plate_object_remove_volume(*HfwPlate, id, index) -> i32
 hfw_plate_object_volume_count(const *HfwPlate, id) -> ptrdiff_t
 hfw_plate_object_volume_kind(const *HfwPlate, id, index, *i32) -> i32
+hfw_plate_object_layer_heights(*HfwPlate, id, const double *pairs, count) -> i32
+hfw_plate_object_layer_heights_get(const *HfwPlate, id, double *out, len) -> ptrdiff_t
 hfw_plate_slice(const *HfwPlate, profile_path, first_layer_height, layer_height) -> *mut HfwGcode
 hfw_plate_free(*HfwPlate)
 
@@ -128,6 +130,13 @@ gets walls of its own), and `HFW_VOLUME_SUPPORT_BLOCKER`/`_ENFORCER` act over th
 volume's whole height through the same mask a painted facet uses. A *modifier*
 volume — one carrying settings of its own — is not in the ABI, because a layer under
 one carries two settings at once and the planner does not yet split a layer.
+
+Layer heights are per object, as `(z, height)` pairs: a layer whose bottom sits at
+or above a `z` uses that height until the next pair takes over, and an empty list
+means the plate's uniform height. `by layer` merges the objects on **Z**, not on
+layer number — two objects stepping differently do not agree on what layer 7 is —
+so the file changes Z whenever either object's next layer is higher. Objects that
+step alike therefore come out exactly as a round-robin put them.
 
 `hfw_slice_meshes` is the version-1 shortcut for a caller with no document. It was
 called `hfw_plate_slice` for the first hour of its life, before the document existed

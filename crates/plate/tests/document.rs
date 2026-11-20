@@ -685,3 +685,89 @@ fn volumes_survive_a_project_round_trip() {
         "with its geometry"
     );
 }
+
+#[test]
+fn one_object_steps_differently_and_the_plate_still_merges_on_z() {
+    let mut plate = plate();
+    let fine = plate.add("fine", cube()).expect("a cube adds");
+    plate.add("coarse", cube()).expect("a cube adds");
+    plate
+        .object_mut(fine)
+        .expect("added")
+        .set_layer_heights(vec![(0.0, 0.12)])
+        .expect("0.12 mm is a usable step");
+
+    let job = plate
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the plate slices");
+    let mut last = 0.0;
+    for layer in &job.layers {
+        let z = layer.print_z;
+        assert!(
+            z >= last,
+            "a by-layer merge runs upwards: {z} mm came after {last} mm"
+        );
+        last = z;
+    }
+    let fine_layers = job
+        .layers
+        .iter()
+        .filter(|layer| layer.paths.iter().all(|line| line.object == 0))
+        .count();
+    let coarse_layers = job
+        .layers
+        .iter()
+        .filter(|layer| layer.paths.iter().all(|line| line.object == 1))
+        .count();
+    assert!(
+        fine_layers > coarse_layers,
+        "the 0.12 mm object takes more layers than the 0.2 mm one: {fine_layers} against \
+         {coarse_layers}"
+    );
+}
+
+#[test]
+fn a_layer_height_profile_that_does_not_rise_is_refused_before_it_slices() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let object = plate.object_mut(id).expect("added");
+    let backwards = object
+        .set_layer_heights(vec![(8.0, 0.2), (2.0, 0.12)])
+        .expect_err("a descending z is refused");
+    assert!(
+        backwards.to_string().contains("does not come after"),
+        "the refusal says what is wrong: {backwards}"
+    );
+    let negative = object
+        .set_layer_heights(vec![(0.0, -0.2)])
+        .expect_err("a negative height is refused");
+    assert!(
+        negative.to_string().contains("positive finite"),
+        "the refusal says what is wrong: {negative}"
+    );
+    object
+        .set_layer_heights(vec![(0.0, 0.2), (4.0, 0.12)])
+        .expect("a rising profile is accepted");
+    assert_eq!(object.layer_heights().len(), 2);
+}
+
+#[test]
+fn layer_heights_survive_a_project_round_trip() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    plate
+        .object_mut(id)
+        .expect("added")
+        .set_layer_heights(vec![(0.0, 0.2), (4.0, 0.12)])
+        .expect("the profile is accepted");
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    let object = reopened
+        .object(ObjectId::from_number(1).expect("one is an id"))
+        .expect("the cube is back");
+    assert_eq!(
+        object.layer_heights(),
+        [(0.0, 0.2), (4.0, 0.12)],
+        "the object kept its own step heights"
+    );
+}

@@ -724,10 +724,16 @@ pub enum PlateOrder {
 /// Composes objects sliced on their own into one plate job.
 ///
 /// Each object is sliced and planned independently, which is what lets two
-/// objects on one plate carry different settings; the stacks are interleaved into
-/// print order here. Paths are relabelled with the object they belong to, because
-/// that label is the only thing that changes their order within a layer, and the
-/// per-object counters, metrics and skipped layers are folded into the job's.
+/// objects on one plate carry different settings *and different layer heights*;
+/// the stacks are interleaved into print order here. Paths are relabelled with the
+/// object they belong to, because that label is the only thing that changes their
+/// order within a layer, and the per-object counters, metrics and skipped layers
+/// are folded into the job's.
+///
+/// `by layer` is a merge on Z, not on layer number: two objects with different layer
+/// heights do not agree on what layer 7 is, so each step takes the next layer of
+/// whichever object sits lowest. Objects with the same heights therefore come out in
+/// object order within a layer, exactly as a round-robin would put them.
 pub fn merge_stacks(mut stacks: Vec<Job>, order: PlateOrder, diagnostics: MeshDiagnostics) -> Job {
     let mut job = Job {
         mesh_diagnostics: diagnostics,
@@ -741,16 +747,43 @@ pub fn merge_stacks(mut stacks: Vec<Job>, order: PlateOrder, diagnostics: MeshDi
         skipped: Vec::new(),
         seam_paint: Vec::new(),
     };
-    let tallest = stacks
-        .iter()
-        .map(|stack| stack.layers.len())
-        .max()
-        .unwrap_or(0);
-    for step in 0..stacks.len() * tallest {
-        let (object, layer_index) = match order {
-            PlateOrder::ByObject => (step / tallest.max(1), step % tallest.max(1)),
-            PlateOrder::ByLayer => (step % stacks.len(), step / stacks.len().max(1)),
-        };
+    let mut sequence: Vec<(usize, usize)> = Vec::new();
+    match order {
+        PlateOrder::ByObject => {
+            for (object, stack) in stacks.iter().enumerate() {
+                for index in 0..stack.layers.len() {
+                    sequence.push((object, index));
+                }
+            }
+        }
+        PlateOrder::ByLayer => {
+            let mut cursor = vec![0usize; stacks.len()];
+            loop {
+                let mut lowest: Option<usize> = None;
+                for (candidate, stack) in stacks.iter().enumerate() {
+                    let Some(layer) = stack.layers.get(cursor[candidate]) else {
+                        continue;
+                    };
+                    lowest = Some(match lowest {
+                        None => candidate,
+                        Some(best) => {
+                            if layer.print_z < stacks[best].layers[cursor[best]].print_z {
+                                candidate
+                            } else {
+                                best
+                            }
+                        }
+                    });
+                }
+                let Some(object) = lowest else {
+                    break;
+                };
+                sequence.push((object, cursor[object]));
+                cursor[object] += 1;
+            }
+        }
+    }
+    for (object, layer_index) in sequence {
         let Some(stack) = stacks.get_mut(object) else {
             continue;
         };

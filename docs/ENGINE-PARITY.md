@@ -111,6 +111,11 @@ is a change to the planner, not to the document.
 **What is needed.** Overrides keyed by object instance (done), plus region modifiers
 and height ranges. A "region" is an extra volume with its own settings.
 
+**Height ranges landed 2026-11-20.** `hfw_plate_object_layer_heights` gives one object
+its own `(z, height)` pairs while the rest of the plate keeps the uniform height, and
+`by layer` merges the stacks on Z rather than on layer number. The modifier volume
+remains the one gap in this row.
+
 **Check.** The same two assertions next-layer already measures against
 libslic3r: a 0.30 mm per-object layer height must reduce the layer count from
 125 to 84, and per-object `support_material: none` must leave zero support moves.

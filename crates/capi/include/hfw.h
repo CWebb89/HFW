@@ -314,6 +314,30 @@ int32_t hfw_plate_object_volume_kind(const HfwPlate *plate, uint64_t id, size_t 
                                      int32_t *out);
 
 /**
+ * Sets object `id`'s own layer heights, as `count` interleaved `(z, height)` pairs of
+ * millimetres; a `count` of 0 clears them back to the plate's uniform layer height.
+ *
+ * A layer whose bottom sits at or above a `z` uses that height until the next pair
+ * takes over. Two objects on one plate may step differently: `by layer` interleaves
+ * them on Z, so a layer change happens when either object's next layer is higher.
+ *
+ * Returns 0 on success, -1 when the object is not on the plate, the pairs do not
+ * rise, or a height is not positive.
+ */
+int32_t hfw_plate_object_layer_heights(HfwPlate *plate, uint64_t id, const double *pairs,
+                                       size_t count);
+
+/**
+ * Reads object `id`'s own layer heights back as interleaved `(z, height)` pairs.
+ *
+ * Returns the number of pairs written, 0 when the object prints at the plate's
+ * uniform height, and -1 when the object is not on the plate or `len` pairs do not
+ * fit in `out`.
+ */
+ptrdiff_t hfw_plate_object_layer_heights_get(const HfwPlate *plate, uint64_t id, double *out,
+                                             size_t len);
+
+/**
  * Removes object `id` from the plate. Every other object keeps its id.
  *
  * Returns 0 on success, -1 when the object is not on the plate.
