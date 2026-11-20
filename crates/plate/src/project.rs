@@ -122,6 +122,7 @@ impl Plate {
                 let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
                 object.set_paint(Paint {
                     support: saved.support.clone(),
+                    seam: saved.seam.clone(),
                 })?;
             }
         }
@@ -165,6 +166,12 @@ struct SavedObject {
     enabled: bool,
     settings: Vec<(String, String)>,
     support: Vec<u8>,
+    seam: Vec<u8>,
+}
+
+/// The channels a project part writes, with the names it writes them under.
+fn paint_channels(paint: &Paint) -> [(&'static str, &Vec<u8>); 2] {
+    [("support", &paint.support), ("seam", &paint.seam)]
 }
 
 fn project_part(plate: &Plate) -> Result<String, PlateError> {
@@ -189,10 +196,13 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
                 escape(&value)
             ));
         }
-        if !object.paint.support.is_empty() {
+        for (channel, states) in paint_channels(&object.paint) {
+            if states.is_empty() {
+                continue;
+            }
             xml.push_str(&format!(
-                "    <paint channel=\"support\" runs=\"{}\"/>\n",
-                encode_runs(&object.paint.support)
+                "    <paint channel=\"{channel}\" runs=\"{}\"/>\n",
+                encode_runs(states)
             ));
         }
         xml.push_str("  </object>\n");
@@ -230,21 +240,24 @@ fn parse_project(xml: &str) -> Result<Vec<SavedObject>, PlateError> {
             settings.push((unescape(&key), unescape(&value)));
         }
         let mut support = Vec::new();
+        let mut seam = Vec::new();
         for paint in elements(&block, "paint") {
             let channel = attribute_in(&paint, "paint", "channel")
                 .ok_or_else(|| PlateError::Slice("a paint block has no channel".to_owned()))?;
-            if channel != "support" {
-                continue;
-            }
             let runs = attribute_in(&paint, "paint", "runs")
                 .ok_or_else(|| PlateError::Slice("a paint block has no runs".to_owned()))?;
-            support = decode_runs(&runs)?;
+            match channel.trim() {
+                "support" => support = decode_runs(&runs)?,
+                "seam" => seam = decode_runs(&runs)?,
+                _ => continue,
+            }
         }
         saved.push(SavedObject {
             index,
             enabled: enabled.trim() != "0",
             settings,
             support,
+            seam,
         });
     }
     saved.sort_by_key(|saved| saved.index);

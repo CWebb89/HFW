@@ -85,8 +85,8 @@ list whose definition of done is:
 source: **43 of 303 files** under `src/` still reach into the C++ engine, sorted
 by the phase that removes each one. Zero rows left means the C++ engine is gone.
 Phases 0–6 build Rust replacements; phase 7 lists what simply will not be ported
-(text, cut, hollow, STEP import, SLA, MMU colour mixing, nesting arranger; support
-painting has since been built in HFW)
+(text, cut, hollow, STEP import, SLA, MMU colour mixing, nesting arranger; support and
+seam painting have since been built in HFW)
 — out by decision, not by neglect.
 
 One more reason the plan exists: while the binary links PrusaSlicer, next-layer is

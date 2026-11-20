@@ -745,6 +745,23 @@ fn paint_round_trips_through_the_mesh_and_the_plate_and_is_refused_when_wrong() 
     );
     assert_eq!(read, states, "the channel reads back what was written");
 
+    let mut seam = vec![0u8; triangles];
+    seam[5] = 1;
+    assert_eq!(
+        unsafe { hfw_mesh_paint_set(mesh, 1, seam.as_ptr(), seam.len()) },
+        0,
+        "the seam channel takes states: {}",
+        last_error()
+    );
+    let mut seam_read = vec![0u8; triangles];
+    let seam_written =
+        unsafe { hfw_mesh_paint_get(mesh, 1, seam_read.as_mut_ptr(), seam_read.len()) };
+    assert_eq!(seam_written as usize, triangles);
+    assert_eq!(
+        seam_read, seam,
+        "the seam channel reads back its own states"
+    );
+
     let short = [0u8; 3];
     assert_eq!(
         unsafe { hfw_mesh_paint_set(mesh, 0, short.as_ptr(), short.len()) },

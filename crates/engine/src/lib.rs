@@ -27,8 +27,8 @@ pub use hfw_infill::{
 };
 pub use hfw_mesh::{
     load_3mf_objects, three_mf_metadata, Mesh, MeshDiagnostics, MeshError, MeshRepairReport,
-    MeshTransform, ModelObject, Paint, PAINT_SUPPORT_BLOCKER, PAINT_SUPPORT_ENFORCER,
-    PAINT_SUPPORT_NONE,
+    MeshTransform, ModelObject, Paint, PAINT_SEAM_BLOCKER, PAINT_SEAM_ENFORCER, PAINT_SEAM_NONE,
+    PAINT_SUPPORT_BLOCKER, PAINT_SUPPORT_ENFORCER, PAINT_SUPPORT_NONE,
 };
 pub use hfw_slicing::{
     slice_mesh, SliceError as SlicingError, SliceLayer as Slice, MAX_CLOSE_GAPS,
@@ -41,6 +41,7 @@ pub use hfw_toolpath::{
     evaluate as evaluate_perimeter, evaluate_full as evaluate_all, line_volume, JobTotals, Metrics,
     PlannedLayer as PlannedSlice, MANIFEST_HEADER,
 };
+pub use hfw_toolpath::{Painted, SeamPaint};
 pub use hfw_walls::{
     generate as generate_walls, Kind as PathKind, Line as Path, WallMode as Mode, WallParams,
 };
@@ -676,6 +677,12 @@ pub struct Job {
     pub worst_layer: usize,
     /// Layers that produced no closed cross-section, with the reason.
     pub skipped: Vec<(usize, String)>,
+    /// Seam paint, one entry per object label a path can carry.
+    ///
+    /// Empty when nothing on the plate was painted. The writer indexes it by
+    /// `Line::object`, so a plate whose second part is painted carries an empty
+    /// entry for its first.
+    pub seam_paint: Vec<SeamPaint>,
 }
 
 /// How a plate of objects becomes one file.
@@ -705,6 +712,7 @@ pub fn merge_stacks(mut stacks: Vec<Job>, order: PlateOrder, diagnostics: MeshDi
         worst_layer_ms: 0.0,
         worst_layer: 0,
         skipped: Vec::new(),
+        seam_paint: Vec::new(),
     };
     let tallest = stacks
         .iter()
@@ -743,10 +751,15 @@ pub fn merge_stacks(mut stacks: Vec<Job>, order: PlateOrder, diagnostics: MeshDi
         job.volume.0 += stack.volume.0;
         job.volume.1 += stack.volume.1;
         add_stats(&mut job.stats, &stack.stats);
+        job.seam_paint
+            .push(stack.seam_paint.first().cloned().unwrap_or_default());
         if stack.worst_layer_ms > job.worst_layer_ms {
             job.worst_layer_ms = stack.worst_layer_ms;
             job.worst_layer = base + stack.worst_layer;
         }
+    }
+    if job.seam_paint.iter().all(SeamPaint::is_empty) {
+        job.seam_paint.clear();
     }
     job
 }
@@ -792,14 +805,48 @@ pub fn run_painted(
     layer_height: f64,
     settings: &Settings,
 ) -> Result<Job, EngineError> {
-    let support_paint = support_paint(mesh, paint)?;
+    let support = support_paint(mesh, paint)?;
+    let seam = seam_paint(mesh, paint)?;
     run_with_paint(
         mesh,
-        support_paint.as_ref(),
+        support.as_ref(),
+        seam,
         first_layer_height,
         layer_height,
         settings,
     )
+}
+
+/// Painted facets as the G-code writer consumes them.
+///
+/// Seam paint needs the facets themselves, not a footprint: the seam is a point
+/// on a wall, so the writer measures the distance from a candidate vertex to the
+/// face it was painted on.
+pub fn seam_paint(mesh: &Mesh, paint: &Paint) -> Result<Option<SeamPaint>, EngineError> {
+    paint.validate(mesh.triangle_count())?;
+    if paint.seam.is_empty() {
+        return Ok(None);
+    }
+    let mut seam = SeamPaint::default();
+    for (index, state) in paint.seam.iter().enumerate() {
+        if *state == PAINT_SEAM_NONE {
+            continue;
+        }
+        let facet: [[f64; 3]; 3] = {
+            let points = mesh.triangle_vertices(index);
+            [points[0].to_mm(), points[1].to_mm(), points[2].to_mm()]
+        };
+        match *state {
+            PAINT_SEAM_ENFORCER => seam.enforced.push(facet),
+            PAINT_SEAM_BLOCKER => seam.blocked.push(facet),
+            other => {
+                return Err(EngineError::Paint(format!(
+                    "triangle {index} has seam state {other}, which is not one of none, enforcer or blocker"
+                )))
+            }
+        }
+    }
+    Ok(Some(seam))
 }
 
 /// Painted facets as the support generator consumes them.
@@ -861,12 +908,13 @@ pub fn run(
     layer_height: f64,
     settings: &Settings,
 ) -> Result<Job, EngineError> {
-    run_with_paint(mesh, None, first_layer_height, layer_height, settings)
+    run_with_paint(mesh, None, None, first_layer_height, layer_height, settings)
 }
 
 fn run_with_paint(
     mesh: &Mesh,
     support_paint: Option<&PaintRegions>,
+    seam_paint: Option<SeamPaint>,
     first_layer_height: f64,
     layer_height: f64,
     settings: &Settings,
@@ -1253,6 +1301,10 @@ fn run_with_paint(
         worst_layer_ms: worst_ms,
         worst_layer,
         skipped,
+        seam_paint: match seam_paint {
+            Some(paint) => vec![paint],
+            None => Vec::new(),
+        },
     })
 }
 

@@ -440,3 +440,126 @@ mod tests {
         assert!((t.volume - 2.0 * l.counts.volume).abs() < 1e-9);
     }
 }
+
+/// Seam paint, as the writer consumes it.
+///
+/// The facets are triangles in model millimetres: an enforced one says the seam
+/// belongs on this face, a blocked one says it never does. The writer tests each
+/// candidate seam vertex against them, which is why the paint is geometry here
+/// rather than triangle indices — by the time a bead is planned, the triangles it
+/// came from are gone.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SeamPaint {
+    /// Facets the seam must be placed on.
+    pub enforced: Vec<[[f64; 3]; 3]>,
+    /// Facets the seam may not be placed on.
+    pub blocked: Vec<[[f64; 3]; 3]>,
+}
+
+/// What a paint channel says about a point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Painted {
+    /// No painted facet reaches this point.
+    Free,
+    /// An enforced facet is within reach: the seam belongs here.
+    Enforced,
+    /// A blocked facet is within reach: the seam may not go here.
+    Blocked,
+}
+
+impl SeamPaint {
+    /// True when neither channel holds a facet.
+    pub fn is_empty(&self) -> bool {
+        self.enforced.is_empty() && self.blocked.is_empty()
+    }
+
+    /// What the paint says about `point`, within `reach` millimetres.
+    ///
+    /// An enforcer wins over a blocker at the same point: the facet a user
+    /// painted *last* is not recorded, so the two cannot be told apart, and
+    /// honouring the enforcer keeps a seam on the face that was asked for.
+    pub fn state(&self, point: [f64; 3], reach: f64) -> Painted {
+        if self
+            .enforced
+            .iter()
+            .any(|facet| point_triangle_distance(point, facet) <= reach)
+        {
+            return Painted::Enforced;
+        }
+        if self
+            .blocked
+            .iter()
+            .any(|facet| point_triangle_distance(point, facet) <= reach)
+        {
+            return Painted::Blocked;
+        }
+        Painted::Free
+    }
+}
+
+/// Distance from a point to a triangle, in millimetres.
+///
+/// The point is projected onto the facet's plane; a projection outside the
+/// triangle falls back to the nearest edge, so a vertex of the sliced loop is
+/// measured against the face it came from rather than against the plane that
+/// face lies in.
+pub fn point_triangle_distance(point: [f64; 3], facet: &[[f64; 3]; 3]) -> f64 {
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let mul = |a: [f64; 3], s: f64| [a[0] * s, a[1] * s, a[2] * s];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let length = |a: [f64; 3]| dot(a, a).sqrt();
+    let (a, b, c) = (facet[0], facet[1], facet[2]);
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let normal = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+    ];
+    let normal_len = length(normal);
+    if normal_len <= 0.0 {
+        return segment_distance(point, a, b).min(segment_distance(point, b, c));
+    }
+    let to_point = sub(point, a);
+    let height = dot(to_point, normal) / normal_len;
+    let on_plane = sub(point, mul(normal, height / normal_len));
+    if inside_triangle(on_plane, a, b, c) {
+        return height.abs();
+    }
+    segment_distance(point, a, b)
+        .min(segment_distance(point, b, c))
+        .min(segment_distance(point, c, a))
+}
+
+fn inside_triangle(point: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> bool {
+    let cross = |p: [f64; 3], q: [f64; 3], r: [f64; 3]| {
+        let u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+        let v = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+        [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ]
+    };
+    let reference = cross(a, b, c);
+    let d1 = cross(a, b, point);
+    let d2 = cross(b, c, point);
+    let d3 = cross(c, a, point);
+    let same = |d: [f64; 3]| d[0] * reference[0] + d[1] * reference[1] + d[2] * reference[2] >= 0.0;
+    same(d1) && same(d2) && same(d3)
+}
+
+fn segment_distance(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let ap = [point[0] - a[0], point[1] - a[1], point[2] - a[2]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+    let t = if len2 > 0.0 {
+        ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let dx = ap[0] - ab[0] * t;
+    let dy = ap[1] - ab[1] * t;
+    let dz = ap[2] - ab[2] * t;
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}

@@ -444,7 +444,10 @@ fn a_painted_blocker_removes_the_support_a_bare_slice_builds() {
     plate
         .object_mut(id)
         .expect("added")
-        .set_paint(hfw_engine::Paint { support: states })
+        .set_paint(hfw_engine::Paint {
+            support: states,
+            seam: Vec::new(),
+        })
         .expect("the states match the triangles");
     let blocked = plate
         .slice(0.2, 0.2, PlateOrder::ByLayer)
@@ -464,10 +467,15 @@ fn paint_survives_a_project_round_trip() {
     let mut states = vec![0u8; triangles];
     states[0] = 1;
     states[triangles - 1] = 2;
+    let mut seam = vec![0u8; triangles];
+    seam[1] = 2;
     plate
         .object_mut(id)
         .expect("added")
-        .set_paint(hfw_engine::Paint { support: states })
+        .set_paint(hfw_engine::Paint {
+            support: states,
+            seam,
+        })
         .expect("the states match the triangles");
 
     let bytes = plate.to_project().expect("the plate writes");
@@ -489,6 +497,11 @@ fn paint_survives_a_project_round_trip() {
         "the blocker on the last triangle survives"
     );
     assert_eq!(support[1], 0, "and the untouched triangles are untouched");
+    assert_eq!(
+        object.paint().seam[1],
+        2,
+        "the seam channel survives the round trip too"
+    );
 }
 
 #[test]
@@ -500,6 +513,7 @@ fn a_paint_channel_of_the_wrong_length_is_refused() {
         .expect("added")
         .set_paint(hfw_engine::Paint {
             support: vec![0u8; 3],
+            seam: Vec::new(),
         })
         .expect_err("three states cannot describe a cube");
     assert!(

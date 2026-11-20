@@ -227,8 +227,9 @@ fn bounds_from(x0: f64, y0: f64, z0: f64, x1: f64, y1: f64, z1: f64) -> HfwBound
 pub(crate) fn write_job(job: &Job, profile: &PrinterConfig) -> Result<HfwGcode, String> {
     let mut write_cfg = profile.clone();
     write_cfg.keep_position = true;
-    let written = hfw_gcode::generate(&job.layers, &write_cfg, Some("plate"))
-        .map_err(|error| error.to_string())?;
+    let written =
+        hfw_gcode::generate_with_paint(&job.layers, &write_cfg, Some("plate"), &job.seam_paint)
+            .map_err(|error| error.to_string())?;
     let verified = hfw_gcode::verify(&written.text, &write_cfg).ok();
     let bytes = written.text.len();
     let text = CString::new(written.text)
@@ -879,8 +880,11 @@ pub unsafe extern "C" fn hfw_mesh_triangle_count(mesh: *const HfwMesh) -> usize 
     report(count(), 0)
 }
 
-/// Painted support: no state on this facet.
+/// Painted support: enforcers and blockers.
 pub const HFW_PAINT_SUPPORT: i32 = 0;
+
+/// Painted seam: enforcers and blockers, applied to the outer wall.
+pub const HFW_PAINT_SEAM: i32 = 1;
 
 /// Writes one paint channel onto `mesh`.
 ///
@@ -904,6 +908,14 @@ pub unsafe extern "C" fn hfw_mesh_paint_set(
         let target = unsafe { mesh_mut(mesh) }?;
         let states = unsafe { paint_states(states, len)? };
         match channel {
+            HFW_PAINT_SEAM => {
+                target.paint.seam = states;
+                target
+                    .paint
+                    .validate(target.mesh.triangle_count())
+                    .map_err(|error| error.to_string())?;
+                Ok(0)
+            }
             HFW_PAINT_SUPPORT => {
                 target.paint.support = states;
                 target
@@ -939,6 +951,7 @@ pub unsafe extern "C" fn hfw_mesh_paint_get(
         let source = unsafe { mesh_of(mesh) }?;
         let states = match channel {
             HFW_PAINT_SUPPORT => &source.paint.support,
+            HFW_PAINT_SEAM => &source.paint.seam,
             other => return Err(format!("paint channel {other} does not exist")),
         };
         let triangles = source.mesh.triangle_count();
@@ -1330,7 +1343,7 @@ pub unsafe extern "C" fn hfw_plate_object_paint(
     len: usize,
 ) -> c_int {
     let set = || -> Result<c_int, String> {
-        if channel != HFW_PAINT_SUPPORT {
+        if channel != HFW_PAINT_SUPPORT && channel != HFW_PAINT_SEAM {
             return Err(format!("paint channel {channel} does not exist"));
         }
         if plate.is_null() {
@@ -1372,7 +1385,7 @@ pub unsafe extern "C" fn hfw_plate_object_paint_get(
     len: usize,
 ) -> isize {
     let get = || -> Result<isize, String> {
-        if channel != HFW_PAINT_SUPPORT {
+        if channel != HFW_PAINT_SUPPORT && channel != HFW_PAINT_SEAM {
             return Err(format!("paint channel {channel} does not exist"));
         }
         if plate.is_null() {
@@ -1384,7 +1397,11 @@ pub unsafe extern "C" fn hfw_plate_object_paint_get(
             .plate
             .object(id)
             .ok_or_else(|| format!("no object {id} is on the plate"))?;
-        let states = &object.paint().support;
+        let states = if channel == HFW_PAINT_SEAM {
+            &object.paint().seam
+        } else {
+            &object.paint().support
+        };
         if states.is_empty() {
             return Ok(0);
         }

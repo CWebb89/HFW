@@ -96,8 +96,11 @@ int32_t hfw_mesh_bounds(const HfwMesh *mesh, HfwBounds *out);
 /** Returns the triangle count, or 0 for a NULL handle. */
 size_t hfw_mesh_triangle_count(const HfwMesh *mesh);
 
-/** Painted support: no state on this facet. There are no other channels yet. */
+/** Painted support: 0 none, 1 enforcer, 2 blocker per triangle. */
 #define HFW_PAINT_SUPPORT 0
+
+/** Painted seam: 0 none, 1 enforcer, 2 blocker per triangle; applied to the outer wall. */
+#define HFW_PAINT_SEAM 1
 
 /**
  * Writes one paint channel onto `mesh`.

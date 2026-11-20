@@ -2370,3 +2370,96 @@ fn a_bead_narrower_than_its_own_corners_keeps_its_rectangle() {
         "{area} fell below half the rectangle"
     );
 }
+
+/// Where the first outer wall of a file starts, in millimetres.
+///
+/// The travel into the loop is the only line that states the seam position
+/// outright: the extrusion after it runs from there to the loop's next vertex.
+fn seam_start(text: &str) -> Option<(f64, f64)> {
+    let mut outer = false;
+    for line in text.lines() {
+        if let Some(kind) = line.strip_prefix(";TYPE:") {
+            outer = kind.trim().eq_ignore_ascii_case("Outer wall");
+            continue;
+        }
+        if !outer || !(line.starts_with("G0 ") || line.starts_with("G1 ")) {
+            continue;
+        }
+        let mut x = None;
+        let mut y = None;
+        for token in line.split_whitespace() {
+            if let Some(v) = token.strip_prefix('X') {
+                x = v.parse::<f64>().ok();
+            }
+            if let Some(v) = token.strip_prefix('Y') {
+                y = v.parse::<f64>().ok();
+            }
+        }
+        if let (Some(x), Some(y)) = (x, y) {
+            return Some((x, y));
+        }
+    }
+    None
+}
+
+#[test]
+fn a_painted_seam_face_takes_the_seam_and_an_unpainted_one_takes_none() {
+    let cube_fixture = Mesh::load_stl(fixture("cube.stl")).expect("the cube loads");
+    let right = cube_fixture
+        .vertices()
+        .iter()
+        .map(|point| point.to_mm()[0])
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut painted_facets = 0usize;
+    let split = cube_fixture
+        .triangles()
+        .iter()
+        .map(|triangle| {
+            let points = triangle
+                .0
+                .map(|index| cube_fixture.vertices()[index as usize]);
+            if points.iter().all(|point| point.to_mm()[0] == right) {
+                painted_facets += 1;
+                hfw_engine::PAINT_SEAM_ENFORCER
+            } else {
+                hfw_engine::PAINT_SEAM_NONE
+            }
+        })
+        .collect::<Vec<u8>>();
+    assert!(painted_facets > 0, "the fixture has a right-hand face");
+
+    let paint = hfw_engine::Paint {
+        support: Vec::new(),
+        seam: split,
+    };
+    let mut s = Settings::new(0.4, 3);
+    s.keep_reference = true;
+    let plain = run(&cube_fixture, 0.2, 0.2, &s).expect("the cube slices");
+    let painted = hfw_engine::run_painted(&cube_fixture, &paint, 0.2, 0.2, &s)
+        .expect("the painted cube slices");
+    assert_eq!(
+        painted.seam_paint.len(),
+        1,
+        "the job carries one entry per object label"
+    );
+
+    let cfg = hfw_config::PrinterConfig {
+        origin_center: true,
+        seam: hfw_config::Seam::Aligned,
+        ..hfw_config::PrinterConfig::default()
+    };
+    let bare = hfw_gcode::generate(&plain.layers, &cfg, Some("cube")).expect("gcode builds");
+    let seamed =
+        hfw_gcode::generate_with_paint(&painted.layers, &cfg, Some("cube"), &painted.seam_paint)
+            .expect("gcode builds");
+    let (bare_x, _) = seam_start(&bare.text).expect("the bare cube has an outer wall");
+    let (seamed_x, _) = seam_start(&seamed.text).expect("the painted cube has an outer wall");
+    assert!(
+        bare_x < -5.0,
+        "the unpainted seam sits on the left-hand corner, at x={bare_x}"
+    );
+    assert!(
+        seamed_x > 5.0,
+        "the painted seam sits on the right-hand face, at x={seamed_x}"
+    );
+}

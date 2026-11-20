@@ -80,19 +80,24 @@ int32_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
    painted footprint at the painted heights; a blocker removes them. Tested by
    slicing the same object twice, once painted, and requiring the support path
    count to rise and fall by the painted area.
-2. **Seam paint.** The writer already chooses a seam per layer; a painted facet
-   constrains that choice to the painted band, and "blocked" removes candidates. A
-   painted seam either lands in the painted facets (checked by reading the emitted
-   coordinates back) or the slice fails saying so; it never silently ignores paint.
+2. **Seam paint, done.** `hfw_engine::seam_paint` carries the facets themselves — a
+   seam is a point on a wall, so the distance from a candidate vertex to the painted
+   face is what decides — and the writer consults them twice. `path_from` puts an
+   outer wall's seam on the rear-most painted vertex; the aligned-seam pass leaves a
+   painted loop pinned instead of pulling it back to the seam one layer below, and
+   never lands on a blocked vertex. Reach is one bead width, because the outer wall's
+   centre-line runs half a bead inside the surface the facet lies on. Measured by
+   slicing a cube twice: unpainted, the seam starts on one corner, painted, on the
+   painted face. A loop whose every vertex is blocked keeps the profile's seam — a
+   seam has to start somewhere — and that is the one place paint yields.
 3. **Tool paint.** Needed for a tool changer, and blocked on multi-material being
-   out of scope today (`docs/SCOPE.md`). The channel exists from step 1 so a project
-   file can carry it; nothing consumes it until a second extruder is real. That is
-   recorded as `n/a` in the settings ledger rather than claimed as done.
+   out of scope today (`docs/SCOPE.md`). Nothing carries it yet, because a channel
+   nothing consumes is a field a panel could write and no stage would read.
 
 ## What it costs from here
 
-Seam paint touches the writer's seam chooser. Tool paint is a plate-level change to how
-stacks are assigned to extruders, and it cannot start until the machine side exists.
+Tool paint is a plate-level change to how stacks are assigned to extruders, and it
+cannot start until the machine side exists.
 
 ## What this does not do
 

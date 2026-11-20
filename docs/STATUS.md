@@ -80,8 +80,8 @@ Two more that matter when deciding whether to trust the output:
 - Scope: `docs/SCOPE.md` (generated) and the surface's `capabilities` array — text,
   cut/hollow, STEP, SLA, MMU and nesting, each with the setting that stands in. None
   of them has a setting the engine parses, so asking for one is refused by name.
-  Support painting left that list: it is a per-triangle channel consumed inside support
-  generation (`docs/PAINT.md`).
+  Support and seam painting left that list: they are per-triangle channels, consumed
+  inside support generation and by the writer's seam chooser (`docs/PAINT.md`).
 - Project files: `Plate::to_project`/`from_project`/`save_project`/`open_project`,
   `hfw_plate_project_bytes`/`hfw_plate_open_project`/`hfw_buffer_free`. A saved plate
   reopened slices to byte-identical G-code — asserted in the plate tests, in the ABI

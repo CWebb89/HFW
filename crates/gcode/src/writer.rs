@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use hfw_config::{Flavor, PrintSequence, PrinterConfig, Seam};
 use hfw_kernel::{Bounds, V2};
 use hfw_toolpath::PlannedLayer;
+use hfw_toolpath::{Painted, SeamPaint};
 use hfw_walls::{Kind, Line};
 
 use crate::error::GcodeError;
@@ -653,7 +654,11 @@ const SEAM_SAMPLES: usize = 48;
 /// which moves both seams to the far side of the part. Points cannot: a loop is matched
 /// to the loop below it that it actually lies on, by counting how many of its own
 /// sampled points land within [`SEAM_MATCH`] of that loop's.
-fn align_seams(paths: &mut [Path], prev: &mut HashMap<(u16, u8), Vec<SeamMark>>) {
+fn align_seams(
+    paths: &mut [Path],
+    prev: &mut HashMap<(u16, u8), Vec<SeamMark>>,
+    painted: impl Fn(u16, &[V2]) -> Option<Vec<Painted>>,
+) {
     let mut groups: HashMap<(u16, u8), Vec<usize>> = HashMap::new();
     for (i, p) in paths.iter().enumerate() {
         if p.pts.len() >= 3 && is_perimeter(p.feature) {
@@ -711,8 +716,12 @@ fn align_seams(paths: &mut [Path], prev: &mut HashMap<(u16, u8), Vec<SeamMark>>)
             used[a] = true;
         }
         for (n, &i) in idxs.iter().enumerate() {
+            let states = painted(paths[i].object, &paths[i].pts);
+            let pinned = states
+                .as_ref()
+                .is_some_and(|states| states.contains(&Painted::Enforced));
             let p = &mut paths[i];
-            if from[n] != usize::MAX {
+            if from[n] != usize::MAX && !pinned {
                 let aim = before[from[n]].at;
                 let mut at = 0;
                 let mut best = f64::INFINITY;
@@ -721,6 +730,17 @@ fn align_seams(paths: &mut [Path], prev: &mut HashMap<(u16, u8), Vec<SeamMark>>)
                     if d < best {
                         best = d;
                         at = k;
+                    }
+                }
+                let blocked = |index: usize| {
+                    states
+                        .as_ref()
+                        .is_some_and(|states| states[index] == Painted::Blocked)
+                };
+                if blocked(at) {
+                    match (0..p.pts.len()).find(|index| !blocked(*index)) {
+                        Some(index) => at = index,
+                        None => at = 0,
                     }
                 }
                 if at > 0 && best <= 2.0 * SEAM_MATCH {
@@ -763,6 +783,58 @@ fn thin(pts: &[V2], keep: usize) -> Vec<V2> {
 /// instead of running straight, so the comparison here is between coordinates of
 /// one loop, where tessellation only moves a vertex along the level it already
 /// sits on.
+/// Where a painted loop should start, in place of the profile's own choice.
+///
+/// An enforcer wins: the seam goes on a painted face, at its rear-most vertex so a
+/// painted patch produces one straight seam rather than a seam that wanders inside
+/// it. With no enforcer the profile's choice stands unless it landed on a blocked
+/// facet, in which case the nearest unblocked vertex takes it. A loop whose every
+/// vertex is blocked keeps the profile's choice — a seam has to start somewhere —
+/// and `docs/PAINT.md` says so rather than pretending the paint was honoured.
+fn painted_seam(
+    pts: &[V2],
+    z: f64,
+    paint: &SeamPaint,
+    reach: f64,
+    chosen: Option<usize>,
+) -> Option<usize> {
+    let states: Vec<Painted> = pts
+        .iter()
+        .map(|p| paint.state([p.x, p.y, z], reach))
+        .collect();
+    let mut enforced: Option<usize> = None;
+    for (index, state) in states.iter().enumerate() {
+        if *state != Painted::Enforced {
+            continue;
+        }
+        let better = match enforced {
+            None => true,
+            Some(best) => pts[index].y > pts[best].y,
+        };
+        if better {
+            enforced = Some(index);
+        }
+    }
+    if let Some(index) = enforced {
+        return Some(index);
+    }
+    let chosen = chosen?;
+    if states[chosen] != Painted::Blocked {
+        return Some(chosen);
+    }
+    for step in 1..pts.len() {
+        let ahead = (chosen + step) % pts.len();
+        if states[ahead] != Painted::Blocked {
+            return Some(ahead);
+        }
+        let behind = (chosen + pts.len() - step) % pts.len();
+        if states[behind] != Painted::Blocked {
+            return Some(behind);
+        }
+    }
+    Some(chosen)
+}
+
 fn seam_index(pts: &[V2]) -> usize {
     let mut rearmost = f64::NEG_INFINITY;
     let mut left = f64::INFINITY;
@@ -1046,7 +1118,14 @@ pub fn feature_of(kind: Kind) -> Feature {
     }
 }
 
-fn path_from(line: &Line, tx: f64, ty: f64, cfg: &PrinterConfig) -> Option<Path> {
+fn path_from(
+    line: &Line,
+    tx: f64,
+    ty: f64,
+    z: f64,
+    paint: Option<&SeamPaint>,
+    cfg: &PrinterConfig,
+) -> Option<Path> {
     let mut pts: Vec<V2> = line
         .pts
         .iter()
@@ -1100,6 +1179,17 @@ fn path_from(line: &Line, tx: f64, ty: f64, cfg: &PrinterConfig) -> Option<Path>
             Seam::Rear => Some(rear_index(&path.pts)),
             Seam::Random => Some(scatter_index(&path.pts)),
             Seam::Nearest => None,
+        };
+        let at = match (paint, line.kind) {
+            (Some(paint), Kind::Side(0)) if !paint.is_empty() => {
+                let model: Vec<V2> = path
+                    .pts
+                    .iter()
+                    .map(|p| V2::new(p.x - tx, p.y - ty))
+                    .collect();
+                painted_seam(&model, z, paint, cfg.line_width, at)
+            }
+            _ => at,
         };
         if let Some(at) = at {
             path.pts.rotate_left(at);
@@ -3021,6 +3111,19 @@ pub fn generate(
     cfg: &PrinterConfig,
     object_name: Option<&str>,
 ) -> Result<Gcode, GcodeError> {
+    generate_with_paint(layers, cfg, object_name, &[])
+}
+
+/// Writes G-code, honouring painted seam facets per object.
+///
+/// `seam_paint` is indexed by the object label a path carries, so the entry for an
+/// unpainted part is empty and the entry order matches the plate's object order.
+pub fn generate_with_paint(
+    layers: &[PlannedLayer],
+    cfg: &PrinterConfig,
+    object_name: Option<&str>,
+    seam_paint: &[SeamPaint],
+) -> Result<Gcode, GcodeError> {
     cfg.validate()?;
     if layers.is_empty() {
         return Err(GcodeError::NoLayers);
@@ -3252,6 +3355,11 @@ pub fn generate(
             }
         }
     }
+    let painted = |object: u16| {
+        seam_paint
+            .get(object as usize)
+            .filter(|paint| !paint.is_empty())
+    };
     let mut printed = 0usize;
     let z_shift = cfg.z_offset;
     for layer in layers {
@@ -3263,11 +3371,20 @@ pub fn generate(
         let mut paths: Vec<Path> = layer
             .paths
             .iter()
-            .filter_map(|l| path_from(l, tx, ty, cfg))
+            .filter_map(|l| {
+                let paint = painted(l.object);
+                path_from(l, tx, ty, layer.print_z, paint, cfg)
+            })
             .collect();
         mark_holes(&mut paths);
         if cfg.seam == Seam::Aligned {
-            align_seams(&mut paths, &mut w.seam_prev);
+            align_seams(&mut paths, &mut w.seam_prev, |object, pts| {
+                painted(object).map(|paint| {
+                    pts.iter()
+                        .map(|q| paint.state([q.x - tx, q.y - ty, layer.print_z], cfg.line_width))
+                        .collect()
+                })
+            });
         }
         if paths.is_empty() && !first_layer {
             continue;
@@ -3777,6 +3894,92 @@ mod tests {
         V2::new(0.0, 0.0)
     }
 
+    #[test]
+    fn path_from_rotates_a_painted_outer_wall_to_the_painted_face() {
+        let cfg = PrinterConfig::default();
+        let line = Line {
+            pts: vec![
+                V2::new(0.2, 19.8),
+                V2::new(0.2, 0.2),
+                V2::new(19.8, 0.2),
+                V2::new(19.8, 19.8),
+            ],
+            width: vec![0.4; 4],
+            closed: true,
+            kind: Kind::Side(0),
+            flow: 1.0,
+            overhang: 0.0,
+            object: 0,
+        };
+        let plain = path_from(&line, 0.0, 0.0, 0.1, None, &cfg).expect("a closed loop builds");
+        assert!(
+            plain.pts[0].x < 5.0,
+            "the unpainted seam starts on the left-hand side, at {:?}",
+            plain.pts[0]
+        );
+        let paint = SeamPaint {
+            enforced: vec![[[20.0, 0.0, 0.0], [20.0, 20.0, 0.0], [20.0, 20.0, 20.0]]],
+            blocked: Vec::new(),
+        };
+        let painted =
+            path_from(&line, 0.0, 0.0, 0.1, Some(&paint), &cfg).expect("a closed loop builds");
+        assert!(
+            painted.pts[0].x > 15.0,
+            "the painted seam starts on the painted face, at {:?}",
+            painted.pts[0]
+        );
+    }
+
+    #[test]
+    fn a_painted_seam_goes_where_it_was_painted_and_leaves_a_blocked_face() {
+        let pts = [
+            V2::new(0.0, 0.0),
+            V2::new(10.0, 0.0),
+            V2::new(10.0, 10.0),
+            V2::new(0.0, 10.0),
+        ];
+        let base = seam_index(&pts);
+        assert_eq!(base, 2, "the rear-right corner is the unpainted seam");
+
+        let enforced = SeamPaint {
+            enforced: vec![
+                [[0.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 10.0, 10.0]],
+                [[0.0, 0.0, 0.0], [0.0, 10.0, 10.0], [0.0, 0.0, 10.0]],
+            ],
+            blocked: Vec::new(),
+        };
+        let at = painted_seam(&pts, 0.1, &enforced, 0.4, Some(base)).expect("a vertex is picked");
+        assert_eq!(
+            at, 3,
+            "the seam moved onto the painted face, at its rear-most vertex"
+        );
+
+        let blocked = SeamPaint {
+            enforced: Vec::new(),
+            blocked: vec![
+                [[10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [10.0, 10.0, 10.0]],
+                [[10.0, 0.0, 0.0], [10.0, 10.0, 10.0], [10.0, 0.0, 10.0]],
+            ],
+        };
+        let at = painted_seam(&pts, 0.1, &blocked, 0.4, Some(base)).expect("a vertex is picked");
+        assert_ne!(at, base, "a blocked seam moves off the painted face");
+        assert_eq!(at, 3, "the nearest unblocked vertex takes it");
+
+        let everything = SeamPaint {
+            enforced: Vec::new(),
+            blocked: vec![
+                [[-1.0, -1.0, 0.0], [11.0, -1.0, 0.0], [11.0, 11.0, 10.0]],
+                [[-1.0, -1.0, 0.0], [11.0, 11.0, 10.0], [-1.0, 11.0, 0.0]],
+            ],
+        };
+        let at = painted_seam(&pts, 0.1, &everything, 0.4, Some(base));
+        assert_eq!(
+            at,
+            Some(base),
+            "a loop with nowhere left keeps the profile's seam rather than failing"
+        );
+    }
+
     fn arc_points(start: f64, end: f64, radius: f64, steps: usize) -> Vec<(f64, f64)> {
         (0..=steps)
             .map(|i| {
@@ -4057,7 +4260,7 @@ mod tests {
                 at: V2::new(10.0, 4.0),
             }],
         );
-        align_seams(&mut paths, &mut prev);
+        align_seams(&mut paths, &mut prev, |_, _| None);
         assert_eq!(
             paths[0].pts[0],
             V2::new(10.0, 4.0),

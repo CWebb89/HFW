@@ -51,7 +51,7 @@ listed here rather than left to be discovered during the swap:
 | # | Item | Why the app needs it |
 |---|------|----------------------|
 | 10 | The in-layer G-code channel and role-aware fan (next-layer's patch to libslic3r) | The calibration suite extrudes PA lines inside layer 1 through it; the fan role drives per-role cooling. The fan half is done — every feature has its own fan duty; the in-layer channel is not |
-| 11 | Support painting (`FacetsAnnotation` equivalent) and per-object layer-height profiles | Both are shipped UI that changes the slice (`--slice-features` measures 0 → 983 support moves and 125 → 187 layers). Variable layer height exists as a profile and as height bounds; per-object profiles do not. **Support paint is done** on the support channel: per-triangle enforcer and blocker states on a mesh or a plate object, reaching `supports::seed_masks` through the single slice funnel, carried in the project file, and measured by a plate test whose painted blocker removes every support line the bare slice built. Seam and tool paint are not started |
+| 11 | Support painting (`FacetsAnnotation` equivalent) and per-object layer-height profiles | Both are shipped UI that changes the slice (`--slice-features` measures 0 → 983 support moves and 125 → 187 layers). Variable layer height exists as a profile and as height bounds; per-object profiles do not. **Support paint is done** on the support channel: per-triangle enforcer and blocker states on a mesh or a plate object, reaching `supports::seed_masks` through the single slice funnel, carried in the project file, and measured by a plate test whose painted blocker removes every support line the bare slice built. **Seam paint is done too**: an enforced facet pins the outer wall's seam to it (a test slices a cube twice and requires the painted seam on the painted face), a blocked facet is never chosen, and both channels travel in the project file. Tool paint is not started |
 
 ## Detail
 
@@ -221,8 +221,8 @@ does for the two reference slicers.
 
 Six features the reference slicers ship and this engine will not build: text
 embossing, cut and hollow, STEP import, SLA, MMU colour mixing, and a nesting
-arranger. Support painting used to be on that list and is now built — see item 11 and
-`docs/PAINT.md`. The list, what each would cost, and the setting that stands in for it is
+arranger. Support and seam painting used to be on that list and are now built — see
+item 11 and `docs/PAINT.md`. The list, what each would cost, and the setting that stands in for it is
 `docs/SCOPE.md`, generated from the same table that gives the application's panel its
 `capabilities` rows — so a control marked unavailable in the UI and a paragraph in
 this repository cannot disagree. The disposition is a product decision with stated

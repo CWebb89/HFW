@@ -73,22 +73,31 @@ pub const PAINT_SUPPORT_ENFORCER: u8 = 1;
 /// Support may not occupy the space under this facet.
 pub const PAINT_SUPPORT_BLOCKER: u8 = 2;
 
+/// What a painted seam facet asks for.
+pub const PAINT_SEAM_NONE: u8 = 0;
+/// The seam belongs on this facet.
+pub const PAINT_SEAM_ENFORCER: u8 = 1;
+/// The seam may not be placed on this facet.
+pub const PAINT_SEAM_BLOCKER: u8 = 2;
+
 /// Per-triangle paint states, indexed by the mesh's own triangle order.
 ///
 /// One vector per channel; a channel shorter than the triangle count means "no
-/// state anywhere", so an object that was never painted costs nothing. Channels
-/// are added as consumers land: support today, seam and tool when they are
-/// consumed.
+/// state anywhere", so an object that was never painted costs nothing. The tool
+/// channel is added when something consumes it: an extruder index that no stage
+/// reads would be a field a panel could write and nothing would act on.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Paint {
     /// Support states, one of the `PAINT_SUPPORT_*` constants per triangle.
     pub support: Vec<u8>,
+    /// Seam states, one of the `PAINT_SEAM_*` constants per triangle.
+    pub seam: Vec<u8>,
 }
 
 impl Paint {
     /// Checks every channel against a triangle count.
     pub fn validate(&self, triangles: usize) -> Result<(), MeshError> {
-        let channels = [("support", &self.support)];
+        let channels = [("support", &self.support), ("seam", &self.seam)];
         for (name, states) in channels {
             if !states.is_empty() && states.len() != triangles {
                 return Err(MeshError::PaintLength {
@@ -103,7 +112,7 @@ impl Paint {
 
     /// True when no channel carries a state.
     pub fn is_empty(&self) -> bool {
-        self.support.is_empty()
+        self.support.is_empty() && self.seam.is_empty()
     }
 }
 
