@@ -888,11 +888,11 @@ fn a_modifier_volume_carries_its_own_settings_and_survives_a_project() {
     let modifier = Mesh::box_mm(5.0, 5.0, 5.0).expect("a box builds");
     let settings = plate.settings().clone();
     let object = plate.object_mut(id).expect("the object is there");
-    object
+    let volume = object
         .add_volume(hfw_engine::VolumeKind::Modifier, modifier)
         .expect("a modifier volume adds");
     object
-        .set_volume_setting(0, "sparse_infill_density", "0.9", &settings)
+        .set_volume_setting(volume, "sparse_infill_density", "0.9", &settings)
         .expect("a modifier takes settings");
     assert_eq!(
         object.volumes()[0].overrides(),
@@ -934,11 +934,11 @@ fn a_volume_that_is_not_a_modifier_refuses_settings() {
     let hole = Mesh::box_mm(5.0, 5.0, 5.0).expect("a box builds");
     let settings = plate.settings().clone();
     let object = plate.object_mut(id).expect("the object is there");
-    object
+    let volume = object
         .add_volume(hfw_engine::VolumeKind::Negative, hole)
         .expect("a negative volume adds");
     let error = object
-        .set_volume_setting(0, "sparse_infill_density", "0.9", &settings)
+        .set_volume_setting(volume, "sparse_infill_density", "0.9", &settings)
         .expect_err("a negative volume has no region to print differently");
     assert!(error.to_string().contains("modifier"), "{error}");
 }
@@ -1001,5 +1001,145 @@ fn a_projects_object_placement_survives_the_round_trip() {
         saved.mesh().triangle_count(),
         cube().triangle_count(),
         "the geometry came back unrotated, so the pose is the pose and not a baked mesh"
+    );
+}
+
+#[test]
+fn a_volume_keeps_its_id_when_its_neighbours_are_removed() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let object = plate.object_mut(id).expect("the object is there");
+    let box_mesh = || Mesh::box_mm(4.0, 4.0, 4.0).expect("a box builds");
+    let first = object
+        .add_volume(hfw_engine::VolumeKind::Negative, box_mesh())
+        .expect("a negative volume adds");
+    let second = object
+        .add_volume(hfw_engine::VolumeKind::SupportBlocker, box_mesh())
+        .expect("a blocker adds");
+    let third = object
+        .add_volume(hfw_engine::VolumeKind::Modifier, box_mesh())
+        .expect("a modifier adds");
+    assert_ne!(first, second);
+    assert_ne!(second, third);
+
+    object
+        .remove_volume(second)
+        .expect("the middle volume is removed");
+    assert_eq!(
+        object.volume_ids(),
+        vec![first, third],
+        "removing a volume does not renumber the ones after it"
+    );
+    assert!(object.volume(second).is_none());
+    assert_eq!(
+        object.volume(first).map(|volume| volume.kind()),
+        Some(hfw_engine::VolumeKind::Negative)
+    );
+
+    let fourth = object
+        .add_volume(hfw_engine::VolumeKind::Part, box_mesh())
+        .expect("a part volume adds");
+    assert_ne!(fourth, second, "a removed id is never handed out again");
+    let refused = object
+        .remove_volume(second)
+        .expect_err("the removed id is gone for good");
+    assert!(refused.to_string().contains("no volume"), "{refused}");
+}
+
+#[test]
+fn a_volume_placement_prints_where_it_is_put_not_where_its_geometry_is() {
+    let cutter = || Mesh::box_mm(6.0, 6.0, 40.0).expect("a box builds");
+    let centre = MeshTransform {
+        translation_mm: [7.0, 7.0, 0.0],
+        ..MeshTransform::default()
+    };
+
+    let mut placed = plate();
+    let id = placed.add("cube", cube()).expect("a cube adds");
+    let volume = placed
+        .object_mut(id)
+        .expect("the object is there")
+        .add_volume(hfw_engine::VolumeKind::Negative, cutter())
+        .expect("the volume attaches");
+    placed
+        .object_mut(id)
+        .expect("the object is there")
+        .set_volume_placement(volume, centre)
+        .expect("the volume moves inside the part");
+
+    let mut identity = plate();
+    let id = identity.add("cube", cube()).expect("a cube adds");
+    identity
+        .object_mut(id)
+        .expect("the object is there")
+        .add_volume(hfw_engine::VolumeKind::Negative, cutter())
+        .expect("the volume attaches");
+
+    let mut baked = plate();
+    let id = baked.add("cube", cube()).expect("a cube adds");
+    baked
+        .object_mut(id)
+        .expect("the object is there")
+        .add_volume(
+            hfw_engine::VolumeKind::Negative,
+            cutter().transformed(centre).expect("the cutter moves"),
+        )
+        .expect("the volume attaches");
+
+    let shape = |job: &hfw_engine::Job| -> Vec<usize> {
+        job.layers.iter().map(|layer| layer.paths.len()).collect()
+    };
+    let with_placement = placed.slice(0.2, 0.2, PlateOrder::ByLayer).expect("slices");
+    let with_identity = identity
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("slices");
+    let with_baked = baked.slice(0.2, 0.2, PlateOrder::ByLayer).expect("slices");
+    assert_eq!(
+        shape(&with_placement),
+        shape(&with_baked),
+        "a volume placement cuts exactly where the same geometry would"
+    );
+    assert_ne!(
+        shape(&with_placement),
+        shape(&with_identity),
+        "the placement is used: the same volume sitting at its own coordinates cuts somewhere else"
+    );
+}
+
+#[test]
+fn a_volume_placement_survives_a_project_round_trip() {
+    let mut plate = plate();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    let settings = plate.settings().clone();
+    let volume = plate
+        .object_mut(id)
+        .expect("the object is there")
+        .add_volume_placed(
+            hfw_engine::VolumeKind::Modifier,
+            Mesh::box_mm(5.0, 5.0, 5.0).expect("a box builds"),
+            MeshTransform {
+                scale: [1.5, 1.0, 1.0],
+                rotation_degrees: [0.0, 0.0, 30.0],
+                translation_mm: [6.0, 7.0, 2.0],
+            },
+        )
+        .expect("the volume attaches where it is put");
+    plate
+        .object_mut(id)
+        .expect("the object is there")
+        .set_volume_setting(volume, "sparse_infill_density", "0.9", &settings)
+        .expect("a modifier takes settings");
+
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    let object = reopened.object(id).expect("the object came back");
+    let volume = object.volume_at(0).expect("the volume came back");
+    assert_eq!(volume.kind(), hfw_engine::VolumeKind::Modifier);
+    assert_eq!(volume.placement().scale, [1.5, 1.0, 1.0]);
+    assert_eq!(volume.placement().rotation_degrees, [0.0, 0.0, 30.0]);
+    assert_eq!(volume.placement().translation_mm, [6.0, 7.0, 2.0]);
+    assert_eq!(
+        volume.overrides(),
+        [("sparse_infill_density".to_owned(), "0.9".to_owned())]
     );
 }

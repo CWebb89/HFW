@@ -13,16 +13,18 @@ use hfw_capi::{
     hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume, hfw_plate_add,
     hfw_plate_add_positioned, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free,
     hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count, hfw_plate_marker_get,
-    hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
-    hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
-    hfw_plate_object_enabled, hfw_plate_object_enabled_get, hfw_plate_object_ids,
-    hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mesh,
-    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_name_get,
-    hfw_plate_object_paint, hfw_plate_object_paint_get, hfw_plate_object_placement,
-    hfw_plate_object_placement_get, hfw_plate_object_placement_matrix,
-    hfw_plate_object_placement_matrix_get, hfw_plate_object_remove, hfw_plate_object_remove_volume,
-    hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_settings_json,
-    hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
+    hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume,
+    hfw_plate_object_add_volume_placed, hfw_plate_object_bounds, hfw_plate_object_clear_settings,
+    hfw_plate_object_count, hfw_plate_object_duplicate, hfw_plate_object_enabled,
+    hfw_plate_object_enabled_get, hfw_plate_object_ids, hfw_plate_object_layer_heights,
+    hfw_plate_object_layer_heights_get, hfw_plate_object_mesh, hfw_plate_object_mirror,
+    hfw_plate_object_name, hfw_plate_object_name_get, hfw_plate_object_paint,
+    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_placement_get,
+    hfw_plate_object_placement_matrix, hfw_plate_object_placement_matrix_get,
+    hfw_plate_object_remove, hfw_plate_object_remove_volume, hfw_plate_object_rotate,
+    hfw_plate_object_set, hfw_plate_object_settings_json, hfw_plate_object_volume_count,
+    hfw_plate_object_volume_ids, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
+    hfw_plate_object_volume_placement, hfw_plate_object_volume_placement_get,
     hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
     hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_set_metadata,
     hfw_plate_slice, hfw_plate_slice_placed, hfw_plate_volume_set, hfw_slice_meshes,
@@ -1007,7 +1009,7 @@ fn paint_round_trips_through_the_mesh_and_the_plate_and_is_refused_when_wrong() 
 }
 
 #[test]
-fn a_volume_crosses_the_abi_and_its_kind_reads_back() {
+fn a_volume_crosses_the_abi_with_an_id_a_placement_and_its_kind() {
     let path = c_string(&fixture("cube.stl"));
     let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
     assert!(!cube.is_null(), "load failed: {}", last_error());
@@ -1016,25 +1018,88 @@ fn a_volume_crosses_the_abi_and_its_kind_reads_back() {
     assert_ne!(id, 0);
     assert_eq!(unsafe { hfw_plate_object_volume_count(plate, id) }, 0);
 
-    let cutter = unsafe { hfw_mesh_from_bytes(std::ptr::null(), 0) };
-    assert!(cutter.is_null(), "an empty mesh is refused");
+    let empty = unsafe { hfw_mesh_from_bytes(std::ptr::null(), 0) };
+    assert!(empty.is_null(), "an empty mesh is refused");
 
     let face_path = c_string(&fixture("cube.stl"));
     let cutter = unsafe { hfw_mesh_load_file(face_path.as_ptr()) };
-    assert_eq!(
-        unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_NEGATIVE, cutter) },
-        0,
-        "the volume attaches: {}",
-        last_error()
-    );
+
+    let first = unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_NEGATIVE, cutter) };
+    assert_ne!(first, 0, "the volume attaches: {}", last_error());
     assert_eq!(unsafe { hfw_plate_object_volume_count(plate, id) }, 1);
+
+    let matrix: [f64; 16] = [
+        1.0, 0.0, 0.0, 4.0, //
+        0.0, 1.0, 0.0, 5.0, //
+        0.0, 0.0, 1.0, 6.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let second = unsafe {
+        hfw_plate_object_add_volume_placed(plate, id, HFW_VOLUME_MODIFIER, cutter, matrix.as_ptr())
+    };
+    assert_ne!(second, 0, "a placed volume attaches: {}", last_error());
+    assert_ne!(second, first, "two volumes get two ids");
+
+    let mut ids = [0u64; 4];
+    let count = unsafe { hfw_plate_object_volume_ids(plate, id, ids.as_mut_ptr(), ids.len()) };
+    assert_eq!(count, 2, "both ids are reported");
+    assert_eq!(&ids[..2], &[first, second], "in the order they were added");
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_ids(plate, id, std::ptr::null_mut(), 0) },
+        2,
+        "a null buffer sizes the call"
+    );
 
     let mut kind = -1;
     assert_eq!(
-        unsafe { hfw_plate_object_volume_kind(plate, id, 0, &mut kind) },
+        unsafe { hfw_plate_object_volume_kind(plate, id, first, &mut kind) },
         0
     );
-    assert_eq!(kind, HFW_VOLUME_NEGATIVE, "the kind reads back");
+    assert_eq!(kind, HFW_VOLUME_NEGATIVE, "the kind reads back by id");
+
+    let mut read = [0.0f64; 16];
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_placement_get(plate, id, second, read.as_mut_ptr()) },
+        0,
+        "the placement reads back: {}",
+        last_error()
+    );
+    for (index, (left, right)) in matrix.iter().zip(read).enumerate() {
+        assert!(
+            (left - right).abs() < 1e-9,
+            "element {index}: {left} came back as {right}"
+        );
+    }
+    let mut identity = [0.0f64; 16];
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_placement_get(plate, id, first, identity.as_mut_ptr()) },
+        0
+    );
+    assert_eq!(
+        identity,
+        [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        "a volume added without one sits at its own coordinates"
+    );
+
+    let moved: [f64; 16] = [
+        2.0, 0.0, 0.0, 7.0, //
+        0.0, 2.0, 0.0, 8.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_placement(plate, id, first, moved.as_ptr()) },
+        0,
+        "a volume moves inside its object: {}",
+        last_error()
+    );
+    let mut sheared = moved;
+    sheared[1] = 0.4;
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_placement(plate, id, first, sheared.as_ptr()) },
+        -1,
+        "a matrix that shears is refused"
+    );
 
     let mut beyond = -1;
     assert_eq!(
@@ -1050,7 +1115,7 @@ fn a_volume_crosses_the_abi_and_its_kind_reads_back() {
 
     assert_eq!(
         unsafe { hfw_plate_object_add_volume(plate, id, 7, cutter) },
-        -1,
+        0,
         "an unknown kind is refused"
     );
     assert!(
@@ -1060,12 +1125,38 @@ fn a_volume_crosses_the_abi_and_its_kind_reads_back() {
     );
 
     assert_eq!(
-        unsafe { hfw_plate_object_remove_volume(plate, id, 0) },
+        unsafe {
+            hfw_plate_volume_set(
+                plate,
+                id,
+                first,
+                c_string("sparse_infill_density").as_ptr(),
+                c_string("0.9").as_ptr(),
+            )
+        },
+        -1,
+        "a negative volume has no region to print differently"
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_object_remove_volume(plate, id, first) },
         0,
         "the volume detaches: {}",
         last_error()
     );
-    assert_eq!(unsafe { hfw_plate_object_volume_count(plate, id) }, 0);
+    assert_eq!(unsafe { hfw_plate_object_volume_count(plate, id) }, 1);
+    let mut ids = [0u64; 4];
+    let count = unsafe { hfw_plate_object_volume_ids(plate, id, ids.as_mut_ptr(), ids.len()) };
+    assert_eq!(count, 1);
+    assert_eq!(
+        ids[0], second,
+        "removing a volume does not renumber the ones after it"
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_remove_volume(plate, id, first) },
+        -1,
+        "a removed volume id is gone for good"
+    );
 
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(cube) };
@@ -1598,7 +1689,7 @@ fn text_crosses_the_abi_and_engraving_removes_material() {
         .to_owned();
 
     let sunk = unsafe { hfw_text_mesh(font_path.as_ptr(), 0, label.as_ptr(), 12.0, 0.8, 0.0) };
-    assert_eq!(
+    assert_ne!(
         unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_NEGATIVE, sunk) },
         0,
         "the text attaches as a negative volume: {}",
@@ -1647,15 +1738,11 @@ fn a_modifier_volume_takes_settings_across_the_abi() {
     assert_ne!(id, 0, "the object is on the plate: {}", last_error());
     let modifier = unsafe { hfw_mesh_from_bytes(bytes.as_ptr(), bytes.len()) };
     assert!(!modifier.is_null(), "a second cube loads: {}", last_error());
-    assert_eq!(
-        unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_MODIFIER, modifier) },
-        0,
-        "a modifier volume adds: {}",
-        last_error()
-    );
+    let volume = unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_MODIFIER, modifier) };
+    assert_ne!(volume, 0, "a modifier volume adds: {}", last_error());
     let mut kind = -1;
     assert_eq!(
-        unsafe { hfw_plate_object_volume_kind(plate, id, 0, &mut kind) },
+        unsafe { hfw_plate_object_volume_kind(plate, id, volume, &mut kind) },
         0,
         "the kind reads back: {}",
         last_error()
@@ -1664,14 +1751,14 @@ fn a_modifier_volume_takes_settings_across_the_abi() {
     let key = c_string("sparse_infill_density");
     let value = c_string("0.9");
     assert_eq!(
-        unsafe { hfw_plate_volume_set(plate, id, 0, key.as_ptr(), value.as_ptr()) },
+        unsafe { hfw_plate_volume_set(plate, id, volume, key.as_ptr(), value.as_ptr()) },
         0,
         "a modifier takes its own settings: {}",
         last_error()
     );
     let unknown = c_string("no_such_setting");
     assert_eq!(
-        unsafe { hfw_plate_volume_set(plate, id, 0, unknown.as_ptr(), value.as_ptr()) },
+        unsafe { hfw_plate_volume_set(plate, id, volume, unknown.as_ptr(), value.as_ptr()) },
         -1,
         "an unknown key is refused"
     );
@@ -1840,16 +1927,12 @@ fn a_plate_reads_back_the_volumes_of_its_objects() {
     assert!(!mesh.is_null(), "load failed: {}", last_error());
     let plate = hfw_plate_new();
     let id = unsafe { hfw_plate_add(plate, mesh) };
-    assert_eq!(
-        unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_MODIFIER, mesh) },
-        0,
-        "{}",
-        last_error()
-    );
+    let volume = unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_MODIFIER, mesh) };
+    assert_ne!(volume, 0, "{}", last_error());
     let key = c_string("sparse_infill_density");
     let value = c_string("55%");
     assert_eq!(
-        unsafe { hfw_plate_volume_set(plate, id, 0, key.as_ptr(), value.as_ptr()) },
+        unsafe { hfw_plate_volume_set(plate, id, volume, key.as_ptr(), value.as_ptr()) },
         0,
         "{}",
         last_error()
@@ -1857,17 +1940,17 @@ fn a_plate_reads_back_the_volumes_of_its_objects() {
 
     let mut kind = -1;
     assert_eq!(
-        unsafe { hfw_plate_object_volume_kind(plate, id, 0, &mut kind) },
+        unsafe { hfw_plate_object_volume_kind(plate, id, volume, &mut kind) },
         0
     );
     assert_eq!(kind, HFW_VOLUME_MODIFIER);
-    let settings = unsafe { hfw_plate_object_volume_settings_json(plate, id, 0) };
+    let settings = unsafe { hfw_plate_object_volume_settings_json(plate, id, volume) };
     assert!(!settings.is_null(), "{}", last_error());
     assert_eq!(
         unsafe { CStr::from_ptr(settings) }.to_str(),
         Ok(r#"{"sparse_infill_density":"55%"}"#)
     );
-    let geometry = unsafe { hfw_plate_object_volume_mesh(plate, id, 0) };
+    let geometry = unsafe { hfw_plate_object_volume_mesh(plate, id, volume) };
     assert!(!geometry.is_null(), "{}", last_error());
     assert_eq!(unsafe { hfw_mesh_triangle_count(geometry) }, unsafe {
         hfw_mesh_triangle_count(mesh)

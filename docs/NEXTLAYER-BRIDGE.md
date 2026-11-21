@@ -197,7 +197,8 @@ returned, or the port can only go one way. Every part of a plate is therefore
 readable: the ids (in insertion order, `hfw_plate_object_ids` reporting the count
 even for a NULL buffer so one call sizes another), each object's name, placement,
 enabled flag, settings and geometry with **its paint attached**, and each volume's
-kind, geometry and settings. `hfw_plate_object_settings_json` returns exactly the
+id, kind, placement, geometry and settings (`hfw_plate_object_volume_ids`, then the
+id-addressed getters). `hfw_plate_object_settings_json` returns exactly the
 key/value rows `hfw_plate_object_set` accepts, so a rebuilt plate takes the same
 settings it gave.
 
@@ -210,8 +211,8 @@ rather than going missing quietly.
 
 ### What next-layer has not declared (2026-11-21)
 
-`next-layer/src/app/src/hfw.rs` declares **28** of the **85** functions
-`crates/capi/include/hfw.h` exports, so a 57-row gap sits between what the engine
+`next-layer/src/app/src/hfw.rs` declares **28** of the **89** functions
+`crates/capi/include/hfw.h` exports, so a 61-row gap sits between what the engine
 can do and what the application has told its own compiler about. Counted with
 `grep -oE '\bhfw_[a-z0-9_]+\s*\(' <file> | sort -u`, one row per symbol: the
 brief's 29 and 86 are one higher on each side, which is what counting
@@ -250,10 +251,14 @@ next-layer would call it today.
 | `hfw_plate_object_set` | one print-level setting on one object, by name and value | PlateDocument (`setObjectSetting`) | none |
 | `hfw_plate_object_clear_settings` | drops every override an object carries | PlateDocument | none |
 | `hfw_plate_object_paint` | writes a support or seam channel on one object | PlateDocument (paint brush) | none |
-| `hfw_plate_object_add_volume` | attaches a part, negative or modifier volume | PlateDocument (`addVolume`) | none |
-| `hfw_plate_object_remove_volume` | detaches a volume by index | PlateDocument (`removeVolume`) | none |
+| `hfw_plate_object_add_volume` | attaches a part, negative or modifier volume, returns its id | PlateDocument (`addVolume`) | none |
+| `hfw_plate_object_add_volume_placed` | the same, with the volume placed inside the object | PlateDocument (`addVolume`) | none |
+| `hfw_plate_object_volume_placement` | moves or scales a volume inside its object | PlateDocument (`setVolumePosition`, `setVolumeScale`, `setVolumeRotation`) | none |
+| `hfw_plate_object_volume_placement_get` | reads a volume's placement back as a matrix | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_volume_ids` | every volume id of an object, in the order they were added | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_remove_volume` | detaches a volume by id | PlateDocument (`removeVolume`) | none |
 | `hfw_plate_object_volume_count` | how many volumes an object carries | PlateDocument (`volumes`) | none |
-| `hfw_plate_object_volume_kind` | which of the five kinds a volume is | PlateDocument (`volumes`) | none |
+| `hfw_plate_object_volume_kind` | which of the five kinds a volume is, by id | PlateDocument (`volumes`) | none |
 | `hfw_plate_volume_set` | one setting on a modifier volume, on top of the object's | PlateDocument (`setVolumeSetting`) | none |
 | `hfw_plate_object_layer_heights` | an object's own `(z, height)` pairs | PlateDocument (variable layer height) | none |
 | `hfw_plate_object_bounds` | one object's bounds on the bed | PlateDocument (`volumeInfo`, object size) | none |
@@ -290,22 +295,38 @@ next-layer would call it today.
 | `hfw_string_free` | releases a string the engine returned | every caller of the JSON getters | owns itself |
 | `hfw_buffer_free` | releases a byte buffer the engine returned | every caller of `_stl_bytes`, `_project_bytes`, `_metadata_get` | owns itself |
 
-Read as a work list, the split is clean: 22 rows are `PlateDocument`'s edit gestures
-(name, duplicate, rotate, mirror, bake, settings, paint, volumes, layer heights, the
-cut and text tools), 13 are what `readPlateSnapshot` and the project file need to read
-a plate back, 14 are `SliceRuntime` and its timeline (slice, preview, markers, strokes,
-the threaded job), 1 is `PresetStore`, 2 are the free functions every getter's caller
-needs, and 5 have no caller in next-layer at all: the two mesh-part calls, the
-mesh-level paint pair and `hfw_slice_meshes`, because a plate object and not a bare
-mesh is the only thing the application paints or slices.
+Read as a work list, the split is clean: 24 rows are `PlateDocument`'s edit gestures
+(name, duplicate, rotate, mirror, bake, settings, paint, volumes with their ids and
+placements, layer heights, the cut and text tools), 15 are what `readPlateSnapshot` and
+the project file need to read a plate back, 14 are `SliceRuntime` and its timeline
+(slice, preview, markers, strokes, the threaded job), 1 is `PresetStore`, 2 are the free
+functions every getter's caller needs, and 5 have no caller in next-layer at all: the
+two mesh-part calls, the mesh-level paint pair and `hfw_slice_meshes`, because a plate
+object and not a bare mesh is the only thing the application paints or slices.
 
-### The four concepts that cross the boundary (2026-11-21)
+### What a document carries across (2026-11-21)
 
 next-layer's `src/app/src/bridge.rs` has settled how a document crosses: geometry as
 binary STL bytes, a placement as sixteen `f64` row-major, paint as a triangle index and
 a bitstream, layer heights as flat `(z, height)` pairs. Each is checked below against
 the export that carries it, and the one that did not match was changed rather than
-written down as a difference to live with.
+written down as a difference to live with. A volume needed the same treatment one
+level down, which is where the fifth entry comes from.
+
+**A volume is a placed, identified thing.** The fifth concept, and the one the port
+graph's cycle needs most: `PlateDocument` addresses every volume gesture by a stable
+volume id (`addVolume` returns one, `removeVolume`/`selectVolume`/`volumeInfo`/
+`setVolumePosition`/`setVolumeScale`/`setVolumeRotation` take one) and its volumes carry
+a transform of their own inside the object, while this ABI addressed volumes by
+position in a list that renumbers on removal and could only take geometry baked at
+add time. Volumes now have ids that are never zero and never reused, and a placement
+that composes on top of the object's —
+`hfw_plate_object_add_volume_placed`, `hfw_plate_object_volume_placement` and
+`_get`, `hfw_plate_object_volume_ids` — so a volume can be moved inside its part
+without rewriting triangles, and a removal or a read-back cannot make a panel or a
+selection point at a different volume. The project file carries it as a tenth
+number-group (`placement="…"` on `<volume>`, version 9); an older file opens with
+every volume at its own coordinates.
 
 **Geometry — binary STL bytes.** `ProjectObjectRecord.mesh: Vec<u8>`, and the same for
 a volume. Exports: `hfw_mesh_stl_bytes(mesh, 1, &len)` out, `hfw_mesh_from_bytes` in.

@@ -574,3 +574,33 @@ the cube with a 64x64 PNG and a 32x32 QOI, that is 175,440 bytes of container ag
 176,794 bytes of text and the same G-code. The C ABI still returns the text
 (`hfw_gcode_text`); the container is the command line's, and the application gets it when it
 asks for bytes rather than a string.
+
+## A volume is addressed by an id, and it carries its own placement
+
+Two changes to the volume half of the plate document, both forced by the same thing: the
+application's document addresses a volume by a number it keeps and shows, and its volumes
+have a transform of their own inside the object they belong to.
+
+**Identity, not position.** `add_volume` returns a `VolumeId`, and `remove_volume`,
+`set_volume_setting`, `volume_mesh`, `volume_settings_json`, `volume_kind` and
+`hfw_plate_volume_set` all take one. Removing a volume from the middle of a list renumbers
+everything after it, so a position is not an identity: a settings panel, a selection or an
+undo step holding "volume 1" would silently retarget itself after the user deleted volume 0.
+Ids are per object, never zero and never reused, exactly as object ids are on the plate, and
+`hfw_plate_object_volume_ids` reports them in insertion order so a read-back can rebuild the
+mapping. They are session identity and not file identity: a reopened project reassigns them
+in order, the same way reopening a plate reassigns object ids.
+
+**Placement, not baked geometry.** A volume keeps a `MeshTransform` that composes on top of
+the object's, so moving a modifier inside its part is reversible and stays a number a panel
+can edit. The slice applies the volume's placement and then the object's, which is two mesh
+transforms per volume per slice — the alternative, composing the two placements into one
+`T·R·S`, is not closed under composition (a scaled object times a rotated volume shears) and
+would have to refuse legitimate placements. Baking at add time was the third option and it
+was rejected for the same reason the object keeps its placement rather than its triangles:
+an operation a user can undo must not be a mesh rewrite.
+
+The project part grew a `placement` attribute on `<volume>` and the format version moved to
+9; an older file opens with every volume at its own coordinates, which is what version 8
+meant. Reverses by dropping the id type and the placement field, and by writing no
+`placement` attribute — files then read as version 8 plates.

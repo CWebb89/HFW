@@ -396,22 +396,56 @@ ptrdiff_t hfw_plate_object_paint_get(const HfwPlate *plate, uint64_t id,
 #define HFW_VOLUME_MODIFIER 4
 
 /**
- * Attaches a volume to object `id`, in the object's own coordinates, and copies the
- * geometry.
+ * Attaches a volume to object `id`, at its geometry's own coordinates, and copies
+ * the geometry.
  *
  * The volume shares the object's placement, so moving the part moves what it cuts
  * and what it forbids support in. A negative volume's cross-section is subtracted
  * from every layer before walls, infill and skin are planned, so the hole it cuts
  * gets walls of its own; a part volume is united the same way.
  *
- * Returns 0 on success, -1 when the object is not on the plate, `mesh` is null, the
- * geometry has no triangles, or `kind` is not one of the four.
+ * Returns the volume's id, which is never zero and never reused -- including after
+ * `hfw_plate_object_remove_volume` -- or 0 when the object is not on the plate,
+ * `mesh` is null, the geometry has no triangles, or `kind` is not one of the five.
+ * Address a volume by this id, not by its position: removing one renumbers the ones
+ * after it, and a selection or a settings panel holding a position would then be
+ * pointing at a different volume.
  */
-int32_t hfw_plate_object_add_volume(HfwPlate *plate, uint64_t id, int32_t kind,
-                                   const HfwMesh *mesh);
+uint64_t hfw_plate_object_add_volume(HfwPlate *plate, uint64_t id, int32_t kind,
+                                    const HfwMesh *mesh);
 
 /**
- * Sets one setting on modifier volume `index` of object `id`.
+ * Attaches a volume and places it inside the object, from a row-major 4x4 matrix.
+ *
+ * `matrix` has the same shape and rules as `hfw_plate_object_placement_matrix`, and
+ * composes on top of the object's own placement: the volume follows its part when the
+ * part moves and can be moved, turned or scaled within the object without rewriting
+ * any triangles. Returns the volume's id, or 0 on the refusals
+ * `hfw_plate_object_add_volume` reports, plus a matrix that shears, collapses an axis
+ * or is not affine.
+ */
+uint64_t hfw_plate_object_add_volume_placed(HfwPlate *plate, uint64_t id, int32_t kind,
+                                           const HfwMesh *mesh, const double *matrix);
+
+/**
+ * Moves volume `volume` inside its object, from a row-major 4x4 matrix.
+ *
+ * Returns 0 on success, -1 when the object or volume does not exist or the matrix is
+ * not representable.
+ */
+int32_t hfw_plate_object_volume_placement(HfwPlate *plate, uint64_t id, uint64_t volume,
+                                          const double *matrix);
+
+/**
+ * Reads volume `volume`'s placement back as a row-major 4x4 matrix, sixteen doubles.
+ *
+ * Returns 0 on success, -1 when the object or volume does not exist or `out` is null.
+ */
+int32_t hfw_plate_object_volume_placement_get(const HfwPlate *plate, uint64_t id,
+                                              uint64_t volume, double *out);
+
+/**
+ * Sets one setting on modifier volume `volume` of object `id`.
  *
  * Only a modifier volume has a region of its own to print differently, so a key set on
  * any other kind is refused rather than stored and ignored. The key is a settings key,
@@ -419,16 +453,16 @@ int32_t hfw_plate_object_add_volume(HfwPlate *plate, uint64_t id, int32_t kind,
  * whatever the volume already carries. Returns 0 on success, -1 when the object or
  * volume does not exist, the volume is not a modifier, or the key or value is unknown.
  */
-int32_t hfw_plate_volume_set(HfwPlate *plate, uint64_t id, size_t index, const char *key,
+int32_t hfw_plate_volume_set(HfwPlate *plate, uint64_t id, uint64_t volume, const char *key,
                              const char *value);
 
 /**
- * Detaches volume `index` from object `id`, counted from zero.
+ * Detaches volume `volume` from object `id`. Every other volume keeps its id.
  *
  * Returns 0 on success, -1 when the object is not on the plate or it has no volume
- * at that index.
+ * with that id.
  */
-int32_t hfw_plate_object_remove_volume(HfwPlate *plate, uint64_t id, size_t index);
+int32_t hfw_plate_object_remove_volume(HfwPlate *plate, uint64_t id, uint64_t volume);
 
 /**
  * How many volumes object `id` carries, or -1 when it is not on the plate.
@@ -436,12 +470,20 @@ int32_t hfw_plate_object_remove_volume(HfwPlate *plate, uint64_t id, size_t inde
 ptrdiff_t hfw_plate_object_volume_count(const HfwPlate *plate, uint64_t id);
 
 /**
- * Writes which kind of volume `index` of object `id` is into `out`.
+ * Writes every volume id of object `id` into `out`, in the order they were added.
+ *
+ * Returns how many the object carries, so one call with a NULL `out` sizes the next.
+ */
+size_t hfw_plate_object_volume_ids(const HfwPlate *plate, uint64_t id, uint64_t *out,
+                                  size_t len);
+
+/**
+ * Writes which kind of volume `volume` of object `id` is into `out`.
  *
  * Returns 0 on success, -1 when the object is not on the plate, `out` is null, or
- * the object has no volume at that index.
+ * the object has no volume with that id.
  */
-int32_t hfw_plate_object_volume_kind(const HfwPlate *plate, uint64_t id, size_t index,
+int32_t hfw_plate_object_volume_kind(const HfwPlate *plate, uint64_t id, uint64_t volume,
                                      int32_t *out);
 
 /**
@@ -656,9 +698,9 @@ int32_t hfw_plate_object_placement_get(const HfwPlate *plate, uint64_t id,
 int32_t hfw_plate_object_enabled_get(const HfwPlate *plate, uint64_t id, int32_t *out);
 HfwMesh *hfw_plate_object_mesh(const HfwPlate *plate, uint64_t id);
 char *hfw_plate_object_settings_json(const HfwPlate *plate, uint64_t id);
-HfwMesh *hfw_plate_object_volume_mesh(const HfwPlate *plate, uint64_t id, size_t index);
+HfwMesh *hfw_plate_object_volume_mesh(const HfwPlate *plate, uint64_t id, uint64_t volume);
 char *hfw_plate_object_volume_settings_json(const HfwPlate *plate, uint64_t id,
-                                            size_t index);
+                                            uint64_t volume);
 
 /** Releases a string this library returned. A NULL pointer is ignored. */
 void hfw_string_free(char *text);

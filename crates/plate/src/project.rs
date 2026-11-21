@@ -34,9 +34,10 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 /// Version 2 added per-object paint, version 3 volumes, version 4 per-object layer
 /// heights, version 5 the plate's timeline markers, version 6 its in-layer strokes,
 /// version 7 the settings a modifier volume prints its region with, version 8 the
-/// caller's own bytes. Older files still open: they simply carry none of what they
-/// predate.
-pub const PROJECT_VERSION: u32 = 8;
+/// caller's own bytes, version 9 a volume's own placement inside its object. Older
+/// files still open: they simply carry none of what they predate, and a volume with
+/// no placement sits at its geometry's own coordinates.
+pub const PROJECT_VERSION: u32 = 9;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -147,6 +148,7 @@ impl Plate {
             volumes.push((
                 saved.object,
                 saved.kind,
+                saved.placement,
                 saved.overrides.clone(),
                 Some(geometry),
             ));
@@ -155,7 +157,7 @@ impl Plate {
         let mut plate = Plate::new(settings);
         for (index, (name, mesh)) in parts.into_iter().flatten().enumerate() {
             let id = plate.add_positioned(name, mesh)?;
-            for (_, kind, overrides, geometry) in
+            for (_, kind, placement, overrides, geometry) in
                 volumes.iter_mut().filter(|saved| saved.0 == index)
             {
                 let geometry = geometry.take().ok_or_else(|| {
@@ -165,10 +167,9 @@ impl Plate {
                 })?;
                 let settings = plate.settings().clone();
                 let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
-                object.add_volume(*kind, geometry)?;
+                let volume = object.add_volume_placed(*kind, geometry, *placement)?;
                 for (key, value) in overrides.iter() {
-                    let index = object.volumes().len() - 1;
-                    object.set_volume_setting(index, key, value, &settings)?;
+                    object.set_volume_setting(volume, key, value, &settings)?;
                 }
             }
             let saved = extras.objects.iter().find(|saved| saved.index == index);
@@ -306,9 +307,19 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
     let mut model = plate.objects.len();
     for (owner, object) in plate.objects.iter().enumerate() {
         for volume in object.volumes() {
+            let placement = volume.placement();
             let mut block = format!(
-                "  <volume object=\"{owner}\" model=\"{model}\" kind=\"{}\"",
-                volume.kind().name()
+                "  <volume object=\"{owner}\" model=\"{model}\" kind=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\"",
+                volume.kind().name(),
+                placement.scale[0],
+                placement.scale[1],
+                placement.scale[2],
+                placement.rotation_degrees[0],
+                placement.rotation_degrees[1],
+                placement.rotation_degrees[2],
+                placement.translation_mm[0],
+                placement.translation_mm[1],
+                placement.translation_mm[2]
             );
             if volume.overrides().is_empty() {
                 block.push_str("/>\n");
@@ -461,14 +472,22 @@ struct SavedProject {
 
 /// Where one volume came from: which object owns it, which model-part object holds
 /// its geometry, and what it does.
-/// Where a volume's geometry and settings are waiting to be rebuilt on the plate.
-type SavedPlacement = (usize, VolumeKind, Vec<(String, String)>, Option<Mesh>);
+/// Where a volume's geometry, placement and settings are waiting to be rebuilt on the
+/// plate.
+type SavedPlacement = (
+    usize,
+    VolumeKind,
+    MeshTransform,
+    Vec<(String, String)>,
+    Option<Mesh>,
+);
 
 #[derive(Debug)]
 struct SavedVolume {
     object: usize,
     model: usize,
     kind: VolumeKind,
+    placement: MeshTransform,
     overrides: Vec<(String, String)>,
 }
 
@@ -588,10 +607,36 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
                 .ok_or_else(|| PlateError::Slice("a volume setting has no value".to_owned()))?;
             overrides.push((key.trim().to_owned(), value));
         }
+        let placement = match attribute_in(&block, "volume", "placement") {
+            Some(text) => {
+                let numbers: Vec<f64> = text
+                    .split_whitespace()
+                    .map(|number| number.parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| {
+                        PlateError::Slice(format!(
+                            "a volume's placement is not nine numbers: {text:?}"
+                        ))
+                    })?;
+                if numbers.len() != 9 {
+                    return Err(PlateError::Slice(format!(
+                        "a volume's placement must be nine numbers, and this one has {}",
+                        numbers.len()
+                    )));
+                }
+                MeshTransform {
+                    scale: [numbers[0], numbers[1], numbers[2]],
+                    rotation_degrees: [numbers[3], numbers[4], numbers[5]],
+                    translation_mm: [numbers[6], numbers[7], numbers[8]],
+                }
+            }
+            None => MeshTransform::default(),
+        };
         volumes.push(SavedVolume {
             object: number(&object, "object")?,
             model: number(&model, "model")?,
             kind,
+            placement,
             overrides,
         });
     }
@@ -895,12 +940,15 @@ mod tests {
         let plate = drawn_plate();
         let bytes = plate.to_project().expect("the project is written");
         let parts = archive_parts(std::io::Cursor::new(&bytes)).expect("the archive reads");
+        let future = PROJECT_VERSION + 1;
         let rewritten: Vec<(&str, Vec<u8>)> = parts
             .iter()
             .map(|(name, content)| {
                 if name == PROJECT_PART {
-                    let xml = String::from_utf8_lossy(content)
-                        .replace(&format!("version=\"{PROJECT_VERSION}\""), "version=\"9\"");
+                    let xml = String::from_utf8_lossy(content).replace(
+                        &format!("version=\"{PROJECT_VERSION}\""),
+                        &format!("version=\"{future}\""),
+                    );
                     (name.as_str(), xml.into_bytes())
                 } else {
                     (name.as_str(), content.clone())
@@ -911,9 +959,12 @@ mod tests {
         let refused = Plate::from_project(&bytes, Settings::default());
         match refused {
             Err(PlateError::Slice(message)) => {
-                assert!(message.contains("version 9"), "message was `{message}`");
                 assert!(
-                    message.contains("versions 1 to 8"),
+                    message.contains(&format!("version {future}")),
+                    "message was `{message}`"
+                );
+                assert!(
+                    message.contains(&format!("versions 1 to {PROJECT_VERSION}")),
                     "the refusal names the range it reads: `{message}`"
                 );
             }

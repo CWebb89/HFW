@@ -21,14 +21,14 @@ fn project(dir: &Path) -> PathBuf {
     let id = plate.add("cube", cube()).expect("a cube adds");
     let settings = plate.settings().clone();
     let object = plate.object_mut(id).expect("the object is there");
-    object
+    let modifier = object
         .add_volume(
             VolumeKind::Modifier,
             Mesh::box_mm(8.0, 8.0, 20.0).expect("a box builds"),
         )
         .expect("a modifier volume adds");
     object
-        .set_volume_setting(0, "sparse_infill_density", "0.9", &settings)
+        .set_volume_setting(modifier, "sparse_infill_density", "0.9", &settings)
         .expect("the modifier takes settings");
     object
         .add_volume(

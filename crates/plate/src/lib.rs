@@ -63,6 +63,39 @@ impl fmt::Display for ObjectId {
     }
 }
 
+/// One volume's identity inside the object that carries it.
+///
+/// A volume is addressed by this rather than by its position in the object's list,
+/// because a list shifts: removing volume 1 renumbers volume 2 to 1, and a front end
+/// that keeps a selection, a settings panel or an undo step would then be pointing at
+/// a different volume. Ids are per object, never zero and never reused, so
+/// [`PlateObject::remove_volume`] leaves every other volume's id valid — the same rule
+/// object ids follow on the plate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VolumeId(u64);
+
+impl VolumeId {
+    /// The number behind the handle, never zero.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The handle behind a number a caller stored, or `None` for zero.
+    pub fn from_number(number: u64) -> Option<Self> {
+        if number == 0 {
+            None
+        } else {
+            Some(Self(number))
+        }
+    }
+}
+
+impl fmt::Display for VolumeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Why the plate could not do what was asked.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlateError {
@@ -235,6 +268,7 @@ pub struct PlateObject {
     settings: Option<Settings>,
     paint: Paint,
     volumes: Vec<PlateVolume>,
+    next_volume_id: u64,
     layer_heights: Vec<(f64, f64)>,
     overrides: BTreeSet<String>,
     ignored_overrides: BTreeSet<String>,
@@ -244,23 +278,37 @@ pub struct PlateObject {
 ///
 /// The volume shares the object's placement, so moving a part moves what was cut
 /// out of it and what it is not allowed to grow support on. That is the whole
-/// reason a volume belongs to an object rather than to the plate.
+/// reason a volume belongs to an object rather than to the plate. Its own
+/// placement composes on top of that, so a modifier can be moved or scaled inside
+/// the part it cuts without rewriting its triangles.
 #[derive(Clone, Debug)]
 pub struct PlateVolume {
+    id: VolumeId,
     kind: VolumeKind,
     mesh: Mesh,
+    placement: MeshTransform,
     overrides: Vec<(String, String)>,
 }
 
 impl PlateVolume {
+    /// The volume's identity inside its object.
+    pub fn id(&self) -> VolumeId {
+        self.id
+    }
+
     /// What this volume does to the object.
     pub fn kind(&self) -> VolumeKind {
         self.kind
     }
 
-    /// The volume's geometry, in the object's own frame.
+    /// The volume's geometry, in its own frame.
     pub fn mesh(&self) -> &Mesh {
         &self.mesh
+    }
+
+    /// Where the volume sits inside the object.
+    pub fn placement(&self) -> MeshTransform {
+        self.placement
     }
 
     /// The settings this volume's region prints with, as key/value rows.
@@ -415,47 +463,122 @@ impl PlateObject {
         Ok(())
     }
 
-    /// Attaches a volume to this object.
+    /// Attaches a volume to this object, at its own geometry's coordinates.
     ///
     /// Later volumes act after earlier ones, which only changes the result when two
     /// volumes disagree: a part volume added after a negative one puts the material
-    /// back where the second one covers it.
-    pub fn add_volume(&mut self, kind: VolumeKind, mesh: Mesh) -> Result<(), PlateError> {
+    /// back where the second one covers it. The returned id is the volume's name for
+    /// the rest of its life, and it is never reused.
+    pub fn add_volume(&mut self, kind: VolumeKind, mesh: Mesh) -> Result<VolumeId, PlateError> {
+        self.add_volume_placed(kind, mesh, MeshTransform::default())
+    }
+
+    /// Attaches a volume and puts it somewhere inside the object.
+    ///
+    /// The placement composes on top of the object's own, so a volume follows its
+    /// part when the part moves and can be moved, turned or scaled within it without
+    /// touching any triangles.
+    pub fn add_volume_placed(
+        &mut self,
+        kind: VolumeKind,
+        mesh: Mesh,
+        placement: MeshTransform,
+    ) -> Result<VolumeId, PlateError> {
         if mesh.triangle_count() == 0 {
             return Err(PlateError::Volume(
                 "a volume has no triangles, so it would change nothing".to_owned(),
             ));
         }
+        if placement
+            .scale
+            .iter()
+            .any(|value| !value.is_finite() || *value == 0.0)
+            || placement
+                .rotation_degrees
+                .iter()
+                .any(|value| !value.is_finite())
+            || placement
+                .translation_mm
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            return Err(PlateError::Volume(
+                "a volume placement needs finite numbers and a non-zero scale".to_owned(),
+            ));
+        }
+        let id = VolumeId(self.next_volume_id);
+        self.next_volume_id += 1;
         self.volumes.push(PlateVolume {
+            id,
             kind,
             mesh,
+            placement,
             overrides: Vec::new(),
         });
+        Ok(id)
+    }
+
+    /// One volume by id.
+    pub fn volume(&self, id: VolumeId) -> Option<&PlateVolume> {
+        self.volumes.iter().find(|volume| volume.id == id)
+    }
+
+    /// One volume by position, for a caller walking the list.
+    pub fn volume_at(&self, index: usize) -> Option<&PlateVolume> {
+        self.volumes.get(index)
+    }
+
+    /// Every volume's id, in the order the volumes were added.
+    pub fn volume_ids(&self) -> Vec<VolumeId> {
+        self.volumes.iter().map(|volume| volume.id).collect()
+    }
+
+    /// Moves a volume inside its object, without touching its triangles.
+    pub fn set_volume_placement(
+        &mut self,
+        id: VolumeId,
+        placement: MeshTransform,
+    ) -> Result<(), PlateError> {
+        let volume = self.volume_mut(id)?;
+        volume.placement = placement;
         Ok(())
     }
 
-    /// Sets one setting on a modifier volume, counted in the order [`Self::volumes`]
-    /// returns them.
+    fn volume_mut(&mut self, id: VolumeId) -> Result<&mut PlateVolume, PlateError> {
+        let count = self.volumes.len();
+        self.volumes
+            .iter_mut()
+            .find(|volume| volume.id == id)
+            .ok_or_else(|| {
+                PlateError::Volume(format!("no volume {id} is on this object ({count} in all)"))
+            })
+    }
+
+    /// Sets one setting on a modifier volume.
     ///
     /// Only a modifier volume reads its own settings, so a key set on any other kind is
     /// refused rather than stored and ignored: a support blocker that quietly accepted
     /// `sparse_infill_density` would look like it had been applied.
     pub fn set_volume_setting(
         &mut self,
-        index: usize,
+        id: VolumeId,
         key: &str,
         value: &str,
         plate: &Settings,
     ) -> Result<(), PlateError> {
-        let volume = self.volumes.get(index).ok_or_else(|| {
-            PlateError::Volume(format!(
-                "volume {index} does not exist: this object has {}",
-                self.volumes.len()
-            ))
-        })?;
+        let volume = self
+            .volumes
+            .iter()
+            .find(|volume| volume.id == id)
+            .ok_or_else(|| {
+                PlateError::Volume(format!(
+                    "no volume {id} is on this object ({} in all)",
+                    self.volumes.len()
+                ))
+            })?;
         if volume.kind != VolumeKind::Modifier {
             return Err(PlateError::Volume(format!(
-                "volume {index} is a {} volume, and only a modifier volume has settings of its own",
+                "volume {id} is a {} volume, and only a modifier volume has settings of its own",
                 volume.kind.name()
             )));
         }
@@ -468,11 +591,7 @@ impl PlateObject {
         settings
             .apply_key(key, value)
             .map_err(PlateError::Setting)?;
-        let volume = self.volumes.get_mut(index).ok_or_else(|| {
-            PlateError::Volume(format!(
-                "volume {index} disappeared while it was being changed"
-            ))
-        })?;
+        let volume = self.volume_mut(id)?;
         volume.overrides.push((key.to_owned(), value.to_owned()));
         Ok(())
     }
@@ -482,10 +601,10 @@ impl PlateObject {
     /// `None` for every kind that has no settings of its own.
     pub fn resolved_volume_settings(
         &self,
-        index: usize,
+        id: VolumeId,
         plate: &Settings,
     ) -> Result<Option<Settings>, PlateError> {
-        let Some(volume) = self.volumes.get(index) else {
+        let Some(volume) = self.volume(id) else {
             return Ok(None);
         };
         if volume.kind != VolumeKind::Modifier {
@@ -493,7 +612,7 @@ impl PlateObject {
         }
         if volume.overrides.is_empty() {
             return Err(PlateError::Volume(format!(
-                "volume {index} is a modifier with no settings: its region would print with \
+                "volume {id} is a modifier with no settings: its region would print with \
                  the object's own settings, which is what that region prints with anyway, and \
                  the layer would carry every bead in it twice"
             )));
@@ -507,15 +626,15 @@ impl PlateObject {
         Ok(Some(settings))
     }
 
-    /// Removes one volume, counted in the order [`Self::volumes`] returns them.
-    pub fn remove_volume(&mut self, index: usize) -> Result<(), PlateError> {
-        if index >= self.volumes.len() {
+    /// Detaches a volume by id. Every other volume keeps its id.
+    pub fn remove_volume(&mut self, id: VolumeId) -> Result<(), PlateError> {
+        let before = self.volumes.len();
+        self.volumes.retain(|volume| volume.id != id);
+        if self.volumes.len() == before {
             return Err(PlateError::Volume(format!(
-                "volume {index} does not exist: this object has {}",
-                self.volumes.len()
+                "no volume {id} is on this object ({before} in all)"
             )));
         }
-        self.volumes.remove(index);
         Ok(())
     }
 
@@ -741,6 +860,7 @@ impl Plate {
             settings: None,
             paint: Paint::default(),
             volumes: Vec::new(),
+            next_volume_id: 1,
             layer_heights: Vec::new(),
             overrides: BTreeSet::new(),
             ignored_overrides: BTreeSet::new(),
@@ -1005,13 +1125,22 @@ impl Plate {
             });
             let mut volumes = Vec::with_capacity(object.volumes().len());
             for volume in object.volumes() {
-                volumes.push(if identity {
+                let in_object = if is_identity(&volume.placement()) {
                     None
                 } else {
                     Some(
                         volume
                             .mesh()
-                            .transformed(object.placement)
+                            .transformed(volume.placement())
+                            .map_err(|error| PlateError::Transform(error.to_string()))?,
+                    )
+                };
+                volumes.push(if identity {
+                    in_object
+                } else {
+                    let base = in_object.as_ref().unwrap_or_else(|| volume.mesh());
+                    Some(
+                        base.transformed(object.placement)
                             .map_err(|error| PlateError::Transform(error.to_string()))?,
                     )
                 });
@@ -1034,13 +1163,12 @@ impl Plate {
                 let modifiers = object
                     .volumes()
                     .iter()
-                    .enumerate()
                     .zip(volumes)
-                    .map(|((index, volume), moved)| {
+                    .map(|(volume, moved)| {
                         Ok(PlacedVolume {
                             mesh: moved.as_ref().unwrap_or(volume.mesh()),
                             kind: volume.kind(),
-                            settings: object.resolved_volume_settings(index, settings)?,
+                            settings: object.resolved_volume_settings(volume.id(), settings)?,
                         })
                     })
                     .collect::<Result<Vec<_>, PlateError>>()?;

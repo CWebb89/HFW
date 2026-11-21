@@ -133,6 +133,13 @@ Two more that matter when deciding whether to trust the output:
   it packs unpositioned objects on a MaxRects layout and leaves objects a project
   file positioned where they are. A part that does not fit is refused with its size
   rather than dropped.
+- Volumes are identified and placed: `hfw_plate_object_add_volume` returns an id that
+  removing another volume does not renumber (`hfw_plate_object_volume_ids` reads them
+  all back), and `hfw_plate_object_add_volume_placed` / `hfw_plate_object_volume_placement`
+  put a volume where the user put it inside its object, as a placement rather than by
+  baking its triangles. The project part carries it (format version 9), so a moved
+  modifier reopens where it was left. `crates/plate/tests/document.rs` covers the ids
+  and the placement; `crates/capi/tests/abi.rs` covers both across the boundary.
 - The preview document (`hfw_plate_preview_json`, `hfw_string_free`): every planned
   bead with its position, per-vertex width, flow multiplier and the label the G-code
   writer gives it, grouped per layer. The label comes from the writer's own mapping,

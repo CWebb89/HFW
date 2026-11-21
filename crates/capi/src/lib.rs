@@ -43,7 +43,7 @@ use hfw_engine::{
 };
 use hfw_font::Face;
 use hfw_mesh::CutPlane;
-use hfw_plate::{ObjectId, Plate, PlateObject};
+use hfw_plate::{ObjectId, Plate, PlateObject, VolumeId};
 use hfw_text::text_prism;
 
 /// What `hfw_mesh_load_file` reads, in the order the app's file dialog offers them.
@@ -1079,9 +1079,10 @@ pub unsafe extern "C" fn hfw_plate_object_settings_json(
     report(build(), ptr::null_mut())
 }
 
-/// Returns a copy of volume `index` of object `id`, or NULL on error.
+/// Returns a copy of volume `volume` of object `id`, or NULL on error.
 ///
-/// Release it with [`hfw_mesh_free`]. The geometry is in the object's own frame.
+/// Release it with [`hfw_mesh_free`]. The geometry is in the volume's own frame; the
+/// volume's placement says where that frame sits inside the object.
 ///
 /// # Safety
 ///
@@ -1090,17 +1091,12 @@ pub unsafe extern "C" fn hfw_plate_object_settings_json(
 pub unsafe extern "C" fn hfw_plate_object_volume_mesh(
     plate: *const HfwPlate,
     id: u64,
-    index: usize,
+    volume: u64,
 ) -> *mut HfwMesh {
     let build = || -> Result<*mut HfwMesh, String> {
         let plate = unsafe { plate_of(plate) }?;
         let object = object_of(&plate.plate, id)?;
-        let volume = object.volumes().get(index).ok_or_else(|| {
-            format!(
-                "object {id} has no volume {index}: it has {}",
-                object.volumes().len()
-            )
-        })?;
+        let volume = volume_of(object, id, volume)?;
         Ok(Box::into_raw(Box::new(HfwMesh {
             mesh: volume.mesh().clone(),
             paint: Paint::default(),
@@ -1109,7 +1105,7 @@ pub unsafe extern "C" fn hfw_plate_object_volume_mesh(
     report(build(), ptr::null_mut())
 }
 
-/// Returns volume `index` of object `id` as a JSON object of the settings its
+/// Returns volume `volume` of object `id` as a JSON object of the settings its
 /// region prints with, or NULL on error.
 ///
 /// Release the string with [`hfw_string_free`].
@@ -1121,17 +1117,12 @@ pub unsafe extern "C" fn hfw_plate_object_volume_mesh(
 pub unsafe extern "C" fn hfw_plate_object_volume_settings_json(
     plate: *const HfwPlate,
     id: u64,
-    index: usize,
+    volume: u64,
 ) -> *mut c_char {
     let build = || -> Result<*mut c_char, String> {
         let plate = unsafe { plate_of(plate) }?;
         let object = object_of(&plate.plate, id)?;
-        let volume = object.volumes().get(index).ok_or_else(|| {
-            format!(
-                "object {id} has no volume {index}: it has {}",
-                object.volumes().len()
-            )
-        })?;
+        let volume = volume_of(object, id, volume)?;
         let rows: Vec<(String, String)> = volume
             .overrides()
             .iter()
@@ -1142,6 +1133,37 @@ pub unsafe extern "C" fn hfw_plate_object_volume_settings_json(
             .map_err(|_| "the settings JSON contains a NUL".to_owned())
     };
     report(build(), ptr::null_mut())
+}
+
+/// Writes volume `volume` of object `id` into `out` as a row-major 4x4 matrix, the
+/// same shape an object's placement uses.
+///
+/// Returns 0 on success and -1 when the object or volume does not exist or `out` is
+/// null.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` must be writable for sixteen doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_placement_get(
+    plate: *const HfwPlate,
+    id: u64,
+    volume: u64,
+    out: *mut f64,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        if out.is_null() {
+            return Err("output pointer is null".to_owned());
+        }
+        let object = object_of(&plate.plate, id)?;
+        let matrix = volume_of(object, id, volume)?.placement().to_matrix();
+        unsafe {
+            std::ptr::copy_nonoverlapping(matrix.as_ptr(), out, 16);
+        }
+        Ok(0)
+    };
+    report(read(), -1)
 }
 
 /// Releases a string this library returned, such as the preview document. A null
@@ -2483,14 +2505,52 @@ fn volume_code(kind: VolumeKind) -> c_int {
     }
 }
 
-/// Attaches a volume to object `id`, in the object's own coordinates.
+/// One volume of one object, by the id the caller was handed when it was attached.
+fn volume_of(
+    object: &PlateObject,
+    object_id: u64,
+    volume: u64,
+) -> Result<&hfw_plate::PlateVolume, String> {
+    let id = VolumeId::from_number(volume)
+        .ok_or_else(|| format!("volume id {volume} is not a volume: ids are never zero"))?;
+    object.volume(id).ok_or_else(|| {
+        format!(
+            "object {object_id} has no volume {id}: it has {}",
+            object.volumes().len()
+        )
+    })
+}
+
+/// Reads a row-major 4x4 matrix a caller passed, as this engine's transform.
+///
+/// # Safety
+///
+/// `matrix` must point at sixteen readable doubles.
+unsafe fn matrix_of(matrix: *const f64) -> Result<MeshTransform, String> {
+    if matrix.is_null() {
+        return Err("matrix pointer is null".to_owned());
+    }
+    let mut values = [0.0_f64; 16];
+    for (slot, value) in values
+        .iter_mut()
+        .zip(unsafe { std::slice::from_raw_parts(matrix, 16) })
+    {
+        *slot = *value;
+    }
+    MeshTransform::from_matrix(values).map_err(|error| error.to_string())
+}
+
+/// Attaches a volume to object `id`, at its geometry's own coordinates.
 ///
 /// The volume shares the object's placement, so moving the part moves what it cuts
 /// and what it forbids support in. `kind` is one of `HFW_VOLUME_PART`,
-/// `HFW_VOLUME_NEGATIVE`, `HFW_VOLUME_SUPPORT_BLOCKER` or
-/// `HFW_VOLUME_SUPPORT_ENFORCER`; the mesh is copied, so the caller keeps its own.
-/// Returns 0 on success and -1 when the object is not on the plate, `mesh` is null,
-/// or the geometry has no triangles.
+/// `HFW_VOLUME_NEGATIVE`, `HFW_VOLUME_SUPPORT_BLOCKER`, `HFW_VOLUME_SUPPORT_ENFORCER`
+/// or `HFW_VOLUME_MODIFIER`; the mesh is copied, so the caller keeps its own.
+///
+/// Returns the volume's id, which is never zero and never reused, or 0 when the
+/// object is not on the plate, `mesh` is null, the geometry has no triangles, or
+/// `kind` is not one of the five. Use the id, not a position: removing a volume does
+/// not renumber the ones after it, and a position does.
 ///
 /// # Safety
 ///
@@ -2502,8 +2562,34 @@ pub unsafe extern "C" fn hfw_plate_object_add_volume(
     id: u64,
     kind: c_int,
     mesh: *const HfwMesh,
-) -> c_int {
-    let add = || -> Result<c_int, String> {
+) -> u64 {
+    unsafe { hfw_plate_object_add_volume_placed(plate, id, kind, mesh, std::ptr::null()) }
+}
+
+/// Attaches a volume to object `id` and places it inside the object.
+///
+/// `matrix` is a row-major 4x4 affine matrix, the shape
+/// [`hfw_plate_object_placement_matrix`] takes, and it composes on top of the
+/// object's own placement: a volume follows its part when the part moves and can be
+/// moved, turned or scaled within it without rewriting any triangles. A matrix that
+/// shears, collapses an axis or is not affine is refused rather than truncated.
+///
+/// Returns the volume's id, or 0 on the same refusals [`hfw_plate_object_add_volume`]
+/// reports plus an unrepresentable matrix.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call, `mesh` a live read-only
+/// handle, and `matrix` a null pointer or sixteen readable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_add_volume_placed(
+    plate: *mut HfwPlate,
+    id: u64,
+    kind: c_int,
+    mesh: *const HfwMesh,
+    matrix: *const f64,
+) -> u64 {
+    let add = || -> Result<u64, String> {
         if plate.is_null() {
             return Err("plate handle is null".to_owned());
         }
@@ -2512,20 +2598,63 @@ pub unsafe extern "C" fn hfw_plate_object_add_volume(
         }
         let kind = volume_kind(kind)?;
         let geometry = unsafe { &*mesh }.mesh.clone();
+        let placement = if matrix.is_null() {
+            MeshTransform::default()
+        } else {
+            unsafe { matrix_of(matrix) }?
+        };
         let id =
             ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
         unsafe { &mut *plate }
             .plate
             .object_mut(id)
             .ok_or_else(|| format!("no object {id} is on the plate"))?
-            .add_volume(kind, geometry)
+            .add_volume_placed(kind, geometry, placement)
+            .map(VolumeId::get)
+            .map_err(|error| error.to_string())
+    };
+    report(add(), 0)
+}
+
+/// Moves volume `volume` inside its object, from a row-major 4x4 matrix.
+///
+/// The matrix has the same shape and rules as
+/// [`hfw_plate_object_placement_matrix`]: scale, then rotations about X, Y and Z in
+/// degrees, then translation in millimetres. Returns 0 on success and -1 when the
+/// object or volume does not exist or the matrix is not representable.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call and `matrix` must point at
+/// sixteen readable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_placement(
+    plate: *mut HfwPlate,
+    id: u64,
+    volume: u64,
+    matrix: *const f64,
+) -> c_int {
+    let place = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let placement = unsafe { matrix_of(matrix) }?;
+        let object_id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let volume_id = VolumeId::from_number(volume)
+            .ok_or_else(|| format!("volume id {volume} is not a volume: ids are never zero"))?;
+        unsafe { &mut *plate }
+            .plate
+            .object_mut(object_id)
+            .ok_or_else(|| format!("no object {object_id} is on the plate"))?
+            .set_volume_placement(volume_id, placement)
             .map(|()| 0)
             .map_err(|error| error.to_string())
     };
-    report(add(), -1)
+    report(place(), -1)
 }
 
-/// Sets one setting on modifier volume `index` of object `id`.
+/// Sets one setting on modifier volume `volume` of object `id`.
 ///
 /// Only a modifier volume has a region of its own to print differently, so a key set on
 /// any other kind is refused rather than stored and ignored. The key is a settings key,
@@ -2543,7 +2672,7 @@ pub unsafe extern "C" fn hfw_plate_object_add_volume(
 pub unsafe extern "C" fn hfw_plate_volume_set(
     plate: *mut HfwPlate,
     id: u64,
-    index: usize,
+    volume: u64,
     key: *const c_char,
     value: *const c_char,
 ) -> c_int {
@@ -2555,23 +2684,25 @@ pub unsafe extern "C" fn hfw_plate_volume_set(
         let value = unsafe { text_of(value, "value") }?;
         let id =
             ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let volume = VolumeId::from_number(volume)
+            .ok_or_else(|| "volume id 0 is not a volume".to_owned())?;
         let plate = unsafe { &mut *plate };
         let settings = plate.plate.settings().clone();
         plate
             .plate
             .object_mut(id)
             .ok_or_else(|| format!("no object {id} is on the plate"))?
-            .set_volume_setting(index, &key, &value, &settings)
+            .set_volume_setting(volume, &key, &value, &settings)
             .map(|()| 0)
             .map_err(|error| error.to_string())
     };
     report(set(), -1)
 }
 
-/// Detaches volume `index` from object `id`, counted from zero.
+/// Detaches volume `volume` from object `id`. Every other volume keeps its id.
 ///
 /// Returns 0 on success and -1 when the object is not on the plate or it has no
-/// volume at that index.
+/// volume with that id.
 ///
 /// # Safety
 ///
@@ -2580,7 +2711,7 @@ pub unsafe extern "C" fn hfw_plate_volume_set(
 pub unsafe extern "C" fn hfw_plate_object_remove_volume(
     plate: *mut HfwPlate,
     id: u64,
-    index: usize,
+    volume: u64,
 ) -> c_int {
     let remove = || -> Result<c_int, String> {
         if plate.is_null() {
@@ -2588,15 +2719,53 @@ pub unsafe extern "C" fn hfw_plate_object_remove_volume(
         }
         let id =
             ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let volume = VolumeId::from_number(volume)
+            .ok_or_else(|| "volume id 0 is not a volume".to_owned())?;
         unsafe { &mut *plate }
             .plate
             .object_mut(id)
             .ok_or_else(|| format!("no object {id} is on the plate"))?
-            .remove_volume(index)
+            .remove_volume(volume)
             .map(|()| 0)
             .map_err(|error| error.to_string())
     };
     report(remove(), -1)
+}
+
+/// Writes every volume id of object `id` into `out`, in the order they were added.
+///
+/// Returns how many the object carries, so one call with a null `out` sizes the next.
+/// A count larger than `len` fills `len` of them and still reports the total.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` must be null or writable for `len` ids.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_ids(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut u64,
+    len: usize,
+) -> usize {
+    let read = || -> Result<usize, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let object = unsafe { &*plate }
+            .plate
+            .object(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        let ids = object.volume_ids();
+        if !out.is_null() {
+            for (slot, id) in ids.iter().take(len).enumerate() {
+                unsafe { *out.add(slot) = id.get() };
+            }
+        }
+        Ok(ids.len())
+    };
+    report(read(), 0)
 }
 
 /// How many volumes object `id` carries, or -1 when it is not on the plate.
@@ -2621,10 +2790,10 @@ pub unsafe extern "C" fn hfw_plate_object_volume_count(plate: *const HfwPlate, i
     report(count(), -1)
 }
 
-/// Writes which kind of volume `index` of object `id` is into `out`.
+/// Writes which kind of volume `volume` of object `id` is into `out`.
 ///
 /// Returns 0 on success and -1 when the object is not on the plate, `out` is null,
-/// or the object has no volume at that index.
+/// or the object has no volume with that id.
 ///
 /// # Safety
 ///
@@ -2633,7 +2802,7 @@ pub unsafe extern "C" fn hfw_plate_object_volume_count(plate: *const HfwPlate, i
 pub unsafe extern "C" fn hfw_plate_object_volume_kind(
     plate: *const HfwPlate,
     id: u64,
-    index: usize,
+    volume: u64,
     out: *mut c_int,
 ) -> c_int {
     let kind = || -> Result<c_int, String> {
@@ -2643,18 +2812,13 @@ pub unsafe extern "C" fn hfw_plate_object_volume_kind(
         if out.is_null() {
             return Err("output pointer is null".to_owned());
         }
-        let id =
+        let object_id =
             ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
         let object = unsafe { &*plate }
             .plate
-            .object(id)
+            .object(object_id)
             .ok_or_else(|| format!("no object {id} is on the plate"))?;
-        let volume = object.volumes().get(index).ok_or_else(|| {
-            format!(
-                "object {id} has no volume {index}: it has {}",
-                object.volumes().len()
-            )
-        })?;
+        let volume = volume_of(object, id, volume)?;
         unsafe { *out = volume_code(volume.kind()) };
         Ok(0)
     };
