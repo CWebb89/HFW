@@ -139,6 +139,10 @@ Two more that matter when deciding whether to trust the output:
   the id counter — and share each object's geometry with the live plate, so the first
   write after a snapshot copies that object's mesh and the snapshot is unaffected. A
   restored plate slices to byte-identical G-code, which is the test.
+- A saved document reopens as the same document, identities included: each object's id,
+  each volume's id and both id counters travel in the project part, so a selection, an
+  undo step or a paint session holding an id still names the object it named and the
+  reopened document cannot hand out an id that was already used.
 - An object carries what a panel needs about it and the document cannot lose: a `name`
   and a separate `label` (what a user renamed it to, with `display_name()` as the thing
   to show), the `source` path it was imported from, the `dialect` its settings are

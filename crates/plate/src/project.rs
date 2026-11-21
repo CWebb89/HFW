@@ -24,7 +24,7 @@ use hfw_engine::{
 };
 use hfw_mesh::{archive_parts, model_part_xml, objects_from_3mf_text, MeshTransform};
 
-use crate::{Dialect, ForeignRefusal, ForeignSetting, ObjectId, Plate, PlateError};
+use crate::{Dialect, ForeignRefusal, ForeignSetting, ObjectId, Plate, PlateError, VolumeId};
 
 /// The part that carries what the 3MF format has no field for.
 pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
@@ -153,6 +153,7 @@ impl Plate {
                 saved.object,
                 saved.kind,
                 saved.name.clone(),
+                saved.id,
                 saved.visible,
                 saved.placement,
                 saved.overrides.clone(),
@@ -164,9 +165,26 @@ impl Plate {
         for _ in 1..extras.beds.len().max(1) {
             plate.add_bed();
         }
+        let mut adopted_ids: Vec<u64> = Vec::new();
         for (index, (name, mesh)) in parts.into_iter().flatten().enumerate() {
-            let id = plate.add_positioned(name, mesh)?;
-            for (_, kind, name, visible, placement, overrides, geometry) in
+            let saved = extras.objects.iter().find(|saved| saved.index == index);
+            let recorded = match saved.and_then(|saved| saved.id) {
+                Some(recorded) => {
+                    if adopted_ids.contains(&recorded) {
+                        return Err(PlateError::Slice(format!(
+                            "two objects carry id {recorded}, and an id names one object"
+                        )));
+                    }
+                    adopted_ids.push(recorded);
+                    Some(
+                        ObjectId::from_number(recorded)
+                            .ok_or_else(|| PlateError::Slice("ids are never zero".to_owned()))?,
+                    )
+                }
+                None => None,
+            };
+            let id = plate.add_restored(name, mesh, recorded)?;
+            for (_, kind, name, id_recorded, visible, placement, overrides, geometry) in
                 volumes.iter_mut().filter(|saved| saved.0 == index)
             {
                 let geometry = geometry.take().ok_or_else(|| {
@@ -180,6 +198,20 @@ impl Plate {
                 let stored = object.volume_mut(volume)?;
                 stored.set_name(name.clone());
                 stored.set_visible(*visible);
+                if let Some(recorded) = *id_recorded {
+                    let recorded = VolumeId::from_number(recorded)
+                        .ok_or_else(|| PlateError::Slice("volume ids are never zero".to_owned()))?;
+                    let clash = object
+                        .volume_ids()
+                        .into_iter()
+                        .any(|held| held == recorded && held != volume);
+                    if clash {
+                        return Err(PlateError::Slice(format!(
+                            "object {id} carries two volumes with id {recorded}"
+                        )));
+                    }
+                    object.adopt_last_volume_id(recorded);
+                }
                 for (key, value) in overrides.iter() {
                     object.set_volume_setting(volume, key, value, &settings)?;
                 }
@@ -187,6 +219,12 @@ impl Plate {
             let saved = extras.objects.iter().find(|saved| saved.index == index);
             if let Some(saved) = saved {
                 plate.set_object_enabled(id, saved.enabled)?;
+                if let Some(next) = saved.next_volume {
+                    plate
+                        .object_mut(id)
+                        .ok_or(PlateError::NoSuchObject(id))?
+                        .adopt_next_volume_number(next);
+                }
                 if saved.bed >= plate.bed_count() {
                     return Err(PlateError::NoSuchBed(saved.bed));
                 }
@@ -226,6 +264,9 @@ impl Plate {
                 bed.set_locked(saved.locked);
             }
         }
+        if let Some(next) = extras.next_id {
+            plate.adopt_next_object_number(next);
+        }
         Ok(plate)
     }
 
@@ -263,6 +304,8 @@ impl Plate {
 #[derive(Debug, Default)]
 struct SavedObject {
     index: usize,
+    id: Option<u64>,
+    next_volume: Option<u64>,
     bed: usize,
     label: String,
     source: String,
@@ -296,18 +339,23 @@ fn paint_channels(paint: &Paint) -> [(&'static str, &Vec<u8>); 2] {
 
 fn project_part(plate: &Plate) -> Result<String, PlateError> {
     let mut xml = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<hfwProject version=\"{PROJECT_VERSION}\">\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<hfwProject version=\"{PROJECT_VERSION}\" \
+         next_id=\"{}\">\n",
+        plate.next_object_number()
     );
     for (index, object) in plate.objects.iter().enumerate() {
         let placement = object.placement();
         xml.push_str(&format!(
-            "  <object index=\"{index}\" plate=\"{}\" enabled=\"{}\" label=\"{}\" source=\"{}\" \
-             dialect=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\">\n",
+            "  <object index=\"{index}\" id=\"{}\" plate=\"{}\" enabled=\"{}\" label=\"{}\" \
+             source=\"{}\" dialect=\"{}\" next_volume=\"{}\" \
+             placement=\"{} {} {} {} {} {} {} {} {}\">\n",
+            object.id(),
             object.bed(),
             if object.enabled { 1 } else { 0 },
             escape(object.label()),
             escape(object.source()),
             object.dialect().name(),
+            object.next_volume_number(),
             placement.scale[0],
             placement.scale[1],
             placement.scale[2],
@@ -360,7 +408,8 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
         for volume in object.volumes() {
             let placement = volume.placement();
             let mut block = format!(
-                "  <volume object=\"{owner}\" model=\"{model}\" kind=\"{}\" visible=\"{}\" name=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\"",
+                "  <volume object=\"{owner}\" model=\"{model}\" id=\"{}\" kind=\"{}\" visible=\"{}\" name=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\"",
+                volume.id(),
                 volume.kind().name(),
                 if volume.visible() { 1 } else { 0 },
                 escape(volume.name()),
@@ -523,6 +572,7 @@ fn marker_kind(name: &str) -> Result<MarkerKind, PlateError> {
 /// A project part, split into what describes an object and what describes a volume.
 #[derive(Debug, Default)]
 struct SavedProject {
+    next_id: Option<u64>,
     beds: Vec<SavedBed>,
     objects: Vec<SavedObject>,
     volumes: Vec<SavedVolume>,
@@ -546,6 +596,7 @@ type SavedPlacement = (
     usize,
     VolumeKind,
     String,
+    Option<u64>,
     bool,
     MeshTransform,
     Vec<(String, String)>,
@@ -556,6 +607,7 @@ type SavedPlacement = (
 struct SavedVolume {
     object: usize,
     model: usize,
+    id: Option<u64>,
     kind: VolumeKind,
     name: String,
     visible: bool,
@@ -672,6 +724,8 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
         };
         saved.push(SavedObject {
             index,
+            id: id_of(&block, "object")?,
+            next_volume: number_attribute(&block, "object", "next_volume")?,
             bed: attribute_in(&block, "object", "plate")
                 .and_then(|bed| bed.trim().parse().ok())
                 .unwrap_or(0),
@@ -746,6 +800,7 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
         volumes.push(SavedVolume {
             object: number(&object, "object")?,
             model: number(&model, "model")?,
+            id: id_of(&block, "volume")?,
             kind,
             name: attribute_in(&block, "volume", "name")
                 .map(|name| unescape(&name))
@@ -827,6 +882,7 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
         });
     }
     Ok(SavedProject {
+        next_id: number_attribute(xml, "hfwProject", "next_id")?,
         beds,
         objects: saved,
         volumes,
@@ -917,6 +973,36 @@ fn attribute_in(block: &str, element: &str, name: &str) -> Option<String> {
     let rest = &tag[at..];
     let end = rest.find('"')?;
     Some(rest[..end].to_owned())
+}
+
+/// The id a file recorded, refusing zero: an id of zero is "no object" everywhere else
+/// in this engine, so a file claiming one is malformed rather than old.
+fn id_of(block: &str, element: &str) -> Result<Option<u64>, PlateError> {
+    let Some(text) = attribute_in(block, element, "id") else {
+        return Ok(None);
+    };
+    let id: u64 = text.trim().parse().map_err(|_| {
+        PlateError::Slice(format!(
+            "a {element} carries the id {text:?}, which is not a positive whole number"
+        ))
+    })?;
+    if id == 0 {
+        return Err(PlateError::Slice(format!(
+            "a {element} carries id 0, and ids are never zero"
+        )));
+    }
+    Ok(Some(id))
+}
+
+fn number_attribute(block: &str, element: &str, name: &str) -> Result<Option<u64>, PlateError> {
+    let Some(text) = attribute_in(block, element, name) else {
+        return Ok(None);
+    };
+    text.trim().parse().map(Some).map_err(|_| {
+        PlateError::Slice(format!(
+            "a {element} carries {name}={text:?}, which is not a whole number"
+        ))
+    })
 }
 
 fn escape(text: &str) -> String {

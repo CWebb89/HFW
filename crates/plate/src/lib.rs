@@ -798,6 +798,33 @@ impl PlateObject {
         self.volumes.iter().find(|volume| volume.id == id)
     }
 
+    /// The id the next volume on this object will get.
+    ///
+    /// Written into a project file so that reopening a document cannot hand out an id
+    /// that a removed volume already had: a panel or an undo step holding that id would
+    /// then be pointing at a different volume.
+    pub(crate) fn next_volume_number(&self) -> u64 {
+        self.next_volume_id
+    }
+
+    /// Gives the volume just added the id a saved document recorded for it.
+    ///
+    /// By position, not by id: during a load the ids being adopted are the ones the
+    /// file lists, and looking a volume up by one of them can find a volume that has
+    /// already adopted an id of its own.
+    pub(crate) fn adopt_last_volume_id(&mut self, id: VolumeId) {
+        let next = id.get() + 1;
+        if let Some(volume) = self.volumes.last_mut() {
+            volume.id = id;
+        }
+        self.next_volume_id = self.next_volume_id.max(next);
+    }
+
+    /// Takes the id counter a saved document recorded.
+    pub(crate) fn adopt_next_volume_number(&mut self, next: u64) {
+        self.next_volume_id = next;
+    }
+
     /// One volume by position, for a caller walking the list.
     pub fn volume_at(&self, index: usize) -> Option<&PlateVolume> {
         self.volumes.get(index)
@@ -1252,6 +1279,20 @@ impl Plate {
         self.objects.iter().map(|object| object.id).collect()
     }
 
+    /// The id the next object added will get.
+    ///
+    /// Written into a project file so a reopened document cannot hand out an id that an
+    /// object it already removed had: every selection, undo step and side table holding
+    /// that id would then name a different object.
+    pub(crate) fn next_object_number(&self) -> u64 {
+        self.next_id
+    }
+
+    /// Takes the id counter a saved document recorded.
+    pub(crate) fn adopt_next_object_number(&mut self, next: u64) {
+        self.next_id = next;
+    }
+
     /// The number of objects, enabled or not.
     pub fn len(&self) -> usize {
         self.objects.len()
@@ -1322,6 +1363,28 @@ impl Plate {
         copy.id = new_id;
         self.objects.push(copy);
         Ok(new_id)
+    }
+
+    /// Adds geometry the file itself placed, with the id a saved document recorded for
+    /// it, which is how a reopened document keeps its identities.
+    ///
+    /// By position, not by id: the id is set on the object just added, so adopting an
+    /// id that another object has not adopted yet cannot retarget the wrong object.
+    pub(crate) fn add_restored(
+        &mut self,
+        name: String,
+        mesh: Mesh,
+        id: Option<ObjectId>,
+    ) -> Result<ObjectId, PlateError> {
+        let assigned = self.add_with(name, mesh, true)?;
+        let Some(recorded) = id else {
+            return Ok(assigned);
+        };
+        if let Some(object) = self.objects.last_mut() {
+            object.id = recorded;
+        }
+        self.next_id = self.next_id.max(recorded.get());
+        Ok(recorded)
     }
 
     /// Turns object `id` about its own centre on the bed, by `degrees` around the

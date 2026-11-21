@@ -695,3 +695,33 @@ across undo. The fix is to hold the data where the object is, so there is one so
 Reverses by collapsing label into name and dropping the record type -- the project
 format would then need a version 12 that ignores `label=`, `source=`, `dialect=` and
 `<foreign>`, or a migration that folds them.
+
+## A project file carries identities, not just order
+
+A document that reopens with different object ids is not the same document to anyone
+holding one: a selection, an undo step, a side table or a paint session that names object
+7 does not follow the object through a save. The project part therefore writes each
+object's `id`, each volume's `id`, the object id counter (`next_id` on the root) and each
+object's volume counter (`next_volume`), and the loader restores them.
+
+Restoring is **by position, not by id**. The loader adds objects in file order and each
+`add` allocates the next number, so a two-step "add, then look it up by id and rename it"
+passes through a state where the id being adopted already belongs to another object --
+which is how the first version of this fix swapped two ids while the file was consistent.
+`add_restored` sets the recorded id on the object it just added and raises the counter
+past it; a volume does the same through `adopt_last_volume_id`. Duplicate ids in a file
+are refused rather than resolved.
+
+The counters are in the file for the same reason: without them a reopened document hands
+out an id that a removed object or volume already had, and something holding the old one
+points at the new one. A file written before this carries neither ids nor counters and
+opens with contiguous ids, which is what it had.
+
+Alignment with `next-layer`: its own `ProjectFile.rs` writes a different format (JSON,
+`"format": "next-layer project"`, version 1) which is now only read, for projects saved
+before the document moved into the engine -- `PlateDocument::saveProject` writes this
+engine's 3MF through `savePlateDocument`. Two writers, two formats, no file that both
+write, and the engine's project is authoritative for the document.
+
+Reverses by dropping the four attributes and the two adoption helpers; a file then
+renumbers on open, which is what it did before version 11.

@@ -448,6 +448,22 @@ The shape, and why each part is where it is:
   that lost why a setting was dropped would be a panel that lies about the document it
   is showing.
 
+**A project file carries identities.** Found by auditing the phase-2 definition of done
+rather than by adding a feature: the project part recorded each object's *index* and
+nothing else, so opening renumbered every object and every volume from 1 in file order,
+and the id counter restarted. A selection, an undo step or a paint session holding id 7
+after a save named a different object, and a reopened document could hand out an id that
+a removed object or volume already had. Format version 11 writes `id` and `next_volume`
+per object, `id` per volume and `next_id` on the root, and the loader restores them by
+position (`add_restored`, `adopt_last_volume_id`) rather than by looking an id up mid-load,
+which is how a first attempt swapped two ids in a file that was itself consistent.
+
+`next-layer`'s `ProjectFile.rs` is not a competing writer for the same bytes: it writes
+the application's own JSON (`format: "next-layer project"`, version 1), which is now read
+only, so a project saved before the document moved into the engine still opens.
+`PlateDocument::saveProject` writes this engine's 3MF through `savePlateDocument`, which
+is authoritative.
+
 **Geometry — binary STL bytes.** `ProjectObjectRecord.mesh: Vec<u8>`, and the same for
 a volume. Exports: `hfw_mesh_stl_bytes(mesh, 1, &len)` out, `hfw_mesh_from_bytes` in.
 **Already that shape.** The writer emits the 84-byte header plus 50 bytes per triangle

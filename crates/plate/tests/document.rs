@@ -1776,3 +1776,67 @@ fn the_labels_paths_dialect_and_refusals_survive_a_project_and_a_snapshot() {
     assert_eq!(kept[0].reason(), hfw_plate::ForeignRefusal::UnknownName);
     assert_eq!(kept[1].reason(), hfw_plate::ForeignRefusal::UnusableValue);
 }
+
+/// The audit: does a saved document come back as the same document, ids included?
+///
+/// A document whose ids are not 1..n is the case that matters: if opening renumbers,
+/// a reopened file is a different document to every selection, undo step and side
+/// table that holds an id -- and the next id handed out can collide with one already
+/// on the plate.
+#[test]
+fn a_project_opens_with_the_ids_it_was_saved_with() {
+    let mut plate = plate();
+    let settings = plate.settings().clone();
+    let first = plate.add("first", cube()).expect("a cube adds");
+    let middle = plate.add("middle", cube()).expect("a cube adds");
+    let last = plate.add("last", cube()).expect("a cube adds");
+    plate.remove(middle).expect("the middle object goes");
+
+    let object = plate.object_mut(first).expect("the object is there");
+    let volume = object
+        .add_volume(hfw_engine::VolumeKind::Modifier, cube())
+        .expect("a volume attaches");
+    object
+        .set_volume_setting(volume, "sparse_infill_density", "0.9", &settings)
+        .expect("the volume takes settings");
+    let discarded = object
+        .add_volume(hfw_engine::VolumeKind::Modifier, cube())
+        .expect("a second volume attaches");
+    object
+        .remove_volume(discarded)
+        .expect("the second volume goes");
+
+    assert_eq!(plate.object_ids(), [first, last], "the ids have a hole");
+
+    let bytes = plate.to_project().expect("the project writes");
+    let mut reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    assert_eq!(
+        reopened.object_ids(),
+        [first, last],
+        "opening renumbered the objects"
+    );
+    assert_eq!(
+        reopened
+            .object(first)
+            .expect("the object is there")
+            .volume_ids(),
+        [volume],
+        "opening renumbered the volumes"
+    );
+    let invented = reopened
+        .add("after", Mesh::box_mm(4.0, 4.0, 4.0).expect("a box builds"))
+        .expect("a box adds");
+    assert!(
+        !plate.object_ids().contains(&invented),
+        "the reopened document handed out id {invented}, which was already used"
+    );
+
+    let again = reopened.to_project().expect("the project writes again");
+    let twice = Plate::from_project(&again, Settings::default()).expect("it reads again");
+    let third = twice.to_project().expect("the project writes a third time");
+    assert_eq!(
+        String::from_utf8_lossy(&third),
+        String::from_utf8_lossy(&again),
+        "two round trips do not agree byte for byte"
+    );
+}

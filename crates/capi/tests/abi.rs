@@ -2690,3 +2690,51 @@ fn a_label_sits_beside_the_name_through_a_project_round_trip() {
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(cube) };
 }
+
+/// A saved document reopens with the ids it was saved with, so a selection, an undo
+/// step or a paint session holding one still names the same object.
+#[test]
+fn a_project_keeps_object_ids_across_the_abi() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    let plate = hfw_plate_new();
+    let first = unsafe { hfw_plate_add(plate, cube) };
+    let middle = unsafe { hfw_plate_add(plate, cube) };
+    let last = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(middle, 0);
+    assert_eq!(
+        unsafe { hfw_plate_object_remove(plate, middle) },
+        0,
+        "{}",
+        last_error()
+    );
+    let mut ids = [0u64; 4];
+    let count = unsafe { hfw_plate_object_ids(plate, ids.as_mut_ptr(), ids.len()) };
+    assert_eq!(count, 2);
+
+    let mut length = 0usize;
+    let bytes = unsafe { hfw_plate_project_bytes(plate, &mut length) };
+    assert!(!bytes.is_null(), "save failed: {}", last_error());
+    let reopened =
+        unsafe { hfw_plate_open_project(bytes.cast(), length, c_string(&profile()).as_ptr()) };
+    assert!(!reopened.is_null(), "open failed: {}", last_error());
+    let mut read = [0u64; 4];
+    let count = unsafe { hfw_plate_object_ids(reopened, read.as_mut_ptr(), read.len()) };
+    assert_eq!(count, 2);
+    assert_eq!(
+        &read[..2],
+        &[first, last],
+        "opening renumbered the objects, so every id the application holds is stale"
+    );
+    let invented = unsafe { hfw_plate_add(reopened, cube) };
+    assert_ne!(invented, 0);
+    assert!(
+        invented != first && invented != last && invented != middle,
+        "the reopened document handed out id {invented}, which was already used"
+    );
+
+    unsafe { hfw_buffer_free(bytes, length) };
+    unsafe { hfw_plate_free(reopened) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
+}
