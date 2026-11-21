@@ -139,6 +139,16 @@ Two more that matter when deciding whether to trust the output:
   the id counter — and share each object's geometry with the live plate, so the first
   write after a snapshot copies that object's mesh and the snapshot is unaffected. A
   restored plate slices to byte-identical G-code, which is the test.
+- A document holds several plates: `hfw_plate_bed_count`/`_add`/`_remove`, a name and a
+  lock per plate, `hfw_plate_add_on_bed` and `hfw_plate_object_set_bed` for membership
+  (an object keeps its id when it moves), `hfw_plate_bed_object_ids` to read one plate
+  back and `hfw_plate_bed_slice` to print one. Removing a plate renumbers the rest and
+  the last plate cannot go, which is the renumbering the application already does. The
+  project file carries it (format version 10).
+- A volume has a name and a visibility, and a hidden volume is not applied: a hidden
+  negative volume stops cutting, which is what the application does with one hidden in
+  the viewport, so the control is not a drawing setting. Both travel in the project file
+  and in a snapshot.
 - Volumes are identified and placed: `hfw_plate_object_add_volume` returns an id that
   removing another volume does not renumber (`hfw_plate_object_volume_ids` reads them
   all back), and `hfw_plate_object_add_volume_placed` / `hfw_plate_object_volume_placement`

@@ -629,3 +629,37 @@ there so undo followed by an edit cannot reissue an id a selection or a paint se
 still holds. Reverses by dropping the snapshot module and the four exports; nothing else
 depends on them, and the `Arc` stays a `Mesh` again with one `Arc::new` removed per
 construction.
+
+## Several plates live in one handle, indexed like the application's plate bar
+
+A document is N build plates. The application holds them positionally -- `plateCount`,
+`activePlate`, `object.plate`, a `QVector<bool>` of locks and a `QStringList` of names --
+renumbers `object.plate` when a plate is removed, and hands out object and volume ids
+from a single counter over all plates.
+
+`crates/plate` now holds the same thing: `Vec<Bed>` (name, lock) indexed 0..count-1, one
+object list where each object carries its bed, and one id counter for the document.
+
+**Why not one handle per plate.** The alternative shape is a plate record with its own
+handle, which reads better in isolation and is wrong here for two measurable reasons:
+the application's plate bar is an index (a plate is "plate 3", not "the plate this
+handle names"), so every gesture would need index-to-handle lookup; and object ids are
+global and monotone, so two handles would have to share a counter anyway -- a second
+thing to keep in sync where there is now one. The engine's job is to hold the
+document's data, not to improve on the application's model of it.
+
+What that fixes for callers: an object id means one object in the whole document. It
+survives a move between plates, it is retired when its plate is removed rather than
+reused, and `hfw_plate_object_bed` answers "where is it" without a read-back of every
+plate. Removing a plate renumbers the plates after it, which is the renumbering the
+application already performs on its own objects, so a project file and a live document
+agree.
+
+The same commit gives a volume a name and a visibility, because a document that stores
+neither is one the application cannot hand over: `setVolumeVisible` had nowhere to go.
+Visibility is not cosmetic -- an invisible volume is skipped when slicing, so a hidden
+negative volume stops cutting -- so it is part of the model rather than of the view, and
+it is in the project file (version 10) and in a snapshot.
+
+Reverses by keeping one bed: the bed array stays a one-element vector, `object.bed` is
+always 0, and the twelve bed exports go away.

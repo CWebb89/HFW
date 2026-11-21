@@ -1298,3 +1298,321 @@ fn several_snapshots_restore_in_turn() {
     plate.restore(&empty);
     assert_eq!(plate.len(), 0, "the first snapshot still restores");
 }
+
+/// A document is several plates, and an object id means one object in it.
+#[test]
+fn a_document_holds_several_plates_and_objects_move_between_them() {
+    let mut plate = plate();
+    assert_eq!(plate.bed_count(), 1, "a new document has one plate");
+    assert_eq!(plate.bed(0).expect("the plate is there").name(), "");
+    assert!(!plate.bed(0).expect("the plate is there").locked());
+
+    let second = plate.add_bed();
+    assert_eq!(second, 1);
+    assert_eq!(plate.bed_count(), 2);
+
+    let on_first = plate.add("first", cube()).expect("a cube adds");
+    let on_second = plate
+        .add_on_bed(second, "second", cube())
+        .expect("a cube adds to the second plate");
+    assert_eq!(plate.object_bed(on_first), Some(0));
+    assert_eq!(plate.object_bed(on_second), Some(1));
+    assert_eq!(plate.bed_object_count(1), 1);
+    assert_eq!(
+        plate
+            .objects_on(1)
+            .map(|object| object.id())
+            .collect::<Vec<_>>(),
+        [on_second]
+    );
+
+    plate
+        .bed_mut(1)
+        .expect("the plate is there")
+        .set_name("supports test");
+    assert_eq!(
+        plate.bed(1).expect("the plate is there").name(),
+        "supports test"
+    );
+
+    let settings = plate.settings().clone();
+    plate
+        .object_mut(on_first)
+        .expect("the object is there")
+        .set_placement(MeshTransform {
+            translation_mm: [12.0, 0.0, 0.0],
+            ..MeshTransform::default()
+        });
+    plate
+        .set_object_bed(on_first, 1)
+        .expect("an object moves between plates");
+    assert_eq!(plate.bed_object_count(0), 0);
+    assert_eq!(plate.bed_object_count(1), 2);
+    let moved = plate.object(on_first).expect("the object is still there");
+    assert_eq!(moved.id(), on_first, "the id travels with the object");
+    assert_eq!(
+        moved.placement().translation_mm,
+        [12.0, 0.0, 0.0],
+        "its placement travels too"
+    );
+    let _ = &settings;
+
+    plate
+        .bed_mut(1)
+        .expect("the plate is there")
+        .set_locked(true);
+    assert!(
+        plate.add_on_bed(1, "refused", cube()).is_err(),
+        "a locked plate takes nothing new"
+    );
+    assert!(
+        plate.set_object_bed(on_second, 0).is_err(),
+        "an object cannot leave a locked plate"
+    );
+    assert!(
+        plate.set_object_bed(on_first, 1).is_ok(),
+        "it can be told to stay where it is"
+    );
+    assert!(
+        plate.remove_bed(1).is_err(),
+        "a locked plate cannot be removed"
+    );
+
+    plate
+        .bed_mut(1)
+        .expect("the plate is there")
+        .set_locked(false);
+    let before = plate.object_ids();
+    plate.remove_bed(0).expect("the first plate is removed");
+    assert_eq!(plate.bed_count(), 1);
+    assert_eq!(
+        plate.object_bed(on_first),
+        Some(0),
+        "the plates after a removal move down one"
+    );
+    assert!(plate.object(on_second).is_some(), "no object was lost");
+    assert_eq!(plate.object_ids(), before, "every id survived the removal");
+    assert!(
+        plate.remove_bed(0).is_err(),
+        "a document always keeps at least one plate"
+    );
+}
+
+/// Each plate prints on its own: the job for one plate holds nothing from another.
+#[test]
+fn a_plate_slices_on_its_own() {
+    let mut document = plate();
+    let second = document.add_bed();
+    let low = document.add("low", cube()).expect("a cube adds");
+    document
+        .add_on_bed(
+            second,
+            "tall",
+            Mesh::box_mm(6.0, 6.0, 40.0).expect("a box builds"),
+        )
+        .expect("a box adds to the second plate");
+
+    let config = hfw_config::PrinterConfig::default();
+    let only_low = document
+        .slice_bed(0, 0.2, 0.2, PlateOrder::ByLayer)
+        .expect("the first plate slices");
+    let written = hfw_gcode::generate(&only_low.layers, &config, Some("plate"))
+        .expect("the job is written")
+        .text;
+
+    let mut alone = plate();
+    alone.add("low", cube()).expect("a cube adds");
+    assert_eq!(
+        alone.object_ids().len(),
+        1,
+        "the comparison plate holds one object"
+    );
+    let reference = alone
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("it slices");
+    let reference = hfw_gcode::generate(&reference.layers, &config, Some("plate"))
+        .expect("it is written")
+        .text;
+    assert_eq!(
+        written, reference,
+        "a plate's job carries its own objects and no other plate's"
+    );
+    assert!(
+        document
+            .slice_bed(second, 0.2, 0.2, PlateOrder::ByLayer)
+            .is_ok(),
+        "the second plate slices too"
+    );
+    assert_eq!(
+        document.object_bed(low),
+        Some(0),
+        "slicing does not move anything"
+    );
+    assert!(
+        document
+            .slice_bed(7, 0.2, 0.2, PlateOrder::ByLayer)
+            .is_err(),
+        "a plate that does not exist is refused"
+    );
+}
+
+/// Plates, their names and their locks are part of the document, so they travel.
+#[test]
+fn plates_and_volume_names_survive_a_project_round_trip() {
+    let mut document = plate();
+    let second = document.add_bed();
+    document
+        .bed_mut(0)
+        .expect("the plate is there")
+        .set_name("table");
+    document
+        .bed_mut(second)
+        .expect("the plate is there")
+        .set_name("holes & names");
+    let id = document
+        .add_on_bed(second, "cube", cube())
+        .expect("a cube adds");
+    document
+        .bed_mut(second)
+        .expect("the plate is there")
+        .set_locked(true);
+    let settings = document.settings().clone();
+    let object = document.object_mut(id).expect("the object is there");
+    let cutter = object
+        .add_volume(hfw_engine::VolumeKind::Negative, cube())
+        .expect("a volume attaches");
+    object
+        .volume_mut(cutter)
+        .expect("the volume is there")
+        .set_name("the hole");
+    object
+        .volume_mut(cutter)
+        .expect("the volume is there")
+        .set_visible(false);
+    let _ = &settings;
+
+    let bytes = document.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    assert_eq!(reopened.bed_count(), 2, "both plates came back");
+    assert_eq!(reopened.bed(0).expect("the plate is there").name(), "table");
+    assert_eq!(
+        reopened.bed(1).expect("the plate is there").name(),
+        "holes & names",
+        "a name with an ampersand survives the XML"
+    );
+    assert!(reopened.bed(1).expect("the plate is there").locked());
+    assert_eq!(reopened.object_bed(id), Some(1), "the object stayed put");
+    let volume = reopened
+        .object(id)
+        .expect("the object is there")
+        .volume(cutter)
+        .expect("the volume is there");
+    assert_eq!(volume.name(), "the hole");
+    assert!(!volume.visible(), "a hidden volume reopens hidden");
+}
+
+/// A volume the user hid is not printed and not applied, which is what makes the
+/// control honest rather than a drawing setting.
+#[test]
+fn a_hidden_negative_volume_stops_cutting() {
+    let config = hfw_config::PrinterConfig::default();
+    let cut = |visible: bool| -> String {
+        let mut plate = plate();
+        let id = plate
+            .add(
+                "cutter test",
+                Mesh::box_mm(20.0, 20.0, 20.0).expect("a box builds"),
+            )
+            .expect("the box adds");
+        let settings = plate.settings().clone();
+        let object = plate.object_mut(id).expect("the object is there");
+        let volume = object
+            .add_volume(
+                hfw_engine::VolumeKind::Negative,
+                Mesh::box_mm(10.0, 10.0, 40.0).expect("a box builds"),
+            )
+            .expect("a negative volume attaches");
+        object
+            .volume_mut(volume)
+            .expect("the volume is there")
+            .set_visible(visible);
+        let _ = &settings;
+        let job = plate
+            .slice(0.2, 0.2, PlateOrder::ByLayer)
+            .expect("it slices");
+        hfw_gcode::generate(&job.layers, &config, Some("plate"))
+            .expect("it writes")
+            .text
+    };
+    let with_hole = cut(true);
+    let without_hole = cut(false);
+    assert_ne!(
+        with_hole, without_hole,
+        "a hidden negative volume still cut, so its visibility means nothing"
+    );
+
+    let mut plain = plate();
+    plain
+        .add(
+            "cutter test",
+            Mesh::box_mm(20.0, 20.0, 20.0).expect("a box builds"),
+        )
+        .expect("the box adds");
+    let job = plain
+        .slice(0.2, 0.2, PlateOrder::ByLayer)
+        .expect("it slices");
+    let reference = hfw_gcode::generate(&job.layers, &config, Some("plate"))
+        .expect("it writes")
+        .text;
+    assert_eq!(
+        without_hole, reference,
+        "a hidden volume leaves no trace at all, as if it were not there"
+    );
+}
+
+/// A snapshot is the whole document, plates and volume visibility included.
+#[test]
+fn a_snapshot_restores_the_plates_and_what_is_hidden() {
+    let mut document = plate();
+    let second = document.add_bed();
+    document
+        .bed_mut(second)
+        .expect("the plate is there")
+        .set_name("second");
+    let id = document
+        .add_on_bed(second, "cube", cube())
+        .expect("a cube adds");
+    let volume = document
+        .object_mut(id)
+        .expect("the object is there")
+        .add_volume(hfw_engine::VolumeKind::Negative, cube())
+        .expect("a volume attaches");
+    let snapshot = document.snapshot();
+    assert_eq!(snapshot.bed_count(), 2);
+
+    document.remove_bed(second).expect("the plate is removed");
+    document
+        .bed_mut(0)
+        .expect("the plate is there")
+        .set_name("renamed");
+    assert_eq!(document.bed_count(), 1);
+
+    document.restore(&snapshot);
+    assert_eq!(document.bed_count(), 2);
+    assert_eq!(
+        document.bed(1).expect("the plate is there").name(),
+        "second"
+    );
+    assert_eq!(document.bed(0).expect("the plate is there").name(), "");
+    assert_eq!(
+        document.object_bed(id),
+        Some(1),
+        "the object came back on its plate"
+    );
+    let restored = document
+        .object(id)
+        .expect("the object is there")
+        .volume(volume)
+        .expect("the volume came back");
+    assert!(restored.visible());
+}

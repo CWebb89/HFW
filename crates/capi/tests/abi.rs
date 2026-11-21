@@ -10,28 +10,32 @@ use hfw_capi::{
     hfw_mesh_from_bytes, hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_extensions,
     hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_part,
     hfw_mesh_part_count, hfw_mesh_stl_bytes, hfw_mesh_transform, hfw_mesh_triangle_count,
-    hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume, hfw_plate_add,
-    hfw_plate_add_positioned, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free,
-    hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count, hfw_plate_marker_get,
-    hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume,
-    hfw_plate_object_add_volume_placed, hfw_plate_object_bounds, hfw_plate_object_clear_settings,
-    hfw_plate_object_count, hfw_plate_object_duplicate, hfw_plate_object_enabled,
-    hfw_plate_object_enabled_get, hfw_plate_object_ids, hfw_plate_object_layer_heights,
-    hfw_plate_object_layer_heights_get, hfw_plate_object_mesh, hfw_plate_object_mirror,
-    hfw_plate_object_name, hfw_plate_object_name_get, hfw_plate_object_paint,
-    hfw_plate_object_paint_get, hfw_plate_object_placement, hfw_plate_object_placement_get,
-    hfw_plate_object_placement_matrix, hfw_plate_object_placement_matrix_get,
-    hfw_plate_object_remove, hfw_plate_object_remove_volume, hfw_plate_object_rotate,
-    hfw_plate_object_set, hfw_plate_object_settings_json, hfw_plate_object_volume_count,
-    hfw_plate_object_volume_ids, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
-    hfw_plate_object_volume_placement, hfw_plate_object_volume_placement_get,
-    hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
-    hfw_plate_project_bytes, hfw_plate_restore, hfw_plate_set_in_layer, hfw_plate_set_markers,
-    hfw_plate_set_metadata, hfw_plate_slice, hfw_plate_slice_placed, hfw_plate_snapshot,
-    hfw_plate_volume_set, hfw_slice_meshes, hfw_snapshot_free, hfw_snapshot_object_count,
-    hfw_string_free, hfw_text_mesh, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED,
-    HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT,
-    HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
+    hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume, hfw_plate_add, hfw_plate_add_on_bed,
+    hfw_plate_add_positioned, hfw_plate_arrange, hfw_plate_bed_add, hfw_plate_bed_count,
+    hfw_plate_bed_locked, hfw_plate_bed_name, hfw_plate_bed_name_get, hfw_plate_bed_object_ids,
+    hfw_plate_bed_remove, hfw_plate_bed_set_locked, hfw_plate_bed_slice, hfw_plate_bounds,
+    hfw_plate_free, hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count,
+    hfw_plate_marker_get, hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume,
+    hfw_plate_object_add_volume_placed, hfw_plate_object_bed, hfw_plate_object_bounds,
+    hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
+    hfw_plate_object_enabled, hfw_plate_object_enabled_get, hfw_plate_object_ids,
+    hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mesh,
+    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_name_get,
+    hfw_plate_object_paint, hfw_plate_object_paint_get, hfw_plate_object_placement,
+    hfw_plate_object_placement_get, hfw_plate_object_placement_matrix,
+    hfw_plate_object_placement_matrix_get, hfw_plate_object_remove, hfw_plate_object_remove_volume,
+    hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_set_bed,
+    hfw_plate_object_settings_json, hfw_plate_object_volume_count, hfw_plate_object_volume_ids,
+    hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh, hfw_plate_object_volume_name,
+    hfw_plate_object_volume_name_get, hfw_plate_object_volume_placement,
+    hfw_plate_object_volume_placement_get, hfw_plate_object_volume_set_visible,
+    hfw_plate_object_volume_settings_json, hfw_plate_object_volume_visible, hfw_plate_open_project,
+    hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_restore, hfw_plate_set_in_layer,
+    hfw_plate_set_markers, hfw_plate_set_metadata, hfw_plate_slice, hfw_plate_slice_placed,
+    hfw_plate_snapshot, hfw_plate_volume_set, hfw_slice_meshes, hfw_snapshot_free,
+    hfw_snapshot_object_count, hfw_string_free, hfw_text_mesh, HfwBounds, HfwJobProgress,
+    HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM,
+    HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT, HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -2198,4 +2202,275 @@ fn a_snapshot_outlives_the_plate_it_was_taken_from() {
     unsafe { hfw_mesh_free(mesh) };
     unsafe { hfw_snapshot_free(snapshot) };
     unsafe { hfw_plate_free(other) };
+}
+
+/// A document of several plates crosses the ABI: plates are indices, and an object
+/// keeps its id when it moves between them.
+#[test]
+fn plates_cross_the_abi_with_their_names_locks_and_objects() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!cube.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    assert_eq!(unsafe { hfw_plate_bed_count(plate) }, 1);
+
+    let first = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(first, 0, "{}", last_error());
+    let second_bed = unsafe { hfw_plate_bed_add(plate) };
+    assert_eq!(second_bed, 1, "a plate is appended: {}", last_error());
+    assert_eq!(unsafe { hfw_plate_bed_count(plate) }, 2);
+
+    let second = unsafe { hfw_plate_add_on_bed(plate, 1, cube) };
+    assert_ne!(second, 0, "{}", last_error());
+    assert_eq!(
+        unsafe { hfw_plate_object_bed(plate, second) },
+        1,
+        "the object is on the plate it was added to"
+    );
+
+    let name = c_string("supports");
+    assert_eq!(
+        unsafe { hfw_plate_bed_name(plate, 1, name.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    let mut text = vec![0i8; 32];
+    assert_eq!(
+        unsafe { hfw_plate_bed_name_get(plate, 1, text.as_mut_ptr(), text.len()) },
+        8,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(text.as_ptr()) }.to_str(),
+        Ok("supports")
+    );
+    assert_eq!(
+        unsafe { hfw_plate_bed_name_get(plate, 0, text.as_mut_ptr(), text.len()) },
+        0,
+        "an unnamed plate reports an empty name"
+    );
+
+    let mut ids = [0u64; 4];
+    assert_eq!(
+        unsafe { hfw_plate_bed_object_ids(plate, 1, ids.as_mut_ptr(), ids.len()) },
+        1,
+        "the plate lists what is on it"
+    );
+    assert_eq!(ids[0], second);
+    assert_eq!(
+        unsafe { hfw_plate_bed_object_ids(plate, 0, ids.as_mut_ptr(), ids.len()) },
+        1
+    );
+    assert_eq!(ids[0], first);
+
+    assert_eq!(
+        unsafe { hfw_plate_object_set_bed(plate, first, 1) },
+        0,
+        "an object moves between plates: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_object_bed(plate, first) }, 1);
+    assert_eq!(
+        unsafe { hfw_plate_object_bed(plate, 99) },
+        -1,
+        "an object that does not exist has no plate"
+    );
+
+    assert_eq!(unsafe { hfw_plate_bed_locked(plate, 0) }, 0);
+    assert_eq!(
+        unsafe { hfw_plate_bed_set_locked(plate, 0, 1) },
+        0,
+        "{}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_bed_locked(plate, 0) }, 1);
+    assert_eq!(
+        unsafe { hfw_plate_add_on_bed(plate, 0, cube) },
+        0,
+        "a locked plate takes nothing new"
+    );
+    assert!(
+        last_error().contains("locked"),
+        "the refusal says why: {}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_set_bed(plate, second, 0) },
+        -1,
+        "an object cannot be moved onto a locked plate"
+    );
+    assert_eq!(
+        unsafe { hfw_plate_bed_remove(plate, 0) },
+        -1,
+        "a locked plate cannot be removed"
+    );
+    assert_eq!(unsafe { hfw_plate_bed_set_locked(plate, 0, 0) }, 0);
+
+    assert_eq!(
+        unsafe { hfw_plate_bed_remove(plate, 0) },
+        0,
+        "the plate is removed: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_bed_count(plate) }, 1);
+    assert_eq!(
+        unsafe { hfw_plate_object_bed(plate, first) },
+        0,
+        "the plates after the removal moved down one"
+    );
+    assert_eq!(
+        unsafe { hfw_plate_bed_remove(plate, 0) },
+        -1,
+        "a document always keeps one plate"
+    );
+    assert_eq!(unsafe { hfw_plate_bed_count(std::ptr::null()) }, -1);
+
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
+}
+
+/// Each plate prints on its own, and the profile decides how.
+#[test]
+fn a_plate_slices_through_the_abi_and_carries_only_its_objects() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    let plate = hfw_plate_new();
+    let first = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(first, 0);
+    let bed = unsafe { hfw_plate_bed_add(plate) };
+    assert_eq!(bed, 1);
+    let second = unsafe { hfw_plate_add_on_bed(plate, bed as usize, cube) };
+    assert_ne!(second, 0);
+
+    let profile = c_string(&profile());
+    let gcode = unsafe { hfw_plate_bed_slice(plate, 0, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!gcode.is_null(), "the plate slices: {}", last_error());
+    assert_eq!(unsafe { hfw_gcode_verified(gcode) }, 1, "the file verifies");
+    let text = unsafe { CStr::from_ptr(hfw_gcode_text(gcode)) }
+        .to_str()
+        .expect("the file is text")
+        .to_owned();
+    assert!(
+        !text.is_empty(),
+        "the file for one plate of two is not empty"
+    );
+    unsafe { hfw_gcode_free(gcode) };
+
+    let alone = hfw_plate_new();
+    assert_ne!(unsafe { hfw_plate_add(alone, cube) }, 0);
+    let reference = unsafe { hfw_plate_slice(alone, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!reference.is_null(), "{}", last_error());
+    let reference = unsafe { CStr::from_ptr(hfw_gcode_text(reference)) }
+        .to_str()
+        .expect("the file is text")
+        .to_owned();
+    assert_eq!(
+        text, reference,
+        "a plate's job carries its own objects and no other plate's"
+    );
+
+    assert!(
+        unsafe { hfw_plate_bed_slice(plate, 9, profile.as_ptr(), 0.2, 0.2) }.is_null(),
+        "a plate that does not exist is refused"
+    );
+    assert!(
+        last_error().contains("no plate 10"),
+        "the refusal says which: {}",
+        last_error()
+    );
+
+    unsafe { hfw_plate_free(alone) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
+}
+
+/// A volume's name and visibility cross the ABI, and a hidden volume stops applying.
+#[test]
+fn a_volumes_name_and_visibility_cross_the_abi() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(id, 0);
+    let volume = unsafe { hfw_plate_object_add_volume(plate, id, HFW_VOLUME_NEGATIVE, cube) };
+    assert_ne!(volume, 0, "{}", last_error());
+
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_visible(plate, id, volume) },
+        1,
+        "a volume is visible when it is attached"
+    );
+    let mut text = vec![0i8; 32];
+    assert_eq!(
+        unsafe {
+            hfw_plate_object_volume_name_get(plate, id, volume, text.as_mut_ptr(), text.len())
+        },
+        0,
+        "an unattached name reports an empty one: {}",
+        last_error()
+    );
+
+    let name = c_string("the hole");
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_name(plate, id, volume, name.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe {
+            hfw_plate_object_volume_name_get(plate, id, volume, text.as_mut_ptr(), text.len())
+        },
+        8,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(text.as_ptr()) }.to_str(),
+        Ok("the hole")
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_set_visible(plate, id, volume, 0) },
+        0,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_visible(plate, id, volume) },
+        0
+    );
+
+    let profile = c_string(&profile());
+    let hidden = unsafe { hfw_plate_slice(plate, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!hidden.is_null(), "the plate slices: {}", last_error());
+    let hidden = unsafe { CStr::from_ptr(hfw_gcode_text(hidden)) }
+        .to_str()
+        .expect("the file is text")
+        .to_owned();
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_set_visible(plate, id, volume, 1) },
+        0
+    );
+    let shown = unsafe { hfw_plate_slice(plate, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!shown.is_null(), "{}", last_error());
+    let shown = unsafe { CStr::from_ptr(hfw_gcode_text(shown)) }
+        .to_str()
+        .expect("the file is text")
+        .to_owned();
+    assert_ne!(
+        hidden, shown,
+        "hiding a negative volume did not change the file, so the control lies"
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_visible(plate, id, 9) },
+        -1,
+        "a volume that does not exist is refused"
+    );
+
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
 }

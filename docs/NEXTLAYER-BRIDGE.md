@@ -248,10 +248,10 @@ read-back that a settings panel shows has to be the text the engine took.
 
 ### What next-layer has not declared (2026-11-21)
 
-`next-layer/src/app/src/hfw.rs` declares **52** of the **95** functions
-`crates/capi/include/hfw.h` exports, so a 43-row gap sits between what the engine
+`next-layer/src/app/src/hfw.rs` declares **52** of the **111** functions
+`crates/capi/include/hfw.h` exports, so a 59-row gap sits between what the engine
 can do and what the application has told its own compiler about. Recounted
-2026-11-21 by adding an export, against the header and against that file, one row
+2026-11-21 by adding exports, against the header and against that file, one row
 per symbol:
 
     grep -oE '\bhfw_[a-z0-9_]+\s*\(' crates/capi/include/hfw.h | sort -u | wc -l
@@ -289,12 +289,28 @@ next-layer would call it today.
 | `hfw_plate_object_volume_placement` | moves or scales a volume inside its object | PlateDocument (`setVolumePosition`, `setVolumeScale`, `setVolumeRotation`) | none |
 | `hfw_plate_object_volume_placement_get` | reads a volume's placement back as a matrix | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_plate_object_volume_ids` | every volume id of an object, in the order they were added | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_volume_name` | names a volume | PlateDocument (`renameVolume`) | none |
+| `hfw_plate_object_volume_name_get` | reads a volume's name back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_volume_visible` | whether a volume is applied at all, not only drawn | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_volume_set_visible` | shows or hides a volume, which stops it cutting | PlateDocument (`setVolumeVisible`) | none |
 | `hfw_plate_object_remove_volume` | detaches a volume by id | PlateDocument (`removeVolume`) | none |
 | `hfw_plate_object_volume_count` | how many volumes an object carries | PlateDocument (`volumes`) | none |
 | `hfw_plate_object_volume_kind` | which of the five kinds a volume is, by id | PlateDocument (`volumes`) | none |
 | `hfw_plate_volume_set` | one setting on a modifier volume, on top of the object's | PlateDocument (`setVolumeSetting`) | none |
 | `hfw_plate_object_bounds` | one object's bounds on the bed | PlateDocument (`volumeInfo`, object size) | none |
 | `hfw_plate_object_ids` | every id on the plate, in insertion order | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_bed_count` | how many build plates the document holds | PlateDocument (`plateCount`) | none |
+| `hfw_plate_bed_add` | appends an empty plate, returns its index | PlateDocument (`addPlate`) | none |
+| `hfw_plate_bed_remove` | removes a plate and its objects, renumbering the rest | PlateDocument (`removePlate`) | none |
+| `hfw_plate_bed_name` | names a plate | PlateDocument (`setPlateName`) | none |
+| `hfw_plate_bed_name_get` | reads a plate's own name back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_bed_locked` | whether a plate is read-only | PlateDocument (`plateLocked`) | none |
+| `hfw_plate_bed_set_locked` | locks or unlocks a plate | PlateDocument (`setPlateLocked`) | none |
+| `hfw_plate_add_on_bed` | adds an object to a named plate | PlateDocument (`addObject`) | none |
+| `hfw_plate_object_bed` | which plate an object is on | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_set_bed` | moves an object between plates, keeping its id | PlateDocument (drag to another plate) | none |
+| `hfw_plate_bed_object_ids` | the ids on one plate, in the order they were added | PlateDocument (`idsOnPlate`) | none |
+| `hfw_plate_bed_slice` | slices one plate of the document | SliceRuntime (`sliceObjectsFor`) | `hfw_gcode_free` |
 | `hfw_plate_object_name_get` | reads an object's name back | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_plate_object_placement_get` | reads an object's placement back | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_plate_object_enabled_get` | reads whether an object prints | HfwEngine (`readPlateSnapshot`) | none |
@@ -316,16 +332,17 @@ next-layer would call it today.
 | `hfw_job_take_gcode` | takes the finished file; the job handle is consumed | SliceRuntime | `hfw_gcode_free` |
 | `hfw_job_free` | releases a job, cancelling and joining it first | SliceRuntime | owns itself |
 
-Read as a work list, the split is clean: 18 rows are `PlateDocument`'s edit gestures
-(name, duplicate, rotate, mirror, bake, settings, paint, volumes with their ids and
-placements, layer heights, the undo step, the cut and text tools), 10 are what
-`readPlateSnapshot` and the project file still need to read a plate back, 9 are
-`SliceRuntime` and its timeline (slice, preview, strokes, the threaded job), 1 is
-`PresetStore`, 2 are the free functions every getter's caller needs, and 4 have no
-caller in next-layer at all: the two mesh-part calls and `hfw_slice_meshes`, because a
-plate object and not a bare mesh is the only thing the application slices, plus
-`hfw_snapshot_object_count`, which reports what a snapshot holds when reading the plate
-after a restore says the same thing.
+Read as a work list, the split is clean: 29 rows are `PlateDocument`'s edit gestures
+(name, duplicate, rotate, mirror, bake, settings, paint, volumes with their names,
+visibility, ids and placements, layer heights, the plates and what moves between
+them, the undo step, the cut and text tools), 14 are what `readPlateSnapshot` and the
+project file still need to read a plate back, 10 are `SliceRuntime` and its timeline
+(slice of a plate, preview, strokes, the threaded job), 1 is `PresetStore`, 2 are the
+free functions every getter's caller needs, and 4 have no caller in next-layer at all:
+the two mesh-part calls and `hfw_slice_meshes`, because a plate object and not a bare
+mesh is the only thing the application slices, plus `hfw_snapshot_object_count`, which
+reports what a snapshot holds when reading the plate after a restore says the same
+thing.
 
 ### What a document carries across (2026-11-21)
 
@@ -350,6 +367,43 @@ without rewriting triangles, and a removal or a read-back cannot make a panel or
 selection point at a different volume. The project file carries it as a tenth
 number-group (`placement="…"` on `<volume>`, version 9); an older file opens with
 every volume at its own coordinates.
+
+**A plate is an index, and an object id means one object in the document.** The sixth
+concept, and the last one a document needs before `PlateDocument` can hold nothing of
+its own: the application has N plates, each with a name and a lock, and every object
+carries the plate it belongs to. This engine had one bed per handle and no idea which
+plate an object was on, so a document with three plates could only travel as the
+application's own bytes in `metadata`.
+
+The shape is a **bed array inside one handle**, not a handle per plate. The
+application indexes plates positionally (`0..plateCount-1`), renumbers `object.plate`
+when a plate is removed, and hands out object and volume ids from **one counter over
+all plates**; a handle per plate would turn each of those into a mapping to maintain --
+index to handle, and a counter shared between handles. So `crates/plate` holds
+`Vec<Bed>` (`name`, `locked`) indexed the same way, one object list where each object
+says which bed it is on, and one id counter for the document. Consequences worth
+stating, because they are the questions the application will ask:
+
+- **An object id is never per-plate.** It names one object in the document, it keeps
+  its id when it moves between plates (`hfw_plate_object_set_bed`), and it is never
+  reused after its object or its whole plate is removed -- the same rule ids already
+  had, now across plates rather than within one.
+- **Removing a plate renumbers the rest**, exactly as the application does to its own
+  objects: an object on plate 3 is on plate 2 afterwards, and every id survives. The
+  last plate cannot be removed, and a locked plate cannot be.
+- **The lock is data here and is enforced where the engine changes the document's
+  shape** -- removing the plate, moving an object onto or off it, adding to it. A
+  front end disables the rest of that plate's gestures itself, which is what a lock
+  means in the plate bar.
+- **A plate slices on its own** (`hfw_plate_bed_slice`): the job carries that plate's
+  objects and no other plate's, which is what makes `sliceObjectsFor(plate)` a call on
+  the document instead of a filter in it. `hfw_plate_slice` stays the whole document,
+  which on a one-plate document is the same thing; `hfw_plate_arrange` packs each plate
+  in its own bed frame.
+- **A volume has a name and a visibility, and hiding one stops it applying**, not only
+  drawing it: `PlateDocument::sliceObjectsFor` skips an invisible volume, so a hidden
+  negative volume cuts nothing. Both travel in the project file (format version 10) and
+  in a snapshot.
 
 **Geometry — binary STL bytes.** `ProjectObjectRecord.mesh: Vec<u8>`, and the same for
 a volume. Exports: `hfw_mesh_stl_bytes(mesh, 1, &len)` out, `hfw_mesh_from_bytes` in.

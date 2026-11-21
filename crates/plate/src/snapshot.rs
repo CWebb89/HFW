@@ -21,12 +21,13 @@
 
 use hfw_engine::{InLayerPolyline, Marker, Settings};
 
-use crate::{Plate, PlateObject};
+use crate::{Bed, Plate, PlateObject};
 
 /// The plate as it was, restorable as it was.
 #[derive(Clone, Debug)]
 pub struct PlateSnapshot {
     settings: Settings,
+    beds: Vec<Bed>,
     objects: Vec<PlateObject>,
     markers: Vec<Marker>,
     in_layer: Vec<InLayerPolyline>,
@@ -38,6 +39,16 @@ impl PlateSnapshot {
     /// How many objects the snapshot holds, enabled or not.
     pub fn object_count(&self) -> usize {
         self.objects.len()
+    }
+
+    /// How many plates the snapshot holds, which is never zero.
+    pub fn bed_count(&self) -> usize {
+        self.beds.len()
+    }
+
+    /// A plate's name and lock, as the snapshot holds them.
+    pub fn bed(&self, bed: usize) -> Option<&Bed> {
+        self.beds.get(bed)
     }
 
     /// The ids the snapshot holds, in the order the objects were added.
@@ -70,6 +81,7 @@ impl Plate {
     pub fn snapshot(&self) -> PlateSnapshot {
         PlateSnapshot {
             settings: self.settings.clone(),
+            beds: self.beds.clone(),
             objects: self.objects.clone(),
             markers: self.markers.clone(),
             in_layer: self.in_layer.clone(),
@@ -85,6 +97,7 @@ impl Plate {
     /// that geometry is written to, so restoring costs no more than taking one.
     pub fn restore(&mut self, snapshot: &PlateSnapshot) {
         self.settings = snapshot.settings.clone();
+        self.beds = snapshot.beds.clone();
         self.objects = snapshot.objects.clone();
         self.markers = snapshot.markers.clone();
         self.in_layer = snapshot.in_layer.clone();

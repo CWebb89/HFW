@@ -34,10 +34,12 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 /// Version 2 added per-object paint, version 3 volumes, version 4 per-object layer
 /// heights, version 5 the plate's timeline markers, version 6 its in-layer strokes,
 /// version 7 the settings a modifier volume prints its region with, version 8 the
-/// caller's own bytes, version 9 a volume's own placement inside its object. Older
-/// files still open: they simply carry none of what they predate, and a volume with
-/// no placement sits at its geometry's own coordinates.
-pub const PROJECT_VERSION: u32 = 9;
+/// caller's own bytes, version 9 a volume's own placement inside its object, version
+/// 10 more than one plate (each with its name and lock) and a volume's name and
+/// visibility. Older files still open: they simply carry none of what they predate,
+/// every object lands on the document's first plate, and a volume with no name sits
+/// there unnamed and visible.
+pub const PROJECT_VERSION: u32 = 10;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -148,6 +150,8 @@ impl Plate {
             volumes.push((
                 saved.object,
                 saved.kind,
+                saved.name.clone(),
+                saved.visible,
                 saved.placement,
                 saved.overrides.clone(),
                 Some(geometry),
@@ -155,9 +159,12 @@ impl Plate {
         }
 
         let mut plate = Plate::new(settings);
+        for _ in 1..extras.beds.len().max(1) {
+            plate.add_bed();
+        }
         for (index, (name, mesh)) in parts.into_iter().flatten().enumerate() {
             let id = plate.add_positioned(name, mesh)?;
-            for (_, kind, placement, overrides, geometry) in
+            for (_, kind, name, visible, placement, overrides, geometry) in
                 volumes.iter_mut().filter(|saved| saved.0 == index)
             {
                 let geometry = geometry.take().ok_or_else(|| {
@@ -168,6 +175,9 @@ impl Plate {
                 let settings = plate.settings().clone();
                 let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
                 let volume = object.add_volume_placed(*kind, geometry, *placement)?;
+                let stored = object.volume_mut(volume)?;
+                stored.set_name(name.clone());
+                stored.set_visible(*visible);
                 for (key, value) in overrides.iter() {
                     object.set_volume_setting(volume, key, value, &settings)?;
                 }
@@ -175,6 +185,10 @@ impl Plate {
             let saved = extras.objects.iter().find(|saved| saved.index == index);
             if let Some(saved) = saved {
                 plate.set_object_enabled(id, saved.enabled)?;
+                if saved.bed >= plate.bed_count() {
+                    return Err(PlateError::NoSuchBed(saved.bed));
+                }
+                plate.set_object_bed(id, saved.bed)?;
                 if let Some(placement) = saved.placement {
                     let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
                     object.set_placement(placement);
@@ -193,6 +207,12 @@ impl Plate {
         plate.set_markers(extras.markers)?;
         plate.set_in_layer_polylines(extras.in_layer)?;
         plate.set_metadata(extras.metadata);
+        for (index, saved) in extras.beds.iter().enumerate() {
+            if let Some(bed) = plate.bed_mut(index) {
+                bed.set_name(saved.name.clone());
+                bed.set_locked(saved.locked);
+            }
+        }
         Ok(plate)
     }
 
@@ -230,6 +250,7 @@ impl Plate {
 #[derive(Debug, Default)]
 struct SavedObject {
     index: usize,
+    bed: usize,
     enabled: bool,
     placement: Option<MeshTransform>,
     settings: Vec<(String, String)>,
@@ -263,7 +284,8 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
     for (index, object) in plate.objects.iter().enumerate() {
         let placement = object.placement();
         xml.push_str(&format!(
-            "  <object index=\"{index}\" enabled=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\">\n",
+            "  <object index=\"{index}\" plate=\"{}\" enabled=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\">\n",
+            object.bed(),
             if object.enabled { 1 } else { 0 },
             placement.scale[0],
             placement.scale[1],
@@ -309,8 +331,10 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
         for volume in object.volumes() {
             let placement = volume.placement();
             let mut block = format!(
-                "  <volume object=\"{owner}\" model=\"{model}\" kind=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\"",
+                "  <volume object=\"{owner}\" model=\"{model}\" kind=\"{}\" visible=\"{}\" name=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\"",
                 volume.kind().name(),
+                if volume.visible() { 1 } else { 0 },
+                escape(volume.name()),
                 placement.scale[0],
                 placement.scale[1],
                 placement.scale[2],
@@ -337,6 +361,13 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
             xml.push_str(&block);
             model += 1;
         }
+    }
+    for bed in plate.beds_iter() {
+        xml.push_str(&format!(
+            "  <plate name=\"{}\" locked=\"{}\"/>\n",
+            escape(bed.name()),
+            if bed.locked() { 1 } else { 0 }
+        ));
     }
     for marker in plate.markers() {
         xml.push_str(&format!(
@@ -463,11 +494,19 @@ fn marker_kind(name: &str) -> Result<MarkerKind, PlateError> {
 /// A project part, split into what describes an object and what describes a volume.
 #[derive(Debug, Default)]
 struct SavedProject {
+    beds: Vec<SavedBed>,
     objects: Vec<SavedObject>,
     volumes: Vec<SavedVolume>,
     markers: Vec<Marker>,
     in_layer: Vec<InLayerPolyline>,
     metadata: Vec<u8>,
+}
+
+/// One plate as the file records it: what it is called and whether it is locked.
+#[derive(Debug)]
+struct SavedBed {
+    name: String,
+    locked: bool,
 }
 
 /// Where one volume came from: which object owns it, which model-part object holds
@@ -477,6 +516,8 @@ struct SavedProject {
 type SavedPlacement = (
     usize,
     VolumeKind,
+    String,
+    bool,
     MeshTransform,
     Vec<(String, String)>,
     Option<Mesh>,
@@ -487,6 +528,8 @@ struct SavedVolume {
     object: usize,
     model: usize,
     kind: VolumeKind,
+    name: String,
+    visible: bool,
     placement: MeshTransform,
     overrides: Vec<(String, String)>,
 }
@@ -572,6 +615,9 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
         };
         saved.push(SavedObject {
             index,
+            bed: attribute_in(&block, "object", "plate")
+                .and_then(|bed| bed.trim().parse().ok())
+                .unwrap_or(0),
             enabled: enabled.trim() != "0",
             placement,
             settings,
@@ -636,8 +682,25 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
             object: number(&object, "object")?,
             model: number(&model, "model")?,
             kind,
+            name: attribute_in(&block, "volume", "name")
+                .map(|name| unescape(&name))
+                .unwrap_or_default(),
+            visible: attribute_in(&block, "volume", "visible")
+                .map(|flag| flag.trim() != "0")
+                .unwrap_or(true),
             placement,
             overrides,
+        });
+    }
+    let mut beds = Vec::new();
+    for block in elements(xml, "plate") {
+        beds.push(SavedBed {
+            name: attribute_in(&block, "plate", "name")
+                .map(|name| unescape(&name))
+                .unwrap_or_default(),
+            locked: attribute_in(&block, "plate", "locked")
+                .map(|flag| flag.trim() == "1")
+                .unwrap_or(false),
         });
     }
     let mut markers = Vec::new();
@@ -699,6 +762,7 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
         });
     }
     Ok(SavedProject {
+        beds,
         objects: saved,
         volumes,
         markers,

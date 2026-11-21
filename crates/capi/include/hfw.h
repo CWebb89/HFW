@@ -247,6 +247,105 @@ HfwGcode *hfw_slice_meshes(const HfwMesh *const *meshes,
 HfwPlate *hfw_plate_new(void);
 
 /**
+ * How many build plates the document holds, which is never zero, or -1 when the
+ * handle is null.
+ *
+ * A plate is an index a front end can hold: adding one appends, removing one moves the
+ * plates after it down, and the objects on it come with the index rather than with a
+ * handle. Object ids run over the whole document, so one id means one object whichever
+ * plate it is on.
+ */
+ptrdiff_t hfw_plate_bed_count(const HfwPlate *plate);
+
+/** Appends an empty, unnamed, unlocked plate and returns its index, or -1 on error. */
+ptrdiff_t hfw_plate_bed_add(HfwPlate *plate);
+
+/**
+ * Removes the plate at `bed`, and everything on it.
+ *
+ * The last plate cannot be removed and a locked plate cannot be. The plates after it
+ * move down one, so an object on plate 3 is on plate 2 afterwards; every id stays what
+ * it was and the removed objects' ids are retired rather than reused. Returns 0 on
+ * success, -1 with the reason otherwise.
+ */
+int32_t hfw_plate_bed_remove(HfwPlate *plate, size_t bed);
+
+/**
+ * Names the plate at `bed`. An empty name clears it, so the front end's own wording
+ * ("Plate 2") applies again.
+ *
+ * Returns 0 on success, -1 when the document has no such plate.
+ */
+int32_t hfw_plate_bed_name(HfwPlate *plate, size_t bed, const char *name);
+
+/**
+ * Writes the plate's own name into `out` and returns the bytes it needs excluding the
+ * terminating NUL.
+ *
+ * An unnamed plate reports 0 and writes an empty string: the wording a user reads for a
+ * plate with no name of its own belongs to the front end. A buffer that is too short
+ * writes nothing and reports the length, so a caller can size and retry. Returns -1
+ * when the document has no such plate.
+ */
+ptrdiff_t hfw_plate_bed_name_get(const HfwPlate *plate, size_t bed, char *out, size_t len);
+
+/**
+ * Returns 1 when the plate at `bed` is locked, 0 when it is not, and -1 when the
+ * document has no such plate.
+ *
+ * A lock is enforced here where the engine is the one changing the document's shape --
+ * removing the plate, moving an object onto or off it, adding to it -- and a front end
+ * disables the rest of that plate's gestures itself.
+ */
+int32_t hfw_plate_bed_locked(const HfwPlate *plate, size_t bed);
+
+/**
+ * Locks or unlocks the plate at `bed`. Returns 0 on success, -1 when the document has
+ * no such plate.
+ */
+int32_t hfw_plate_bed_set_locked(HfwPlate *plate, size_t bed, int32_t locked);
+
+/**
+ * Adds a copy of `mesh` to the plate at `bed` and returns the new object's id, or 0 on
+ * failure -- including when that plate is locked, since adding to it changes it.
+ */
+uint64_t hfw_plate_add_on_bed(HfwPlate *plate, size_t bed, const HfwMesh *mesh);
+
+/** Which plate object `id` is on, or -1 when the object is not in the document. */
+ptrdiff_t hfw_plate_object_bed(const HfwPlate *plate, uint64_t id);
+
+/**
+ * Moves object `id` to the plate at `bed`.
+ *
+ * The object keeps its id, its geometry, its placement, its paint and its overrides: an
+ * id means one object in the document, not one object per plate, so a selection or an
+ * undo step holding it still names it after the move. Both plates are checked, so
+ * moving off a locked plate and moving onto one are both refused. Returns 0 on success,
+ * -1 with the reason.
+ */
+int32_t hfw_plate_object_set_bed(HfwPlate *plate, uint64_t id, size_t bed);
+
+/**
+ * Writes the ids of the objects on the plate at `bed` into `out`, in the order they
+ * were added, and returns how many the plate carries.
+ *
+ * One call with a NULL `out` sizes the next. Returns 0 for a plate that does not exist
+ * as well as for an empty one; ask `hfw_plate_bed_count` when that matters.
+ */
+size_t hfw_plate_bed_object_ids(const HfwPlate *plate, size_t bed, uint64_t *out, size_t len);
+
+/**
+ * Slices the enabled objects on the plate at `bed`, with `profile` as the job's
+ * settings.
+ *
+ * This is how one plate of a multi-plate document is printed; `hfw_plate_slice` is the
+ * whole document, which on a one-plate document is the same thing. Release the result
+ * with `hfw_gcode_free`.
+ */
+HfwGcode *hfw_plate_bed_slice(const HfwPlate *plate, size_t bed, const char *profile,
+                              double first_layer_height, double layer_height);
+
+/**
  * Adds a copy of `mesh` to the plate. `mesh` stays the caller's to free.
  *
  * Returns the new object's id, which is never zero, or 0 on failure.
@@ -739,6 +838,44 @@ char *hfw_plate_object_settings_json(const HfwPlate *plate, uint64_t id);
 HfwMesh *hfw_plate_object_volume_mesh(const HfwPlate *plate, uint64_t id, uint64_t volume);
 char *hfw_plate_object_volume_settings_json(const HfwPlate *plate, uint64_t id,
                                             uint64_t volume);
+
+/**
+ * Names volume `volume` of object `id`. An empty name clears it, so the front end's
+ * own wording ("Negative volume 1") applies again.
+ *
+ * Returns 0 on success, -1 when the object or volume does not exist.
+ */
+int32_t hfw_plate_object_volume_name(HfwPlate *plate, uint64_t id, uint64_t volume,
+                                     const char *name);
+
+/**
+ * Writes the name of volume `volume` of object `id` into `out` and returns the bytes it
+ * needs excluding the terminating NUL.
+ *
+ * An unnamed volume reports 0 and writes an empty string: the wording a user reads
+ * belongs to the front end, which is the side that knows the kind it drew. A buffer
+ * that is too short writes nothing and reports the length, so a caller can size and
+ * retry. Returns -1 when the object or volume does not exist.
+ */
+ptrdiff_t hfw_plate_object_volume_name_get(const HfwPlate *plate, uint64_t id,
+                                          uint64_t volume, char *out, size_t len);
+
+/**
+ * Returns 1 when volume `volume` of object `id` is part of the geometry, 0 when it is
+ * hidden, and -1 when the object or volume does not exist.
+ */
+int32_t hfw_plate_object_volume_visible(const HfwPlate *plate, uint64_t id, uint64_t volume);
+
+/**
+ * Shows or hides volume `volume` of object `id`.
+ *
+ * A hidden volume is not printed and not applied: a negative volume stops cutting and a
+ * modifier stops changing the region under it, which is what the application does with
+ * a volume the user hid in the viewport. Returns 0 on success, -1 when the object or
+ * volume does not exist.
+ */
+int32_t hfw_plate_object_volume_set_visible(HfwPlate *plate, uint64_t id, uint64_t volume,
+                                            int32_t visible);
 
 /** Releases a string this library returned. A NULL pointer is ignored. */
 void hfw_string_free(char *text);

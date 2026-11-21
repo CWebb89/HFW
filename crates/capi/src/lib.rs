@@ -363,6 +363,7 @@ fn plan_plate(
     profile: &str,
     first_layer_height: f64,
     layer_height: f64,
+    bed: Option<usize>,
 ) -> Result<(Job, PrinterConfig), String> {
     let cfg = PrinterConfig::load(Path::new(profile)).map_err(|error| error.to_string())?;
     let mut settings = plate.settings().clone();
@@ -379,9 +380,11 @@ fn plan_plate(
         infill.step = infill.width / 4.0;
     }
     let (first, layer) = heights_of(&cfg, first_layer_height, layer_height);
-    let job = plate
-        .slice_using(&settings, first, layer, order_of(&cfg))
-        .map_err(|error| error.to_string())?;
+    let job = match bed {
+        Some(bed) => plate.slice_bed_using(&settings, bed, first, layer, order_of(&cfg)),
+        None => plate.slice_using(&settings, first, layer, order_of(&cfg)),
+    }
+    .map_err(|error| error.to_string())?;
     Ok((job, cfg))
 }
 
@@ -391,8 +394,9 @@ fn slice_document(
     first_layer_height: f64,
     layer_height: f64,
     positioned: bool,
+    bed: Option<usize>,
 ) -> Result<HfwGcode, String> {
-    let (job, cfg) = plan_plate(plate, profile, first_layer_height, layer_height)?;
+    let (job, cfg) = plan_plate(plate, profile, first_layer_height, layer_height, bed)?;
     write_job(&job, &cfg, positioned)
 }
 
@@ -421,7 +425,13 @@ pub unsafe extern "C" fn hfw_plate_preview_json(
     let build = || -> Result<*mut c_char, String> {
         let plate = unsafe { plate_of(plate) }?;
         let profile = unsafe { text_of(profile, "profile") }?;
-        let (job, _) = plan_plate(&plate.plate, &profile, first_layer_height, layer_height)?;
+        let (job, _) = plan_plate(
+            &plate.plate,
+            &profile,
+            first_layer_height,
+            layer_height,
+            None,
+        )?;
         let document = preview::document(&job);
         CString::new(document)
             .map(|text| text.into_raw())
@@ -1149,6 +1159,133 @@ pub unsafe extern "C" fn hfw_plate_object_volume_settings_json(
 /// # Safety
 ///
 /// `plate` must be a live handle and `out` must be writable for sixteen doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_name(
+    plate: *mut HfwPlate,
+    id: u64,
+    volume: u64,
+    name: *const c_char,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let name = unsafe { text_of(name, "name") }?;
+        let plate = unsafe { &mut *plate };
+        let object = plate
+            .plate
+            .object_mut(id_from_number(id)?)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        let held = object
+            .volume_mut(volume_id(volume)?)
+            .map_err(|error| error.to_string())?;
+        held.set_name(name);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Writes the name of volume `volume` of object `id` into `out`, and returns the
+/// bytes it needs excluding the terminating NUL.
+///
+/// An unnamed volume reports 0 and writes an empty string: the wording a user reads
+/// ("Negative volume 1") belongs to the front end, which is the side that knows the
+/// kind it drew. A buffer that is too short writes nothing and reports the length, so
+/// a caller can size and retry. Returns -1 when the object or volume does not exist.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for `len` bytes, or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_name_get(
+    plate: *const HfwPlate,
+    id: u64,
+    volume: u64,
+    out: *mut c_char,
+    len: usize,
+) -> isize {
+    let read = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        let held = volume_of(object, id, volume)?;
+        let name = held.name();
+        let needed = name.len();
+        if out.is_null() || len < needed + 1 {
+            return Ok(needed as isize);
+        }
+        let buffer = unsafe { std::slice::from_raw_parts_mut(out as *mut u8, len) };
+        buffer[..needed].copy_from_slice(name.as_bytes());
+        buffer[needed] = 0;
+        Ok(needed as isize)
+    };
+    report(read(), -1)
+}
+
+/// Returns 1 when volume `volume` of object `id` is part of the geometry, 0 when it
+/// is hidden, and -1 when the object or volume does not exist.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_visible(
+    plate: *const HfwPlate,
+    id: u64,
+    volume: u64,
+) -> i32 {
+    let read = || -> Result<i32, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        let held = volume_of(object, id, volume)?;
+        Ok(i32::from(held.visible()))
+    };
+    report(read(), -1)
+}
+
+/// Shows or hides volume `volume` of object `id`.
+///
+/// A hidden volume is not printed **and not applied**: a negative volume stops cutting
+/// and a modifier stops changing the region under it, which is what the application
+/// does with a volume the user hid. Returns 0 on success, -1 when the object or volume
+/// does not exist.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_volume_set_visible(
+    plate: *mut HfwPlate,
+    id: u64,
+    volume: u64,
+    visible: c_int,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let plate = unsafe { &mut *plate };
+        let object = plate
+            .plate
+            .object_mut(id_from_number(id)?)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        let held = object
+            .volume_mut(volume_id(volume)?)
+            .map_err(|error| error.to_string())?;
+        held.set_visible(visible != 0);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Reads volume `volume` of object `id`'s placement back as a row-major 4x4 matrix,
+/// sixteen doubles.
+///
+/// Returns 0 on success and -1 when the object or volume does not exist or `out` is
+/// null.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for sixteen doubles.
 #[no_mangle]
 pub unsafe extern "C" fn hfw_plate_object_volume_placement_get(
     plate: *const HfwPlate,
@@ -2347,6 +2484,7 @@ pub unsafe extern "C" fn hfw_plate_slice(
             first_layer_height,
             layer_height,
             true,
+            None,
         )
         .map(|gcode| Box::into_raw(Box::new(gcode)))
     };
@@ -2383,6 +2521,7 @@ pub unsafe extern "C" fn hfw_plate_slice_placed(
             first_layer_height,
             layer_height,
             false,
+            None,
         )
         .map(|gcode| Box::into_raw(Box::new(gcode)))
     };
@@ -2489,6 +2628,329 @@ pub unsafe extern "C" fn hfw_snapshot_object_count(snapshot: *const HfwSnapshot)
     }
     clear_error();
     unsafe { &*snapshot }.snapshot.object_count() as isize
+}
+
+/// How many build plates the document holds, which is never zero, or -1 when the
+/// handle is null.
+///
+/// A plate is an index a front end can hold: adding one appends, removing one moves
+/// the plates after it down, and the objects on it come with the index rather than
+/// with a handle.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_count(plate: *const HfwPlate) -> isize {
+    let read = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        Ok(plate.plate.bed_count() as isize)
+    };
+    report(read(), -1)
+}
+
+/// Appends an empty, unnamed, unlocked plate and returns its index, or -1 on error.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_add(plate: *mut HfwPlate) -> isize {
+    let add = || -> Result<isize, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        Ok(unsafe { &mut *plate }.plate.add_bed() as isize)
+    };
+    report(add(), -1)
+}
+
+/// Removes the plate at `bed`, and everything on it.
+///
+/// The last plate cannot be removed and a locked plate cannot be, because neither
+/// leaves a document a front end can keep drawing. The plates after it move down
+/// one, so an object on plate 3 is on plate 2 afterwards; every id stays what it was
+/// and the removed objects' ids are retired rather than reused. Returns 0 on success,
+/// -1 with the reason otherwise.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_remove(plate: *mut HfwPlate, bed: usize) -> i32 {
+    let remove = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        unsafe { &mut *plate }
+            .plate
+            .remove_bed(bed)
+            .map_err(|error| error.to_string())?;
+        Ok(0)
+    };
+    report(remove(), -1)
+}
+
+/// Names the plate at `bed`.
+///
+/// An empty name clears it, so the front end's own wording ("Plate 2") applies
+/// again. Returns 0 on success, -1 when the document has no such plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call and `name` a readable string.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_name(
+    plate: *mut HfwPlate,
+    bed: usize,
+    name: *const c_char,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let name = unsafe { text_of(name, "name") }?;
+        let plate = unsafe { &mut *plate };
+        let bed = plate
+            .plate
+            .bed_mut(bed)
+            .ok_or_else(|| format!("the document has no plate {}", bed + 1))?;
+        bed.set_name(name);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Writes the plate's own name into `out`, and returns the bytes it needs excluding
+/// the terminating NUL.
+///
+/// An unnamed plate reports 0 and writes an empty string: the wording a user reads
+/// for a plate with no name of its own belongs to the front end. A buffer that is too
+/// short writes nothing and reports the length, so a caller can size and retry.
+/// Returns -1 when the document has no such plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for `len` bytes, or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_name_get(
+    plate: *const HfwPlate,
+    bed: usize,
+    out: *mut c_char,
+    len: usize,
+) -> isize {
+    let read = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let held = plate
+            .plate
+            .bed(bed)
+            .ok_or_else(|| format!("the document has no plate {}", bed + 1))?;
+        let name = held.name();
+        let needed = name.len();
+        if out.is_null() || len < needed + 1 {
+            return Ok(needed as isize);
+        }
+        let buffer = unsafe { std::slice::from_raw_parts_mut(out as *mut u8, len) };
+        buffer[..needed].copy_from_slice(name.as_bytes());
+        buffer[needed] = 0;
+        Ok(needed as isize)
+    };
+    report(read(), -1)
+}
+
+/// Returns 1 when the plate at `bed` is locked, 0 when it is not, and -1 when the
+/// document has no such plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_locked(plate: *const HfwPlate, bed: usize) -> i32 {
+    let read = || -> Result<i32, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let held = plate
+            .plate
+            .bed(bed)
+            .ok_or_else(|| format!("the document has no plate {}", bed + 1))?;
+        Ok(i32::from(held.locked()))
+    };
+    report(read(), -1)
+}
+
+/// Locks or unlocks the plate at `bed`.
+///
+/// A lock is data here: the engine enforces it where it is the one changing the
+/// document's shape -- removing the plate, moving an object onto or off it, adding to
+/// it -- and a front end disables the rest of the plate's gestures itself. Returns 0
+/// on success, -1 when the document has no such plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_set_locked(
+    plate: *mut HfwPlate,
+    bed: usize,
+    locked: c_int,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let plate = unsafe { &mut *plate };
+        let held = plate
+            .plate
+            .bed_mut(bed)
+            .ok_or_else(|| format!("the document has no plate {}", bed + 1))?;
+        held.set_locked(locked != 0);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Adds a copy of `mesh` to the plate at `bed`, named after the document's object
+/// count, and returns the new object's id or 0 on failure.
+///
+/// A locked plate refuses, since adding to it changes it. The mesh stays the caller's
+/// to free.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call and `mesh` a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_add_on_bed(
+    plate: *mut HfwPlate,
+    bed: usize,
+    mesh: *const HfwMesh,
+) -> u64 {
+    let add = || -> Result<u64, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let source = unsafe { mesh_of(mesh) }?;
+        let plate = unsafe { &mut *plate };
+        let name = format!("object {}", plate.plate.len() + 1);
+        let id = plate
+            .plate
+            .add_on_bed(bed, name, source.mesh.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(id.get())
+    };
+    report(add(), 0)
+}
+
+/// Which plate object `id` is on, or -1 when the object is not in the document.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_bed(plate: *const HfwPlate, id: u64) -> isize {
+    let read = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        Ok(object.bed() as isize)
+    };
+    report(read(), -1)
+}
+
+/// Moves object `id` to the plate at `bed`.
+///
+/// The object keeps its id, its geometry, its placement, its paint and its overrides:
+/// an id means one object in the document, not one object per plate, so a selection or
+/// an undo step holding it still names it after the move. Both plates are checked, so
+/// moving off a locked plate and moving onto one are both refused. Returns 0 on
+/// success, -1 with the reason.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_set_bed(
+    plate: *mut HfwPlate,
+    id: u64,
+    bed: usize,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        unsafe { &mut *plate }
+            .plate
+            .set_object_bed(id, bed)
+            .map_err(|error| error.to_string())?;
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Writes the ids of the objects on the plate at `bed` into `out`, in the order they
+/// were added, and returns how many the plate carries.
+///
+/// One call with a NULL `out` sizes the next. Returns 0 when the document has no such
+/// plate, which cannot be told from an empty plate by the count alone; ask
+/// `hfw_plate_bed_count` first.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for `len` ids, or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_object_ids(
+    plate: *const HfwPlate,
+    bed: usize,
+    out: *mut u64,
+    len: usize,
+) -> usize {
+    let read = |()| -> Result<usize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let ids: Vec<u64> = plate
+            .plate
+            .objects_on(bed)
+            .map(|object| object.id().get())
+            .collect();
+        if !out.is_null() && len >= ids.len() {
+            let buffer = unsafe { std::slice::from_raw_parts_mut(out, len) };
+            buffer[..ids.len()].copy_from_slice(&ids);
+        }
+        Ok(ids.len())
+    };
+    report(read(()), 0)
+}
+
+/// Slices the enabled objects on the plate at `bed`, with `profile` as the job's
+/// settings.
+///
+/// Release the result with `hfw_gcode_free`. Returns NULL with the reason on failure,
+/// including when the document has no such plate and when the plate has nothing
+/// enabled on it.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `profile` a readable path.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_bed_slice(
+    plate: *const HfwPlate,
+    bed: usize,
+    profile: *const c_char,
+    first_layer_height: f64,
+    layer_height: f64,
+) -> *mut HfwGcode {
+    let build = || -> Result<*mut HfwGcode, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let profile = unsafe { text_of(profile, "profile") }?;
+        slice_document(
+            &plate.plate,
+            &profile,
+            first_layer_height,
+            layer_height,
+            true,
+            Some(bed),
+        )
+        .map(|gcode| Box::into_raw(Box::new(gcode)))
+    };
+    report(build(), ptr::null_mut())
 }
 
 /// Returns the G-code text, NUL-terminated.
@@ -2604,14 +3066,22 @@ fn volume_of(
     object_id: u64,
     volume: u64,
 ) -> Result<&hfw_plate::PlateVolume, String> {
-    let id = VolumeId::from_number(volume)
-        .ok_or_else(|| format!("volume id {volume} is not a volume: ids are never zero"))?;
+    let id = volume_id(volume)?;
     object.volume(id).ok_or_else(|| {
         format!(
             "object {object_id} has no volume {id}: it has {}",
             object.volumes().len()
         )
     })
+}
+
+fn volume_id(volume: u64) -> Result<VolumeId, String> {
+    VolumeId::from_number(volume)
+        .ok_or_else(|| format!("volume id {volume} is not a volume: ids are never zero"))
+}
+
+fn id_from_number(id: u64) -> Result<ObjectId, String> {
+    ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())
 }
 
 /// Reads a row-major 4x4 matrix a caller passed, as this engine's transform.

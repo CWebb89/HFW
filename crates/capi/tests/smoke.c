@@ -168,6 +168,27 @@ int main(int argc, char **argv) {
               "a restored plate holds what was snapshotted, and a null snapshot is refused");
         hfw_snapshot_free(taken);
 
+        ptrdiff_t bed = hfw_plate_bed_add(document);
+        check(bed == 1 && hfw_plate_bed_count(document) == 2, "a plate is appended");
+        check(hfw_plate_bed_name(document, bed, "supports") == 0, "a plate is named");
+        uint64_t on_bed = hfw_plate_add_on_bed(document, bed, mesh);
+        check(on_bed != 0 && hfw_plate_object_bed(document, on_bed) == bed,
+              "an object is added to the plate it names");
+        uint64_t bed_ids[4];
+        check(hfw_plate_bed_object_ids(document, bed, bed_ids, 4) == 1 && bed_ids[0] == on_bed,
+              "a plate lists its own objects");
+        check(hfw_plate_bed_set_locked(document, bed, 1) == 0 &&
+                  hfw_plate_bed_locked(document, bed) == 1,
+              "a plate is locked");
+        check(hfw_plate_add_on_bed(document, bed, mesh) == 0 &&
+                  hfw_plate_bed_remove(document, bed) == -1,
+              "a locked plate takes nothing and goes nowhere");
+        check(hfw_plate_bed_set_locked(document, bed, 0) == 0 &&
+                  hfw_plate_bed_remove(document, bed) == 0 &&
+                  hfw_plate_object_bed(document, on_bed) == -1,
+              "a removed plate takes its objects with it");
+        check(hfw_plate_bed_count(document) == 1, "one plate is left");
+
         char *preview = hfw_plate_preview_json(document, argv[2], 0.2, 0.2);
         check(preview != NULL, "the preview document is produced");
         check(preview != NULL && strstr(preview, "\"preview\":\"hfw-preview\"") != NULL,
@@ -277,6 +298,25 @@ int main(int argc, char **argv) {
                   "an object is mirrored through its own centre");
             check(hfw_plate_object_mirror(document, copy, 3) == -1,
                   "an axis that is not X, Y or Z is refused");
+
+            uint64_t hole = hfw_plate_object_add_volume(document, first, HFW_VOLUME_NEGATIVE, mesh);
+            check(hole != 0, "a negative volume is attached");
+            check(hfw_plate_object_volume_name(document, first, hole, "the hole") == 0,
+                  "a volume is named");
+            char hole_name[32];
+            check(hfw_plate_object_volume_name_get(document, first, hole, hole_name,
+                                                  sizeof hole_name) == 8 &&
+                      strcmp(hole_name, "the hole") == 0,
+                  "the volume's name reads back");
+            check(hfw_plate_object_volume_visible(document, first, hole) == 1,
+                  "a volume is visible when it is attached");
+            check(hfw_plate_object_volume_set_visible(document, first, hole, 0) == 0 &&
+                      hfw_plate_object_volume_visible(document, first, hole) == 0,
+                  "a volume is hidden");
+            check(hfw_plate_object_remove_volume(document, first, hole) == 0,
+                  "the volume detaches");
+            check(hfw_plate_object_volume_visible(document, first, hole) == -1,
+                  "a removed volume cannot be asked about");
 
         hfw_plate_free(document);
     }
