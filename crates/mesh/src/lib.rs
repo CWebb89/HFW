@@ -254,6 +254,120 @@ impl Default for MeshTransform {
     }
 }
 
+impl MeshTransform {
+    /// This transform as a row-major 4x4 affine matrix.
+    ///
+    /// The matrix is `T * Rz * Ry * Rx * S`, which is the order [`Mesh::transformed`]
+    /// applies: scale, then the three rotations in X, Y, Z order, then translation.
+    /// A caller that stores a matrix rather than three triples can hand it straight
+    /// over instead of decomposing it against this engine's conventions.
+    pub fn to_matrix(&self) -> [f64; 16] {
+        let radians = self.rotation_degrees.map(f64::to_radians);
+        let (sx, cx) = radians[0].sin_cos();
+        let (sy, cy) = radians[1].sin_cos();
+        let (sz, cz) = radians[2].sin_cos();
+
+        let rotation = [
+            [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+            [-sy, cy * sx, cy * cx],
+        ];
+        let mut out = [0.0_f64; 16];
+        for row in 0..3 {
+            for column in 0..3 {
+                out[row * 4 + column] = rotation[row][column] * self.scale[column];
+            }
+            out[row * 4 + 3] = self.translation_mm[row];
+        }
+        out[15] = 1.0;
+        out
+    }
+
+    /// Reads a row-major 4x4 affine matrix as the transform it composes to.
+    ///
+    /// The matrix has to be this type's own composition -- `T * Rz * Ry * Rx * S`,
+    /// no shear share and a last row of `0, 0, 0, 1` -- because anything else cannot
+    /// be carried by a scale triple and an Euler triple. A matrix this engine would
+    /// have to truncate is refused rather than approximated: the caller then knows
+    /// its transform stack produced something the plate cannot record, instead of
+    /// finding out when the part prints in the wrong place.
+    pub fn from_matrix(matrix: [f64; 16]) -> Result<MeshTransform, MeshError> {
+        let refused = |why: &str| MeshError::InvalidTransform(format!("matrix {why}"));
+        if matrix.iter().any(|value| !value.is_finite()) {
+            return Err(refused("holds a value that is not finite"));
+        }
+        if matrix[12] != 0.0 || matrix[13] != 0.0 || matrix[14] != 0.0 || matrix[15] != 1.0 {
+            return Err(refused("is not affine: its last row is not 0, 0, 0, 1"));
+        }
+
+        let mut columns = [[0.0_f64; 3]; 3];
+        for column in 0..3 {
+            for row in 0..3 {
+                columns[column][row] = matrix[row * 4 + column];
+            }
+        }
+        let lengths = columns.map(|column| {
+            (column[0] * column[0] + column[1] * column[1] + column[2] * column[2]).sqrt()
+        });
+        if lengths.iter().any(|length| *length <= 1e-12) {
+            return Err(refused("collapses an axis to nothing"));
+        }
+
+        let mut unit = [[0.0_f64; 3]; 3];
+        for column in 0..3 {
+            for row in 0..3 {
+                unit[column][row] = columns[column][row] / lengths[column];
+            }
+        }
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        if dot(unit[0], unit[1]).abs() > 1e-9
+            || dot(unit[0], unit[2]).abs() > 1e-9
+            || dot(unit[1], unit[2]).abs() > 1e-9
+        {
+            return Err(refused("shears: its axes are not perpendicular"));
+        }
+
+        let handedness = dot(
+            unit[0],
+            [
+                unit[1][1] * unit[2][2] - unit[1][2] * unit[2][1],
+                unit[1][2] * unit[2][0] - unit[1][0] * unit[2][2],
+                unit[1][0] * unit[2][1] - unit[1][1] * unit[2][0],
+            ],
+        );
+        let scale = [lengths[0] * handedness.signum(), lengths[1], lengths[2]];
+        if handedness < 0.0 {
+            for value in &mut unit[0] {
+                *value = -*value;
+            }
+        }
+
+        let rotation = [
+            [unit[0][0], unit[1][0], unit[2][0]],
+            [unit[0][1], unit[1][1], unit[2][1]],
+            [unit[0][2], unit[1][2], unit[2][2]],
+        ];
+        let (x, y, z) = if rotation[2][0].abs() < 1.0 - 1e-12 {
+            (
+                rotation[2][1].atan2(rotation[2][2]),
+                (-rotation[2][0]).asin(),
+                rotation[1][0].atan2(rotation[0][0]),
+            )
+        } else {
+            (
+                (-rotation[1][2]).atan2(rotation[1][1]),
+                (-rotation[2][0]).asin(),
+                0.0,
+            )
+        };
+        Ok(MeshTransform {
+            scale,
+            rotation_degrees: [x.to_degrees(), y.to_degrees(), z.to_degrees()],
+            translation_mm: [matrix[3], matrix[7], matrix[11]],
+        })
+    }
+}
+
 /// Counters describing the changes made by [`Mesh::repair_basic`].
 ///
 /// Repair is explicit and returns a new mesh. The source mesh is never
@@ -1326,5 +1440,73 @@ mod preparation_tests {
         assert_eq!(report.vertices_welded, 1);
         assert_eq!(report.degenerate_triangles_removed, 1);
         assert_eq!(repaired.triangle_count(), 1);
+    }
+
+    fn assert_matrix_close(a: [f64; 16], b: [f64; 16]) {
+        for (index, (left, right)) in a.iter().zip(b).enumerate() {
+            assert!(
+                (left - right).abs() < 1e-9,
+                "element {index}: {left} and {right} disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn a_transform_round_trips_through_its_own_matrix() {
+        for transform in [
+            MeshTransform::default(),
+            MeshTransform {
+                translation_mm: [10.0, -5.0, 2.5],
+                ..MeshTransform::default()
+            },
+            MeshTransform {
+                rotation_degrees: [30.0, 40.0, 50.0],
+                ..MeshTransform::default()
+            },
+            MeshTransform {
+                scale: [2.0, 0.5, 1.25],
+                rotation_degrees: [-12.0, 7.0, 91.0],
+                translation_mm: [3.0, 4.0, 5.0],
+            },
+            MeshTransform {
+                scale: [-1.0, 1.0, 1.0],
+                rotation_degrees: [0.0, 0.0, 15.0],
+                translation_mm: [1.0, 2.0, 3.0],
+            },
+            MeshTransform {
+                rotation_degrees: [0.0, 90.0, 0.0],
+                ..MeshTransform::default()
+            },
+            MeshTransform {
+                rotation_degrees: [0.0, -90.0, 0.0],
+                ..MeshTransform::default()
+            },
+        ] {
+            let matrix = transform.to_matrix();
+            let read = MeshTransform::from_matrix(matrix)
+                .unwrap_or_else(|error| panic!("{transform:?}: {error}"));
+            assert_matrix_close(read.to_matrix(), matrix);
+            let again = MeshTransform::from_matrix(read.to_matrix()).expect("and again");
+            assert_matrix_close(again.to_matrix(), matrix);
+        }
+    }
+
+    #[test]
+    fn a_matrix_that_is_not_a_scale_and_three_rotations_is_refused() {
+        let mut sheared = MeshTransform {
+            rotation_degrees: [10.0, 20.0, 30.0],
+            ..MeshTransform::default()
+        }
+        .to_matrix();
+        sheared[1] = 0.25;
+        assert!(MeshTransform::from_matrix(sheared).is_err());
+        let mut perspective = MeshTransform::default().to_matrix();
+        perspective[15] = 2.0;
+        assert!(MeshTransform::from_matrix(perspective).is_err());
+        let mut collapsed = MeshTransform::default().to_matrix();
+        collapsed[0] = 0.0;
+        collapsed[4] = 0.0;
+        collapsed[8] = 0.0;
+        assert!(MeshTransform::from_matrix(collapsed).is_err());
     }
 }

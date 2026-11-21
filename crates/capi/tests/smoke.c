@@ -122,6 +122,19 @@ int main(int argc, char **argv) {
         check(hfw_plate_object_count(document) == 2, "the plate counts both objects");
         check(hfw_plate_object_name(document, first, "bracket") == 0, "an object is named");
 
+        double identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        check(hfw_plate_object_placement_matrix(document, first, identity) == 0,
+              "an object is placed from a row-major 4x4 matrix");
+        double readback[16];
+        check(hfw_plate_object_placement_matrix_get(document, first, readback) == 0 &&
+                  fabs(readback[0] - 1.0) < 1e-9 && fabs(readback[5] - 1.0) < 1e-9 &&
+                  fabs(readback[15] - 1.0) < 1e-9,
+              "the matrix reads back as it was given");
+        double sheared[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        sheared[1] = 0.2;
+        check(hfw_plate_object_placement_matrix(document, first, sheared) == -1,
+              "a matrix that shears is refused rather than truncated");
+
         HfwTransform placement;
         memset(&placement, 0, sizeof placement);
         placement.scale[0] = 1.0;

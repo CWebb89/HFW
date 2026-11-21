@@ -158,8 +158,8 @@ it along: `HFW_VOLUME_PART` and `HFW_VOLUME_NEGATIVE` change the layer's outline
 (the first unites, the second subtracts, both before walls are planned, so a hole
 gets walls of its own), and `HFW_VOLUME_SUPPORT_BLOCKER`/`_ENFORCER` act over the
 volume's whole height through the same mask a painted facet uses. A *modifier*
-volume — one carrying settings of its own — is not in the ABI, because a layer under
-one carries two settings at once and the planner does not yet split a layer.
+volume — one carrying settings of its own — is `HFW_VOLUME_MODIFIER`, and its settings
+arrive through `hfw_plate_volume_set` (see below).
 
 Layer heights are per object, as `(z, height)` pairs: a layer whose bottom sits at
 or above a `z` uses that height until the next pair takes over, and an empty list
@@ -207,6 +207,165 @@ stroke; reads all of it back through the ABI; builds a *second* plate from nothi
 what was read; and requires the two project files to be identical byte for byte
 (13,650 bytes). A field the engine holds but cannot give up therefore fails a gate
 rather than going missing quietly.
+
+### What next-layer has not declared (2026-11-21)
+
+`next-layer/src/app/src/hfw.rs` declares **28** of the **85** functions
+`crates/capi/include/hfw.h` exports, so a 57-row gap sits between what the engine
+can do and what the application has told its own compiler about. Counted with
+`grep -oE '\bhfw_[a-z0-9_]+\s*\(' <file> | sort -u`, one row per symbol: the
+brief's 29 and 86 are one higher on each side, which is what counting
+`HFW_ABI_VERSION` — a `#define`, not an exported function — would do.
+
+The 28 declared are exactly the mesh-and-slice core: load, transform, bounds,
+vertices, indices, volume, free; plate new/add/placement/enabled/remove/arrange/
+bounds/slice; gcode text/len/verified/free. Everything the document, the timeline,
+the preview, the threaded job and the project file need is exported and undeclared.
+**Nothing is missing from the engine for these four modules**; the gap is on the
+application's side of the boundary.
+
+Module names are next-layer's own: `HfwEngine` (the boundary helpers in
+`HfwEngine.cpp` — snapshot, round trip, slice), `PlateDocument` (the document and
+its edit gestures), `SliceRuntime` (the plate structs and the slicing call),
+`PresetStore` (presets and the settings vocabulary). `—` means nothing in
+next-layer would call it today.
+
+| export | what it does | next-layer module | result |
+| --- | --- | --- | --- |
+| `hfw_settings_surface_json` | every setting with its dialect name, status and per-object flag, plus the capability backlog | PresetStore | static, do not free |
+| `hfw_mesh_load_extensions` | the extensions `hfw_mesh_load_file` reads, for a file dialog | PlateDocument (`importWildcards`) | static, do not free |
+| `hfw_mesh_stl_bytes` | a mesh as binary or ASCII STL bytes | SliceRuntime (a plate goes in as one STL) and PlateDocument (project save) | `hfw_buffer_free` |
+| `hfw_mesh_new` | a mesh from vertices and indices, triangle order kept so paint stays aligned | HfwEngine (rebuilding a snapshot) | `hfw_mesh_free` |
+| `hfw_mesh_cut` | a mesh split by a plane into two closed halves | PlateDocument (`cutMesh`) | `hfw_mesh_free` ×2 |
+| `hfw_mesh_part_count` | how many separate shells a mesh holds | — nothing splits shells today | none |
+| `hfw_mesh_part` | one shell as its own mesh handle | — same | `hfw_mesh_free` |
+| `hfw_text_mesh` | a text string extruded into a closed prism | PlateDocument (`Text.cpp`, emboss) | `hfw_mesh_free` |
+| `hfw_mesh_paint_set` | writes a per-triangle channel on a mesh handle | — paint lives on plate objects | none |
+| `hfw_mesh_paint_get` | reads a mesh handle's channel back | — same | none |
+| `hfw_plate_object_name` | renames an object in place | PlateDocument (`renameObject`) | none |
+| `hfw_plate_object_bake` | folds an object's placement into its triangles | SliceRuntime (before the one-STL handoff) | none |
+| `hfw_plate_object_duplicate` | copies an object and returns the copy's id | PlateDocument (`duplicateObject`) | none |
+| `hfw_plate_object_rotate` | turns an object about its own centre on one axis | PlateDocument (`rotateSelection`) | none |
+| `hfw_plate_object_mirror` | mirrors an object in place, winding corrected | PlateDocument (mirror tool) | none |
+| `hfw_plate_object_set` | one print-level setting on one object, by name and value | PlateDocument (`setObjectSetting`) | none |
+| `hfw_plate_object_clear_settings` | drops every override an object carries | PlateDocument | none |
+| `hfw_plate_object_paint` | writes a support or seam channel on one object | PlateDocument (paint brush) | none |
+| `hfw_plate_object_add_volume` | attaches a part, negative or modifier volume | PlateDocument (`addVolume`) | none |
+| `hfw_plate_object_remove_volume` | detaches a volume by index | PlateDocument (`removeVolume`) | none |
+| `hfw_plate_object_volume_count` | how many volumes an object carries | PlateDocument (`volumes`) | none |
+| `hfw_plate_object_volume_kind` | which of the five kinds a volume is | PlateDocument (`volumes`) | none |
+| `hfw_plate_volume_set` | one setting on a modifier volume, on top of the object's | PlateDocument (`setVolumeSetting`) | none |
+| `hfw_plate_object_layer_heights` | an object's own `(z, height)` pairs | PlateDocument (variable layer height) | none |
+| `hfw_plate_object_bounds` | one object's bounds on the bed | PlateDocument (`volumeInfo`, object size) | none |
+| `hfw_plate_object_ids` | every id on the plate, in insertion order | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_name_get` | reads an object's name back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_placement_get` | reads an object's placement back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_enabled_get` | reads whether an object prints | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_mesh` | an object's geometry as a new handle, paint included | HfwEngine (`readPlateSnapshot`, round trip) | `hfw_mesh_free` |
+| `hfw_plate_object_settings_json` | an object's overrides as the rows `_set` accepts | HfwEngine (`readPlateSnapshot`) | `hfw_string_free` |
+| `hfw_plate_object_volume_mesh` | a volume's geometry as a new handle | HfwEngine (`readPlateSnapshot`) | `hfw_mesh_free` |
+| `hfw_plate_object_volume_settings_json` | a modifier volume's settings as JSON rows | HfwEngine (`readPlateSnapshot`) | `hfw_string_free` |
+| `hfw_plate_object_paint_get` | reads an object's channel back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_layer_heights_get` | reads an object's own layer heights back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_set_metadata` | stores the application's own bytes with the plate | HfwEngine (`savePlateDocument`) | none |
+| `hfw_plate_metadata_get` | returns those bytes, NUL-terminated, length reported | HfwEngine (`readPlateDocument`) | `hfw_buffer_free` |
+| `hfw_plate_project_bytes` | the plate as a project `.3mf`, with this engine's own part beside it | HfwEngine (`savePlateDocument`) | `hfw_buffer_free` |
+| `hfw_plate_open_project` | a plate read back from project bytes | HfwEngine (`readPlateDocument`) | `hfw_plate_free` |
+| `hfw_plate_slice_placed` | slices the plate after centring it on the profile's bed | SliceRuntime (`sliceWithHfw(placeOnBed)`) | `hfw_gcode_free` |
+| `hfw_slice_meshes` | slices a bare list of meshes with no document | — every next-layer slice goes through a plate | `hfw_gcode_free` |
+| `hfw_plate_preview_json` | every planned bead per layer as JSON, labelled as the file is | SliceRuntime (preview, phase 4) | `hfw_string_free` |
+| `hfw_plate_set_in_layer` | sets the calibration strokes printed inside a layer | SliceRuntime (`PlateInLayerPolyline`) | none |
+| `hfw_plate_in_layer_count` | how many strokes the plate carries | SliceRuntime | none |
+| `hfw_plate_in_layer_points` | how many points stroke *i* has, to size a buffer | SliceRuntime | none |
+| `hfw_plate_in_layer_get` | reads a stroke back with its width, height, speed and prefix | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_set_markers` | sets the plate's pause, colour and custom-G-code timeline | SliceRuntime (`PlateLayerGcode`) | none |
+| `hfw_plate_marker_count` | how many markers the plate carries | SliceRuntime | none |
+| `hfw_plate_marker_get` | reads a marker's kind, height and G-code back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_job_start` | plans a plate on its own thread, over a private copy of it | SliceRuntime (async slice) | `hfw_job_free` |
+| `hfw_job_poll` | status and progress of that job, never blocking | SliceRuntime (progress bar) | none |
+| `hfw_job_cancel` | asks the job to stop; a stopped job yields no file | SliceRuntime (cancel button) | none |
+| `hfw_job_wait` | blocks until the job finishes | SliceRuntime | none |
+| `hfw_job_take_gcode` | takes the finished file; the job handle is consumed | SliceRuntime | `hfw_gcode_free` |
+| `hfw_job_free` | releases a job, cancelling and joining it first | SliceRuntime | owns itself |
+| `hfw_string_free` | releases a string the engine returned | every caller of the JSON getters | owns itself |
+| `hfw_buffer_free` | releases a byte buffer the engine returned | every caller of `_stl_bytes`, `_project_bytes`, `_metadata_get` | owns itself |
+
+Read as a work list, the split is clean: 22 rows are `PlateDocument`'s edit gestures
+(name, duplicate, rotate, mirror, bake, settings, paint, volumes, layer heights, the
+cut and text tools), 13 are what `readPlateSnapshot` and the project file need to read
+a plate back, 14 are `SliceRuntime` and its timeline (slice, preview, markers, strokes,
+the threaded job), 1 is `PresetStore`, 2 are the free functions every getter's caller
+needs, and 5 have no caller in next-layer at all: the two mesh-part calls, the
+mesh-level paint pair and `hfw_slice_meshes`, because a plate object and not a bare
+mesh is the only thing the application paints or slices.
+
+### The four concepts that cross the boundary (2026-11-21)
+
+next-layer's `src/app/src/bridge.rs` has settled how a document crosses: geometry as
+binary STL bytes, a placement as sixteen `f64` row-major, paint as a triangle index and
+a bitstream, layer heights as flat `(z, height)` pairs. Each is checked below against
+the export that carries it, and the one that did not match was changed rather than
+written down as a difference to live with.
+
+**Geometry — binary STL bytes.** `ProjectObjectRecord.mesh: Vec<u8>`, and the same for
+a volume. Exports: `hfw_mesh_stl_bytes(mesh, 1, &len)` out, `hfw_mesh_from_bytes` in.
+**Already that shape.** The writer emits the 84-byte header plus 50 bytes per triangle
+and computes the face normal from the triangle, which is exactly what `from_bytes`
+reads; `crates/mesh`'s two round-trip tests and the ABI test pin it. `hfw_mesh_new`
+exists beside it for a caller that needs its own triangle order kept — triangle `i` of
+the handle is triangle `i` of the indices, no welding and no triangle dropped — which
+STL bytes do not promise once repair removes a degenerate one.
+
+**Transform — sixteen `f64`, row-major, 4x4.** `ProjectObjectRecord.matrix`. Export:
+`hfw_plate_object_placement`. **It was not that shape:** the declared call takes
+`HfwTransform`, nine doubles of scale, Euler degrees and translation. Added
+`hfw_plate_object_placement_matrix` and `hfw_plate_object_placement_matrix_get`, with
+the conversion in `crates/mesh` (`MeshTransform::to_matrix`/`from_matrix`); covered in
+`tests/abi.rs` and from C in `tests/smoke.c`.
+
+- The conventions already agree. next-layer sets `m_matrix = rotation * scale` and the
+translation after it, with `rotation` built as `Rz * Ry * Rx`
+(`upstream/src/slicer-domain/src/Slic3r/Domain/Transformation.cpp:60` and `:149`), and
+`MeshTransform` applies scale, then the X, Y and Z rotations, then the translation — the
+same `T * Rz * Ry * Rx * S`.
+- A matrix that shears, collapses an axis, or is not affine is refused with the reason,
+never truncated: a scale triple and an Euler triple cannot carry it, and a silently
+approximated transform is a part in the wrong place.
+- The Euler pair stays. `hfw_plate_object_placement` is already declared in `hfw.rs` and
+`hfw_mesh_transform` uses the same struct, so replacing it is a version 2 change and
+next-layer's call, not a side effect of this one.
+
+**Paint — one channel per object, addressed by triangle.** The project file holds
+`{triangles: [i64 pairs], bitstream: "0110…", states: [1, 3]}`. Exports:
+`hfw_plate_object_paint`/`_get` on an object, `hfw_mesh_paint_set`/`_get` on a bare
+handle. **It is not that shape, and it should not be:** the ABI takes one `uint8_t` per
+triangle. The sparse index-and-bitstream form is the project file's encoding; the
+boundary's job is the state of a triangle, and the dense array costs one byte per
+triangle — half a megabyte for a 500,000-triangle part, against a 25 MB STL.
+
+- The state numbers, per channel: `HFW_PAINT_SUPPORT` (0) and `HFW_PAINT_SEAM` (1),
+  each `0` none, `1` enforcer, `2` blocker. A bitstream carrying more than those three
+  states per triangle has nowhere to go and must be refused by the caller.
+- Triangle identity is the whole contract: a length that is not the handle's triangle
+  count is refused rather than truncated, and `hfw_plate_object_mesh` hands the geometry
+  back **with its channel attached**, so a read-back pair is always aligned. Geometry
+  through STL bytes and paint through the ABI can only disagree if repair changes the
+  triangle list in between, which is why `hfw_mesh_new` documents that it does not.
+
+**Layer height profile — flat `(z, height)` pairs.** Export:
+`hfw_plate_object_layer_heights`, read back by `_get`. **Already that shape**: the array
+is interleaved, index 0 is `z`, index 1 is the height, and `count` is the number of
+pairs. Two conventions to carry: a uniform object sends **zero pairs** rather than one
+pair equal to the plate's layer height, and a layer whose bottom sits at or above a `z`
+takes that height until the next pair, so the last pair stays in force to the top.
+
+**Tool paint has no channel, and that is final.** HFW drives one extruder, so there is
+nothing a third channel could change: the parity backlog lists multi-material as
+`blocked` on the tool changer, the ledger's 56 multi-material rows sit in the same
+bucket, and a channel nothing reads is a control that does nothing. next-layer's plan —
+delete the engine's tool paint, keep support and seam — needs no engine work, and the
+project file's `tool_paint` should be dropped on import with the reason shown rather
+than carried in the hope of a later pass.
 
 ## Carrying it, until the port lands
 

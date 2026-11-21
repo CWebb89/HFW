@@ -271,6 +271,28 @@ int32_t hfw_plate_object_name(HfwPlate *plate, uint64_t id, const char *name);
 int32_t hfw_plate_object_placement(HfwPlate *plate, uint64_t id, HfwTransform transform);
 
 /**
+ * Moves object `id` from a row-major 4x4 matrix, sixteen doubles.
+ *
+ * The matrix composes the way this engine does: scale, then rotations about X, Y
+ * and Z in degrees, then translation in millimetres -- `T * Rz * Ry * Rx * S`.
+ * Anything else (shear, a collapsed axis, a perspective row) is refused rather
+ * than truncated, because the plate records a scale triple and an Euler triple.
+ *
+ * A caller that keeps transforms as matrices uses this instead of decomposing
+ * them into `HfwTransform`. Returns 0, or -1 when the object is not on the plate,
+ * a pointer is null, or the matrix is not representable.
+ */
+int32_t hfw_plate_object_placement_matrix(HfwPlate *plate, uint64_t id, const double *matrix);
+
+/**
+ * Reads object `id`'s placement back as a row-major 4x4 matrix.
+ *
+ * `out` receives sixteen doubles. Returns 0, or -1 when the object is not on the
+ * plate or `out` is null.
+ */
+int32_t hfw_plate_object_placement_matrix_get(const HfwPlate *plate, uint64_t id, double *out);
+
+/**
  * Folds object `id`'s placement into its geometry and resets the placement.
  *
  * Returns 0 on success, -1 when the object is not on the plate or the placement

@@ -19,7 +19,8 @@ use hfw_capi::{
     hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mesh,
     hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_name_get,
     hfw_plate_object_paint, hfw_plate_object_paint_get, hfw_plate_object_placement,
-    hfw_plate_object_placement_get, hfw_plate_object_remove, hfw_plate_object_remove_volume,
+    hfw_plate_object_placement_get, hfw_plate_object_placement_matrix,
+    hfw_plate_object_placement_matrix_get, hfw_plate_object_remove, hfw_plate_object_remove_volume,
     hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_settings_json,
     hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
     hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
@@ -171,6 +172,62 @@ fn a_mesh_writes_itself_out_as_stl_and_reads_back() {
     assert!(text.starts_with(b"solid ") && text.ends_with(b"endsolid next-layer\n"));
     unsafe {
         hfw_buffer_free(ascii, text_len);
+        hfw_mesh_free(mesh);
+    }
+}
+
+#[test]
+fn a_placement_crosses_as_a_row_major_matrix() {
+    let path = c_string(&fixture("cube.stl"));
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, mesh) };
+    assert_ne!(id, 0, "add failed: {}", last_error());
+
+    let matrix: [f64; 16] = [
+        0.0, -1.0, 0.0, 10.0, //
+        2.0, 0.0, 0.0, 20.0, //
+        0.0, 0.0, 1.0, 5.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let placed = unsafe { hfw_plate_object_placement_matrix(plate, id, matrix.as_ptr()) };
+    assert_eq!(placed, 0, "placement failed: {}", last_error());
+
+    let mut read = [0.0_f64; 16];
+    let result = unsafe { hfw_plate_object_placement_matrix_get(plate, id, read.as_mut_ptr()) };
+    assert_eq!(result, 0, "read failed: {}", last_error());
+    for (index, (left, right)) in matrix.iter().zip(read).enumerate() {
+        assert!(
+            (left - right).abs() < 1e-9,
+            "element {index}: {left} came back as {right}"
+        );
+    }
+
+    let mut euler = HfwTransform::default();
+    let result = unsafe { hfw_plate_object_placement_get(plate, id, &mut euler) };
+    assert_eq!(result, 0, "euler read failed: {}", last_error());
+    assert!((euler.scale[0] - 2.0).abs() < 1e-9, "{:?}", euler.scale);
+    assert!((euler.scale[1] - 1.0).abs() < 1e-9, "{:?}", euler.scale);
+    assert!(
+        (euler.rotation_degrees[2] - 90.0).abs() < 1e-9,
+        "{:?}",
+        euler.rotation_degrees
+    );
+    assert_eq!(euler.translation_mm, [10.0, 20.0, 5.0]);
+
+    let mut sheared = matrix;
+    sheared[5] = 0.3;
+    let refused = unsafe { hfw_plate_object_placement_matrix(plate, id, sheared.as_ptr()) };
+    assert_eq!(refused, -1, "a sheared matrix was accepted");
+    assert!(
+        last_error().contains("shear"),
+        "the refusal does not say why: {}",
+        last_error()
+    );
+
+    unsafe {
+        hfw_plate_free(plate);
         hfw_mesh_free(mesh);
     }
 }

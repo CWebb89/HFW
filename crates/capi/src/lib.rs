@@ -968,6 +968,38 @@ pub unsafe extern "C" fn hfw_plate_object_placement_get(
     report(read(), -1)
 }
 
+/// Reads object `id`'s placement back as a row-major 4x4 matrix.
+///
+/// This is the inverse of [`hfw_plate_object_placement_matrix`], and the shape a
+/// caller that keeps transforms as matrices wants: the sixteen doubles compose to
+/// the same placement, so a document snapshot does not have to convert twice.
+///
+/// Returns 0 on success and -1 when the object is not on the plate or `out` is null.
+///
+/// # Safety
+///
+/// `out` must point at sixteen writable doubles.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_placement_matrix_get(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut f64,
+) -> c_int {
+    let read = || -> Result<c_int, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        if out.is_null() {
+            return Err("output pointer is null".to_owned());
+        }
+        let object = object_of(&plate.plate, id)?;
+        let matrix = object.placement().to_matrix();
+        unsafe {
+            std::ptr::copy_nonoverlapping(matrix.as_ptr(), out, 16);
+        }
+        Ok(0)
+    };
+    report(read(), -1)
+}
+
 /// Writes 1 into `out` when object `id` is switched on, 0 when it is not.
 ///
 /// # Safety
@@ -1910,6 +1942,54 @@ pub unsafe extern "C" fn hfw_plate_object_placement(
             rotation_degrees: transform.rotation_degrees,
             translation_mm: transform.translation_mm,
         });
+        Ok(0)
+    };
+    report(place(), -1)
+}
+
+/// Moves object `id` from a row-major 4x4 matrix.
+///
+/// `matrix` holds sixteen doubles and composes the way this engine does: scale,
+/// then rotations about X, Y and Z in degrees, then translation in millimetres.
+/// A matrix that also shears, collapses an axis or carries a perspective row is
+/// refused rather than truncated, because the plate records a scale and an Euler
+/// triple and cannot carry anything else.
+///
+/// Returns 0 on success and -1 when the object is not on the plate, either pointer
+/// is null, or the matrix is not representable.
+///
+/// # Safety
+///
+/// `matrix` must point at sixteen readable doubles and `plate` must be a live
+/// handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_placement_matrix(
+    plate: *mut HfwPlate,
+    id: u64,
+    matrix: *const f64,
+) -> c_int {
+    let place = || -> Result<c_int, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        if matrix.is_null() {
+            return Err("matrix pointer is null".to_owned());
+        }
+        let mut values = [0.0_f64; 16];
+        for (slot, value) in values
+            .iter_mut()
+            .zip(unsafe { std::slice::from_raw_parts(matrix, 16) })
+        {
+            *slot = *value;
+        }
+        let transform = MeshTransform::from_matrix(values).map_err(|error| error.to_string())?;
+        let id =
+            ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())?;
+        let object = unsafe { &mut *plate }
+            .plate
+            .object_mut(id)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        object.set_placement(transform);
         Ok(0)
     };
     report(place(), -1)
