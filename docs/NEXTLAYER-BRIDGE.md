@@ -855,3 +855,27 @@ table into `crates/config/assets/engine-definitions.json` and have
 structure the snapshot needs, so it is a writer and a switch, not a redesign. Until then
 the gate requires `next-layer/upstream`, and section 29's failure names the path it
 looked for instead of failing halfway through the run.
+
+## What next-layer still needs from this ABI (2026-11-21)
+
+The debts the port's drafts ran into, in one place, so they are not rediscovered one
+module at a time. Each is something next-layer cannot port past, not a nicety.
+
+1. **`PlateInLayerPolyline::extruder` has no field.** `hfw_plate_set_in_layer` carries
+   the points and the layer and nothing else, so a per-line extruder is lost on the way
+   in. It is the only field the four plate structs still need from this side.
+2. **Two preset roots, one handle.** The bundle surface resolves against the vendor and
+   user directories the process was opened with; next-layer can be pointed at a second
+   root mid-session (its user-preset gate does exactly that) without a relaunch.
+3. **One material per resolve.** `hfw_bundle_resolved_config` takes a single filament,
+   while next-layer's store resolves a printer plus a list of filaments and shows the
+   whole list.
+4. **`extruder_colour` moved to `printer_settings`.** The key next-layer reads is under a
+   different section now, which changes what its resolved-config parser sees.
+5. **Settings the bundle does not name.** Next-layer reports every setting it refused and
+   why; a name the bundle has never heard of has no answer to report.
+
+Preview: `docs/PREVIEW-RENDERER.md` recommends Qt Quick 3D geometry with quads per bead
+and `hfw_plate_preview_buffer` now hands over the buffer that needs (32 bytes per move,
+plus each layer's first move, first vertex and height). GcodeView, Toolpath and
+PreviewData are blocked on the application building that renderer, not on this engine.
