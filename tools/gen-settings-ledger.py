@@ -43,6 +43,7 @@ SURFACE = HFW / "crates/config/assets/settings-surface.json"
 PER_OBJECT = HFW / "crates/engine/src/settings_key.rs"
 FOREIGN_SETTINGS = NEXT_LAYER / "src/qt/src/ForeignSettings.cpp"
 PRESET_IMPORT = NEXT_LAYER / "src/qt/src/PresetImport.cpp"
+PORT_ROOT = NEXT_LAYER / "src/app/src"
 LOOP_AXES = ("x", "y", "z", "e")
 LOOP_PREFIXES = ("machine_max_feedrate_", "machine_max_acceleration_",
                  "machine_max_jerk_")
@@ -741,17 +742,42 @@ def loop_generated(path: Path):
 
 
 def parse_foreign(path: Path):
+    """Orca/Bambu name -> engine name, from the C++ table or its Rust port.
+
+    The table has crossed the boundary once already: next-layer's port moved it to
+    `src/app/src/ForeignSettings.rs`, where the names and the value spellings are two
+    separate tables rather than the one `QStringLiteral` list the C++ held. Reading
+    either is what keeps this generator from reporting that the dialect vanished.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix == ".rs":
+        table = re.search(
+            r"const RENAMED: \[\(&str, &str\); (\d+)\] = \[(.*?)\n\];", text, re.S
+        )
+        if table is None:
+            raise SystemExit(f"{path}: no RENAMED table; the dialect table moved again")
+        pairs = re.findall(
+            r'\(\s*"([a-z0-9_]+)"\s*,\s*"([a-z0-9_]+)"\s*\)', table.group(2)
+        )
+        if len(pairs) != int(table.group(1)):
+            raise SystemExit(
+                f"{path}: the table declares {table.group(1)} renames and "
+                f"{len(pairs)} were read; the syntax changed under this parser"
+            )
+        return {foreign: engine for foreign, engine in pairs}
     pairs = re.findall(
         r'\{QStringLiteral\("([a-z0-9_]+)"\),\s*QStringLiteral\("([a-z0-9_]+)"\)\}',
-        path.read_text(encoding="utf-8", errors="replace"),
+        text,
     )
     return {foreign: engine for foreign, engine in pairs}
 
 
 def parse_import(path: Path):
+    """The importer's own renames, from the C++ table or its Rust port."""
+    text = path.read_text(encoding="utf-8", errors="replace")
     pairs = re.findall(
-        r'\{"([a-z0-9_]+)",\s*"([a-z0-9_]+)",\s*Transform::\w+,',
-        path.read_text(encoding="utf-8", errors="replace"),
+        r'[{(]\s*"([a-z0-9_]+)"\s*,\s*"([a-z0-9_]+)"\s*,\s*Transform::\w+',
+        text,
     )
     return {foreign: engine for foreign, engine in pairs}
 
@@ -759,17 +785,16 @@ def parse_import(path: Path):
 def dialect_renames():
     """Orca/Bambu spelling -> engine spelling, from both proven tables.
 
-    `PresetImport.cpp` carries the keys the application's own importer renames
-    and `ForeignSettings.cpp` the ones its oracle gates. They overlap and
-    disagree on four keys, so the gated table wins: `overhang_1_4_speed` and
-    its neighbours are quarter-of-the-perimeter speeds whose index the two
-    files number differently, and `infill_combination` means different layers
-    there. A key only the importer renames is still a real rename -- without
-    them a machine preset's `printable_area` and `machine_max_speed_x` never
-    reach this engine.
+    The importer carries the keys the application renames and the foreign-settings
+    table the ones its oracle gates. They overlap and disagree on four keys, so the
+    gated table wins: `overhang_1_4_speed` and its neighbours are
+    quarter-of-the-perimeter speeds whose index the two files number differently, and
+    `infill_combination` means different layers there. A key only the importer renames
+    is still a real rename -- without them a machine preset's `printable_area` and
+    `machine_max_speed_x` never reach this engine.
     """
-    pairs = parse_import(PRESET_IMPORT)
-    pairs.update(parse_foreign(FOREIGN_SETTINGS))
+    pairs = parse_import(preset_import())
+    pairs.update(parse_foreign(foreign_settings()))
     return pairs
 
 
@@ -1096,15 +1121,29 @@ def backlog_document(rows) -> str:
     ]
     return "\n".join(out)
 
+def resolve_source(cpp: Path) -> Path | None:
+    """Whichever file holds this table today: the C++ original, or its Rust port.
+
+    next-layer is porting module by module, and a module that moves takes the table
+    this generator reads with it -- `ForeignSettings.cpp` became
+    `src/app/src/ForeignSettings.rs` and the gate went red for four commits. A port
+    keeps the module name, so the twin is the same stem under the Rust app root.
+    """
+    if cpp.exists():
+        return cpp
+    ported = PORT_ROOT / f"{cpp.stem}.rs"
+    return ported if ported.exists() else None
+
+
 def require_inputs() -> int:
     """Refuses to generate from an incomplete external tree.
 
     A missing source must stop the run rather than shrink the table. Both artifacts are
     what stops a profile being silently mistranslated, so a table built from whichever
-    files happened to be present reports `missing` about settings it has never seen —
-    the one failure mode a generated inventory must not have. `next-layer` moved its
-    foreign-settings table out of `src/qt/src/ForeignSettings.cpp` once already, which
-    is exactly when this fires.
+    files happened to be present reports `missing` about settings it has never seen --
+    the one failure mode a generated inventory must not have. Every input therefore
+    names both places it can live, so the message says what to repoint rather than
+    only what is absent.
     """
     required = (
         DOMAIN / "ConfigDefsFDM.cpp",
@@ -1113,10 +1152,34 @@ def require_inputs() -> int:
         PRESET_IMPORT,
         HFW_PARSE,
     )
-    missing = [path for path in required if not path.exists()]
+    missing = [path for path in required if resolve_source(path) is None]
     for path in missing:
         print(f"missing input: {path}", file=sys.stderr)
+        if path.parent != HFW:
+            print(f"  also looked for: {PORT_ROOT / f'{path.stem}.rs'}", file=sys.stderr)
     return 1 if missing else 0
+
+
+def foreign_settings() -> Path:
+    """The dialect table, wherever the port last left it."""
+    path = resolve_source(FOREIGN_SETTINGS)
+    if path is None:
+        raise SystemExit(
+            f"no dialect table: neither {FOREIGN_SETTINGS} nor "
+            f"{PORT_ROOT / 'ForeignSettings.rs'} exists"
+        )
+    return path
+
+
+def preset_import() -> Path:
+    """The importer's rename table, wherever the port last left it."""
+    path = resolve_source(PRESET_IMPORT)
+    if path is None:
+        raise SystemExit(
+            f"no import table: neither {PRESET_IMPORT} nor "
+            f"{PORT_ROOT / 'PresetImport.rs'} exists"
+        )
+    return path
 
 
 def main() -> int:
@@ -1144,7 +1207,7 @@ def main() -> int:
     legacy_names, legacy_types = parse_legacy(LEGACY)
     hfw = hfw_keys()
     orca = orca_keys()
-    foreign = parse_foreign(FOREIGN_SETTINGS)
+    foreign = parse_foreign(foreign_settings())
 
     alias_index = {}
     for hfw_key, (prusa_key, status, note) in HFW_ALIAS.items():
