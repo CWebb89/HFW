@@ -35,7 +35,9 @@ mod dialect_table;
 mod error;
 mod expression;
 mod parse;
+pub mod presets;
 pub mod surface;
+pub mod surface_table;
 
 pub use alias_table::native_for;
 pub use audit::{audit, Finding, Severity};

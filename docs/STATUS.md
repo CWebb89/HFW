@@ -151,6 +151,13 @@ Two more that matter when deciding whether to trust the output:
   writes them back out and a panel says what was dropped. `apply_foreign_setting`
   applies or keeps and reports which; all of it rides the snapshot and the project file
   (format version 11).
+- The preset surface is an ABI of its own: `hfw_bundle_open` indexes a directory of
+  presets, `hfw_bundle_printer_models` lists every machine with its bed,
+  `hfw_bundle_profiles_for` lists the processes and materials one machine takes,
+  `hfw_bundle_resolved_config` resolves a selection into the configuration the engine
+  slices with, and `hfw_bundle_reload` re-reads the directory without a relaunch. The
+  resolved document's names, locations and value types come from the generated surface
+  table, so a panel and the engine cannot disagree about a setting's name or shape.
 - A document holds several plates: `hfw_plate_bed_count`/`_add`/`_remove`, a name and a
   lock per plate, `hfw_plate_add_on_bed` and `hfw_plate_object_set_bed` for membership
   (an object keeps its id when it moves), `hfw_plate_bed_object_ids` to read one plate

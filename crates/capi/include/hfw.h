@@ -30,6 +30,9 @@ typedef struct HfwPlate HfwPlate;
 /** An opaque snapshot of a plate document, owned by the library. */
 typedef struct HfwSnapshot HfwSnapshot;
 
+/** An opaque preset bundle: every preset under one directory, indexed. */
+typedef struct HfwBundle HfwBundle;
+
 /** An opaque slice result owned by the library. */
 typedef struct HfwGcode HfwGcode;
 
@@ -65,6 +68,86 @@ uint32_t hfw_abi_version(void);
  * placer.
  */
 const char *hfw_settings_surface_json(void);
+
+/**
+ * Opens the preset bundle under `root`: every preset file below it, indexed by kind and
+ * name.
+ *
+ * A bundle is the directory a front end keeps its presets in, in the layout
+ * `docs/PRESETS.md` describes: files of `[machine:name]`, `[process:name]` and
+ * `[filament:name]` sections, one preset per file, both that and a single-preset file
+ * discovered recursively. The handle is the whole surface a preset store needs -- the
+ * machines, the profiles one machine accepts, and what a selection resolves to -- and it
+ * is opaque because the indexing is the library's business.
+ *
+ * Returns NULL with the reason when the directory holds no presets or cannot be read.
+ * Release the handle with `hfw_bundle_free`.
+ */
+HfwBundle *hfw_bundle_open(const char *root);
+
+/** Releases a bundle handle. A NULL pointer is ignored. */
+void hfw_bundle_free(HfwBundle *bundle);
+
+/**
+ * Re-reads the directory the bundle was opened from.
+ *
+ * This is what makes a preset library live: a file added, edited or deleted while the
+ * application runs is indexed on the next call, with no relaunch and no second handle.
+ * The old index is replaced only when the new one reads, so a bundle that goes unreadable
+ * leaves the caller with what it had and the reason why. Returns 0 on success, -1 with
+ * the reason on failure.
+ */
+int32_t hfw_bundle_reload(HfwBundle *bundle);
+
+/**
+ * Returns the machines a bundle holds, as JSON:
+ *
+ *     {"printer_models":[{"name","vendor_name","vendor_id","technology":"FFF",
+ *       "variants":[{"id","printer_profiles":[{"name","extruders_cnt",
+ *       "bed":{"width","height","max_print_height"}}]}]}]}
+ *
+ * One printer profile per machine, because a bundle here has one hardware configuration
+ * per machine preset where the reference slicers group several. `name` is what the other
+ * two calls are made with. Release the string with `hfw_string_free`.
+ */
+char *hfw_bundle_printer_models(const HfwBundle *bundle);
+
+/**
+ * Returns the profiles one machine accepts, as JSON:
+ *
+ *     {"print_profiles":[{"name","filament_profiles":[...]}]}
+ *
+ * Every process in the bundle, each listing every filament: a bundle here does not pair a
+ * material with a process, and a panel reads the union of the per-process lists. Returns
+ * NULL with the reason when the machine is not in the bundle. Release the string with
+ * `hfw_string_free`.
+ */
+char *hfw_bundle_profiles_for(const HfwBundle *bundle, const char *printer);
+
+/**
+ * Returns what a machine, a process and materials resolve to, as one JSON document:
+ *
+ *     {"preset":{...},"configuration":{"print_settings":{...},
+ *      "filament_settings":{...},"printer_settings":{...}},"warnings":[...]}
+ *
+ * The shape a preset store already parses. Every setting carries the dialect name a panel
+ * files it under and the JSON type its value takes, taken from the same generated surface
+ * the panel reads, so the two cannot disagree about a name, a location or a type.
+ * `filaments` is a list of material preset names, of which the first non-empty one is
+ * used: this engine prints with one extruder.
+ *
+ * The machine is required; a process or a material the bundle does not hold is a warning
+ * in the document rather than a failure. Release the string with `hfw_string_free`.
+ */
+char *hfw_bundle_resolved_config(const HfwBundle *bundle, const char *printer,
+                                 const char *print, const char *const *filaments,
+                                 size_t count);
+
+/**
+ * Returns one line saying what a bundle holds: its counts and any warnings. Release the
+ * string with `hfw_string_free`.
+ */
+char *hfw_bundle_summary(const HfwBundle *bundle);
 
 /** Returns this thread's last error message, or NULL when the last call succeeded. */
 const char *hfw_last_error(void);

@@ -346,6 +346,11 @@ impl Bundle {
         }
     }
 
+    /// The vendor directory a named machine preset sits under, when it has one.
+    pub fn vendor_of_machine(&self, machine: &str) -> Option<String> {
+        self.vendor_of_name(Kind::Machine, machine)
+    }
+
     fn lookup(&self, kind: Kind, name: &str) -> Option<&Entry> {
         self.pick(kind, name, None)
     }

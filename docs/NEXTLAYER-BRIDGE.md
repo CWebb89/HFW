@@ -248,8 +248,8 @@ read-back that a settings panel shows has to be the text the engine took.
 
 ### What next-layer has not declared (2026-11-21)
 
-`next-layer/src/app/src/hfw.rs` declares **52** of the **121** functions
-`crates/capi/include/hfw.h` exports, so a 69-row gap sits between what the engine
+`next-layer/src/app/src/hfw.rs` declares **52** of the **128** functions
+`crates/capi/include/hfw.h` exports, so a 76-row gap sits between what the engine
 can do and what the application has told its own compiler about. Recounted
 2026-11-21 by adding exports, against the header and against that file, one row
 per symbol:
@@ -273,6 +273,13 @@ next-layer would call it today.
 | export | what it does | next-layer module | result |
 | --- | --- | --- | --- |
 | `hfw_settings_surface_json` | every setting with its dialect name, status and per-object flag, plus the capability backlog | PresetStore | static, do not free |
+| `hfw_bundle_open` | indexes the preset directory a front end keeps its presets in | PresetStore (`loadPresets`) | `hfw_bundle_free` |
+| `hfw_bundle_free` | releases a bundle handle | PresetStore | owns itself |
+| `hfw_bundle_reload` | re-reads the bundle, so a preset added while the app runs is seen | PresetStore (`reloadPresets`) | none |
+| `hfw_bundle_printer_models` | every machine in the bundle with its bed and extruder count | PresetStore (`printerModels`) | `hfw_string_free` |
+| `hfw_bundle_profiles_for` | every process and every material one machine accepts | PresetStore (`profilesFor`) | `hfw_string_free` |
+| `hfw_bundle_resolved_config` | machine + process + material resolved to the configuration the engine slices with | PresetStore (`resolvedConfig`) | `hfw_string_free` |
+| `hfw_bundle_summary` | one line naming what the bundle holds, for a log | PresetStore (status) | `hfw_string_free` |
 | `hfw_mesh_load_extensions` | the extensions `hfw_mesh_load_file` reads, for a file dialog | PlateDocument (`importWildcards`) | static, do not free |
 | `hfw_mesh_part_count` | how many separate shells a mesh holds | — nothing splits shells today | none |
 | `hfw_mesh_part` | one shell as its own mesh handle | — same | `hfw_mesh_free` |
@@ -348,7 +355,7 @@ keeps, paint, volumes with their names, visibility, ids and placements, layer he
 the plates and what moves between them, the undo step, the cut and text tools), 20 are
 what `readPlateSnapshot` and the project file still need to read a plate back, 10 are
 `SliceRuntime` and its timeline (slice of a plate, preview, strokes, the threaded job),
-1 is `PresetStore`, 2 are the free functions every getter's caller needs, and 4 have no caller in next-layer at all:
+8 are `PresetStore` and its bundle, 2 are the free functions every getter's caller needs, and 4 have no caller in next-layer at all:
 the two mesh-part calls and `hfw_slice_meshes`, because a plate object and not a bare
 mesh is the only thing the application slices, plus `hfw_snapshot_object_count`, which
 reports what a snapshot holds when reading the plate after a restore says the same
@@ -447,6 +454,54 @@ The shape, and why each part is where it is:
 - **All of it rides the snapshot and the project file** (format version 11): an undo
   that lost why a setting was dropped would be a panel that lies about the document it
   is showing.
+
+**The preset surface is the bundle, asked three questions.** The eighth concept, and
+the one that had no ABI at all: `PresetStore` reaches the engine through four calls --
+the machines, the profiles one machine takes, the configuration a selection resolves to,
+and a reload -- and `PresetImport` and the whole preset UI sit behind it. `hfw_bundle_open`
+indexes a directory of presets (the layout `docs/PRESETS.md` describes), and the handle
+answers with the same three documents the application already parses:
+
+- `hfw_bundle_printer_models` → `{"printer_models":[{name, vendor_name, vendor_id,
+  technology, variants:[{id, printer_profiles:[{name, extruders_cnt, bed:{…}}]}]}]}`. One
+  printer profile per machine: a bundle here has one hardware configuration per machine
+  preset where the reference slicers group several.
+- `hfw_bundle_profiles_for` → `{"print_profiles":[{name, filament_profiles:[…]}]}`: every
+  process, each listing every material, because a bundle here does not pair them and the
+  application reads the union.
+- `hfw_bundle_resolved_config` → `{"preset":{…}, "configuration":{"print_settings":{…},
+  "filament_settings":{…}, "printer_settings":{…}}, "warnings":[…]}`, and
+  `hfw_bundle_reload` re-reads the directory in place.
+
+**Resolution is one document, not a call per setting** — the application holds the whole
+resolved configuration, shows it and hands it back as the profile a slice is written
+with, so a per-key API would have it fetch several hundred values and rebuild exactly
+this document.
+
+**The generated surface answers, and there is no second settings path.** The names, the
+location each setting is filed under and the type its value takes come from
+`crates/config/src/surface_table.rs`, generated by `tools/gen-settings-ledger.py` from the
+same measurement as the ledger and the panel's surface — so a panel cannot be offered a
+name this engine emits differently, and the engine cannot emit a key a panel cannot file.
+A value is typed by that row (`bool` as a boolean, `Percentage` as `{value, is_percent}`,
+a material value as a one-slot array) and a density this engine holds as a share is
+written as the percentage a panel reads.
+
+What that retires, and what it does not: this engine has no `ConfigContainer` of its own
+(one grep, zero hits) and does not need one — `Bundle::resolve`/`compose` plus
+`PrinterConfig::from_preset` is the resolution, and the surface is the vocabulary. In
+`next-layer` the container is still what `SliceRuntime::resolvedConfig`,
+`get_json_printer_models` and `get_json_print_tool_filament_profiles` go through; those
+three are the calls these exports replace, and retiring them is next-layer's commit, not
+this one. Nothing else in the application reads the container except
+`presets->resolvedConfiguration().value("project_settings").value("extruder_colour")` in
+`main.cpp`, which the resolved document carries as a printer setting.
+
+Two limits, stated rather than hidden: a setting the bundle does not name is absent from
+the document, so a panel keeps its own library default for it (emitting this engine's
+default for every unnamed key needs the inverse of `PrinterConfig::assign`, 324 fields,
+which is not written); and one material, so filament blocks carry one slot, because this
+engine prints with one extruder.
 
 **A project file carries identities.** Found by auditing the phase-2 definition of done
 rather than by adding a feature: the project part recorded each object's *index* and

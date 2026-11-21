@@ -4,18 +4,20 @@ use std::ffi::{c_char, CStr, CString};
 use std::fs;
 
 use hfw_capi::{
-    hfw_abi_version, hfw_buffer_free, hfw_gcode_free, hfw_gcode_len, hfw_gcode_text,
-    hfw_gcode_verified, hfw_job_cancel, hfw_job_poll, hfw_job_start, hfw_job_take_gcode,
-    hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_cut, hfw_mesh_free,
-    hfw_mesh_from_bytes, hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_extensions,
-    hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_part,
-    hfw_mesh_part_count, hfw_mesh_stl_bytes, hfw_mesh_transform, hfw_mesh_triangle_count,
-    hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume, hfw_plate_add, hfw_plate_add_on_bed,
-    hfw_plate_add_positioned, hfw_plate_arrange, hfw_plate_bed_add, hfw_plate_bed_count,
-    hfw_plate_bed_locked, hfw_plate_bed_name, hfw_plate_bed_name_get, hfw_plate_bed_object_ids,
-    hfw_plate_bed_remove, hfw_plate_bed_set_locked, hfw_plate_bed_slice, hfw_plate_bounds,
-    hfw_plate_free, hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count,
-    hfw_plate_marker_get, hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume,
+    hfw_abi_version, hfw_buffer_free, hfw_bundle_free, hfw_bundle_open, hfw_bundle_printer_models,
+    hfw_bundle_profiles_for, hfw_bundle_reload, hfw_bundle_resolved_config, hfw_bundle_summary,
+    hfw_gcode_free, hfw_gcode_len, hfw_gcode_text, hfw_gcode_verified, hfw_job_cancel,
+    hfw_job_poll, hfw_job_start, hfw_job_take_gcode, hfw_job_wait, hfw_last_error, hfw_mesh_bounds,
+    hfw_mesh_cut, hfw_mesh_free, hfw_mesh_from_bytes, hfw_mesh_index_count, hfw_mesh_indices,
+    hfw_mesh_load_extensions, hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get,
+    hfw_mesh_paint_set, hfw_mesh_part, hfw_mesh_part_count, hfw_mesh_stl_bytes, hfw_mesh_transform,
+    hfw_mesh_triangle_count, hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume,
+    hfw_plate_add, hfw_plate_add_on_bed, hfw_plate_add_positioned, hfw_plate_arrange,
+    hfw_plate_bed_add, hfw_plate_bed_count, hfw_plate_bed_locked, hfw_plate_bed_name,
+    hfw_plate_bed_name_get, hfw_plate_bed_object_ids, hfw_plate_bed_remove,
+    hfw_plate_bed_set_locked, hfw_plate_bed_slice, hfw_plate_bounds, hfw_plate_free,
+    hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count, hfw_plate_marker_get,
+    hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume,
     hfw_plate_object_add_volume_placed, hfw_plate_object_apply_foreign, hfw_plate_object_bed,
     hfw_plate_object_bounds, hfw_plate_object_clear_settings, hfw_plate_object_count,
     hfw_plate_object_dialect, hfw_plate_object_duplicate, hfw_plate_object_enabled,
@@ -2737,4 +2739,149 @@ fn a_project_keeps_object_ids_across_the_abi() {
     unsafe { hfw_plate_free(reopened) };
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(cube) };
+}
+
+/// A preset bundle crosses the ABI: its machines, one machine's profiles, and what a
+/// selection resolves to.
+#[test]
+fn a_preset_bundle_answers_the_three_questions_a_preset_store_asks() {
+    let root = std::env::temp_dir().join(format!("hfw-abi-bundle-{}", std::process::id()));
+    let machine_dir = root.join("Vendor/machine");
+    let process_dir = root.join("Vendor/process");
+    let filament_dir = root.join("Vendor/filament");
+    for dir in [&machine_dir, &process_dir, &filament_dir] {
+        std::fs::create_dir_all(dir).expect("scratch bundle");
+    }
+    std::fs::write(
+        machine_dir.join("voron.ini"),
+        "[machine:Voron 2.4 350]\nbed_x = 350\nbed_y = 350\nmax_z = 330\nnozzle_diameter = 0.4\n",
+    )
+    .expect("machine preset");
+    std::fs::write(
+        process_dir.join("standard.ini"),
+        "[process:0.20mm Standard]\nlayer_height = 0.2\nwalls = 4\ninfill_density = 0.35\n",
+    )
+    .expect("process preset");
+    std::fs::write(
+        filament_dir.join("pla.ini"),
+        "[filament:Generic PLA]\nnozzle_temp = 210\n",
+    )
+    .expect("filament preset");
+
+    let read = |pointer: *mut std::os::raw::c_char| -> String {
+        assert!(!pointer.is_null(), "call failed: {}", last_error());
+        unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .expect("the document is text")
+            .to_owned()
+    };
+
+    let path = c_string(&root.display().to_string());
+    let bundle = unsafe { hfw_bundle_open(path.as_ptr()) };
+    assert!(!bundle.is_null(), "the bundle opens: {}", last_error());
+
+    let printers = unsafe { hfw_bundle_printer_models(bundle) };
+    let printers_json = read(printers);
+    assert!(
+        printers_json.contains("\"printer_models\""),
+        "{printers_json}"
+    );
+    assert!(
+        printers_json.contains("\"name\":\"Voron 2.4 350\""),
+        "{printers_json}"
+    );
+    assert!(
+        printers_json.contains("\"max_print_height\":330"),
+        "{printers_json}"
+    );
+
+    let printer = c_string("Voron 2.4 350");
+    let profiles = unsafe { hfw_bundle_profiles_for(bundle, printer.as_ptr()) };
+    let profiles_json = read(profiles);
+    assert!(
+        profiles_json.contains("\"name\":\"0.20mm Standard\""),
+        "{profiles_json}"
+    );
+    assert!(
+        profiles_json.contains("\"filament_profiles\":[\"Generic PLA\"]"),
+        "{profiles_json}"
+    );
+
+    let process = c_string("0.20mm Standard");
+    let filament = c_string("Generic PLA");
+    let filaments = [filament.as_ptr()];
+    let resolved = unsafe {
+        hfw_bundle_resolved_config(
+            bundle,
+            printer.as_ptr(),
+            process.as_ptr(),
+            filaments.as_ptr(),
+            1,
+        )
+    };
+    let resolved_json = read(resolved);
+    assert!(
+        resolved_json.contains("\"configuration\":{"),
+        "{resolved_json}"
+    );
+    assert!(
+        resolved_json.contains("\"layer_height\":0.2"),
+        "{resolved_json}"
+    );
+    assert!(
+        resolved_json.contains("\"perimeters\":4"),
+        "{resolved_json}"
+    );
+    assert!(
+        resolved_json.contains("\"fill_density\":{\"value\":35,\"is_percent\":true}"),
+        "{resolved_json}"
+    );
+    assert!(
+        resolved_json.contains("\"temperature\":[210]"),
+        "{resolved_json}"
+    );
+    assert!(resolved_json.contains("\"warnings\":[]"), "{resolved_json}");
+
+    let unknown = c_string("Prusa MK4");
+    assert!(
+        unsafe { hfw_bundle_profiles_for(bundle, unknown.as_ptr()) }.is_null(),
+        "a machine the bundle does not hold is refused"
+    );
+    assert!(
+        last_error().contains("Prusa MK4"),
+        "the refusal names it: {}",
+        last_error()
+    );
+
+    let summary = unsafe { hfw_bundle_summary(bundle) };
+    let summary_text = read(summary);
+    assert!(summary_text.contains("1 machine(s)"), "{summary_text}");
+
+    std::fs::write(
+        process_dir.join("draft.ini"),
+        "[process:0.28mm Draft]\nlayer_height = 0.28\n",
+    )
+    .expect("a preset added while the process runs");
+    assert_eq!(
+        unsafe { hfw_bundle_reload(bundle) },
+        0,
+        "the bundle re-reads without a relaunch: {}",
+        last_error()
+    );
+    let reloaded = unsafe { hfw_bundle_profiles_for(bundle, printer.as_ptr()) };
+    let reloaded_json = read(reloaded);
+    assert!(
+        reloaded_json.contains("0.28mm Draft"),
+        "a preset added while the process ran is in the list: {reloaded_json}"
+    );
+
+    unsafe { hfw_string_free(printers) };
+    unsafe { hfw_string_free(profiles) };
+    unsafe { hfw_string_free(resolved) };
+    unsafe { hfw_string_free(summary) };
+    unsafe { hfw_string_free(reloaded) };
+    unsafe { hfw_bundle_free(bundle) };
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(unsafe { hfw_bundle_open(std::ptr::null()) }.is_null());
+    assert_eq!(unsafe { hfw_bundle_reload(std::ptr::null_mut()) }, -1);
 }

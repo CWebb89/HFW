@@ -36,6 +36,7 @@ use std::sync::OnceLock;
 mod job;
 mod preview;
 
+use hfw_config::Bundle;
 use hfw_config::PrinterConfig;
 use hfw_engine::{
     InLayerPolyline, Job, Marker, MarkerKind, Mesh, MeshTransform, Paint, PlateOrder, Settings,
@@ -105,6 +106,12 @@ pub struct HfwPlate {
 /// An opaque snapshot of a plate document, owned by this library.
 pub struct HfwSnapshot {
     snapshot: PlateSnapshot,
+}
+
+/// An opaque preset bundle: the presets under one directory, indexed.
+pub struct HfwBundle {
+    bundle: Bundle,
+    root: String,
 }
 
 /// An opaque slice result owned by this library.
@@ -1321,6 +1328,198 @@ pub unsafe extern "C" fn hfw_string_free(text: *mut c_char) {
         return;
     }
     drop(unsafe { CString::from_raw(text) });
+}
+
+/// Opens the preset bundle under `root`: every preset file below it, indexed by kind
+/// and name.
+///
+/// A bundle here is the directory a front end keeps its presets in, in the layout
+/// `docs/PRESETS.md` describes: files of `[machine:name]`, `[process:name]` and
+/// `[filament:name]` sections, one preset per file, either form, discovered
+/// recursively. The handle is the whole surface a preset store needs -- the machines,
+/// the profiles one machine accepts, and what a selection resolves to -- and it is
+/// opaque because the indexing is this library's business.
+///
+/// `reload` re-reads the same directory, so a preset added or edited while the
+/// application runs is picked up without relaunching it. Release the handle with
+/// `hfw_bundle_free`. Returns NULL with the reason when the directory holds no presets
+/// or cannot be read.
+///
+/// # Safety
+///
+/// `root` must be a readable NUL-terminated path.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_bundle_open(root: *const c_char) -> *mut HfwBundle {
+    let open = || -> Result<*mut HfwBundle, String> {
+        let root = unsafe { text_of(root, "root") }?;
+        let bundle = Bundle::discover(Path::new(&root)).map_err(|error| error.to_string())?;
+        Ok(Box::into_raw(Box::new(HfwBundle { bundle, root })))
+    };
+    report(open(), ptr::null_mut())
+}
+
+/// Releases a bundle handle. A null handle is ignored.
+///
+/// # Safety
+///
+/// `bundle` must be a handle from [`hfw_bundle_open`] that has not been freed.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_bundle_free(bundle: *mut HfwBundle) {
+    if bundle.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(bundle) });
+}
+
+/// Re-reads the directory the bundle was opened from.
+///
+/// This is what makes a preset library live: a file added, edited or deleted while the
+/// application runs is indexed on the next call, with no relaunch and no second handle.
+/// The old index is replaced only when the new one reads, so a bundle that goes
+/// unreadable leaves the caller with what it had and the reason why. Returns 0 on
+/// success, -1 with the reason on failure.
+///
+/// # Safety
+///
+/// `bundle` must be a live handle, writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_bundle_reload(bundle: *mut HfwBundle) -> i32 {
+    let reload = || -> Result<i32, String> {
+        if bundle.is_null() {
+            return Err("bundle handle is null".to_owned());
+        }
+        let held = unsafe { &mut *bundle };
+        let fresh = Bundle::discover(Path::new(&held.root)).map_err(|error| error.to_string())?;
+        held.bundle = fresh;
+        Ok(0)
+    };
+    report(reload(), -1)
+}
+
+/// Returns the machines a bundle holds, as JSON.
+///
+/// `{"printer_models":[{"name","vendor_name","vendor_id","technology":"FFF",
+/// "variants":[{"id","printer_profiles":[{"name","extruders_cnt",
+/// "bed":{"width","height","max_print_height"}}]}]}]}`. One printer profile per
+/// machine, because a bundle here has one hardware configuration per machine preset
+/// where the reference slicers group several. `name` is what the other two calls are
+/// made with. Release the string with `hfw_string_free`.
+///
+/// # Safety
+///
+/// `bundle` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_bundle_printer_models(bundle: *const HfwBundle) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        if bundle.is_null() {
+            return Err("bundle handle is null".to_owned());
+        }
+        let held = unsafe { &*bundle };
+        CString::new(hfw_config::presets::printer_models(&held.bundle))
+            .map(CString::into_raw)
+            .map_err(|_| "the printer list contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Returns the profiles one machine accepts, as JSON.
+///
+/// `{"print_profiles":[{"name","filament_profiles":[...]}]}`: every process in the
+/// bundle, each listing every filament. Returns NULL with the reason when the machine is
+/// not in the bundle. Release the string with `hfw_string_free`.
+///
+/// # Safety
+///
+/// `bundle` must be a live handle and `printer` a readable string.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_bundle_profiles_for(
+    bundle: *const HfwBundle,
+    printer: *const c_char,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        if bundle.is_null() {
+            return Err("bundle handle is null".to_owned());
+        }
+        let printer = unsafe { text_of(printer, "printer") }?;
+        let held = unsafe { &*bundle };
+        let json = hfw_config::presets::profiles_for(&held.bundle, &printer)
+            .map_err(|error| error.to_string())?;
+        CString::new(json)
+            .map(CString::into_raw)
+            .map_err(|_| "the profile list contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Returns what a machine, a process and materials resolve to, as one JSON document.
+///
+/// `{"preset":{...},"configuration":{"print_settings":{...},
+/// "filament_settings":{...},"printer_settings":{...}},"warnings":[...]}` -- the
+/// shape a preset store already parses. Every setting carries the dialect name a panel
+/// files it under and the JSON type its value takes, taken from the same generated
+/// surface the panel reads, so the two cannot disagree about a name, a location or a
+/// type. `filaments` is a list of material preset names, of which the first non-empty
+/// one is used: this engine prints with one extruder.
+///
+/// The machine is required; a process or a material the bundle does not hold is a
+/// warning in the document rather than a failure. Release the string with
+/// `hfw_string_free`.
+///
+/// # Safety
+///
+/// `bundle` must be a live handle, `printer` and `print` readable strings, and
+/// `filaments` either null or `count` readable strings.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_bundle_resolved_config(
+    bundle: *const HfwBundle,
+    printer: *const c_char,
+    print: *const c_char,
+    filaments: *const *const c_char,
+    count: usize,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        if bundle.is_null() {
+            return Err("bundle handle is null".to_owned());
+        }
+        let printer = unsafe { text_of(printer, "printer") }?;
+        let print = unsafe { text_of(print, "print") }?;
+        let mut names = Vec::new();
+        if !filaments.is_null() {
+            let handles = unsafe { std::slice::from_raw_parts(filaments, count) };
+            for handle in handles {
+                names.push(unsafe { text_of(*handle, "filament") }?);
+            }
+        }
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let held = unsafe { &*bundle };
+        let json = hfw_config::presets::resolved_config(&held.bundle, &printer, &print, &borrowed)
+            .map_err(|error| error.to_string())?;
+        CString::new(json)
+            .map(CString::into_raw)
+            .map_err(|_| "the resolved configuration contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Returns one line saying what a bundle holds: its counts and any warnings.
+///
+/// Release the string with `hfw_string_free`.
+///
+/// # Safety
+///
+/// `bundle` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_bundle_summary(bundle: *const HfwBundle) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        if bundle.is_null() {
+            return Err("bundle handle is null".to_owned());
+        }
+        let held = unsafe { &*bundle };
+        CString::new(hfw_config::presets::summary(&held.bundle))
+            .map(CString::into_raw)
+            .map_err(|_| "the bundle summary contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
 }
 
 /// Returns the settings surface as a JSON document.
