@@ -572,3 +572,51 @@ replacements are possible:
   exactly the inference the buffer avoids.
 
 Measured cost of either: **not measured** (needs the application built).
+
+## Arrangement: the engine packs rectangles, so `Arranger` stays C++ (2026-11-21)
+
+**Decision: silhouette/NFP packing is not in scope for `crates/plate`.** `hfw_plate_arrange`
+is not a replacement for next-layer's `Arranger`, and next-layer should record `Arranger`
+as blocked-with-a-reason rather than port it onto it.
+
+The two are not the same algorithm with different constants:
+
+| | `crates/plate/src/arrange.rs` | next-layer `Arranger.cpp` |
+| --- | --- | --- |
+| footprint | the object's XY **bounding box** plus half the spacing | the **silhouette**: `project_mesh` with the translation zeroed, the polylines unioned into `ExPolygons` (holes kept) |
+| packer | MaxRects, best-short-side-fit, free space kept as rectangles | the engine's own **NFP** kernel, `Strategy::Overfit`, `scaled_offset = 3 mm` in int32 micrometres |
+| orientation | a quarter turn, or none | whatever `allow_rotations` lets the nester try |
+
+Why it stays out of the engine:
+
+- **The engine is not the plater.** A plate document carries the position of every
+  object and `--arrange`/`hfw_plate_arrange` leaves a positioned object where the file
+  put it. Arrangement exists for a command line handed bare meshes; the layout a user
+  sees is the application's, and it already runs there.
+- **It is a different class of work, not a bigger table.** Rectangle packing is a shelf
+  heuristic over a list of rectangles. Silhouette nesting needs the bed-plane outline of
+  a mesh (projection plus an exact integer union of up to 100k edges), no-fit polygons
+  between non-convex outlines *with holes*, and a search over placements and rotations.
+  Rough cost, if it were ever in scope: a `minkowski`/NFP pair in `crates/kernel` (the
+  workspace has no third-party maths library, so this is written here), ~1500–2500 lines
+  in `crates/plate`, a packing-quality measure (bed utilisation, not "did it fit") and a
+  fixture set of concave parts — and it must stay deterministic under `HFW_THREADS`.
+- **The gain is real but small on this engine's inputs.** Measured 2026-11-21 by
+  projecting each fixture's vertices and comparing the convex hull with the bounding
+  box (`trimesh` + `shapely`, so an upper bound on what silhouette packing can recover;
+  a concave part gains more, a cube gains nothing): sphere and cone 0.79, torus 0.79,
+  `stress_gear` 0.66, `taper_wall` 0.54, and every box-like fixture 1.00. A rectangle
+  therefore reserves up to 46% more bed than the part occupies — but on a 350 mm bed with
+  a handful of parts that changes what fits only when the plate is nearly full, or when a
+  part has a concavity another part could sit in, which is exactly the case a rectangle
+  packer cannot do at all.
+- **The gate cannot see the difference**, which is the trap: `arrange.rs`'s tests use
+  cubes, and two cubes pack identically under both. A port that "passes" would have
+  silently degraded every curved or concave part on a full plate.
+
+If rectangle packing is ever judged good enough, that is a decision to record, not a
+default: the cheap middle ground is the convex hull of the XY projection with
+convex–convex no-fit polygons (a Minkowski sum, ~200 lines, quarter turns only), which
+recovers the round-part case above and still cannot nest into a concavity. Until then
+`Arranger` is a legitimate C++ holdout, and the one thing that must not happen is
+`hfw_plate_arrange` being proposed as its replacement because both are called "arrange".
