@@ -44,6 +44,12 @@ int main(int argc, char **argv) {
     check(surface != NULL && strstr(surface, "\"status\": \"applied\"") != NULL,
           "the settings surface reports statuses");
 
+    const char *dialect = hfw_dialect_json();
+    check(dialect != NULL && strstr(dialect, "\"dialect\":\"hfw-dialect\"") != NULL,
+          "the dialect is a document that names itself");
+    check(dialect != NULL && strstr(dialect, "\"wall_loops\":\"perimeters\"") != NULL,
+          "the dialect carries the Orca spelling for perimeters");
+
     HfwMesh *mesh = hfw_mesh_load_file(argv[1]);
     check(mesh != NULL, "a mesh loads from a file");
     if (mesh == NULL) {

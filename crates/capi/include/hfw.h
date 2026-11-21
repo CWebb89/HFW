@@ -70,6 +70,18 @@ uint32_t hfw_abi_version(void);
 const char *hfw_settings_surface_json(void);
 
 /**
+ * Returns the dialect this engine accepts, as a JSON document.
+ *
+ * The pointer refers to a NUL-terminated string that lives for the life of the
+ * process; do not free it. `renames` maps an Orca/Bambu spelling to the engine's
+ * spelling, `applied` and `partial` map an engine setting to the key this engine uses,
+ * `orca_only` lists dialect names the engine has no setting for, and `engine_names` is
+ * every setting the engine defines. An importer that reads this accepts exactly the
+ * spellings this engine accepts, rather than keeping a table of its own that can drift.
+ */
+const char *hfw_dialect_json(void);
+
+/**
  * Opens the preset bundle under `root`: every preset file below it, indexed by kind and
  * name.
  *

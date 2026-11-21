@@ -1537,6 +1537,22 @@ pub extern "C" fn hfw_settings_surface_json() -> *const c_char {
         .as_ptr()
 }
 
+/// Returns the dialect this crate accepts as a JSON document.
+///
+/// The pointer refers to a NUL-terminated string that lives for the life of the process;
+/// do not free it. `renames` maps an Orca/Bambu spelling to the engine spelling,
+/// `applied` and `partial` map an engine setting to this engine's key, `orca_only` lists
+/// dialect names the engine has no setting for, and `engine_names` is every setting the
+/// engine defines. An importer that reads this accepts exactly the spellings this engine
+/// accepts, instead of keeping a table of its own.
+#[no_mangle]
+pub extern "C" fn hfw_dialect_json() -> *const c_char {
+    static DIALECT: OnceLock<CString> = OnceLock::new();
+    DIALECT
+        .get_or_init(|| CString::new(hfw_config::dialect::json()).unwrap_or_default())
+        .as_ptr()
+}
+
 /// Returns the message of the last failed call on this thread.
 ///
 /// The pointer stays valid until the next call on this thread. It is null when

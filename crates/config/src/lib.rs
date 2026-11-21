@@ -30,7 +30,7 @@
 mod alias_table;
 mod audit;
 mod bundle;
-mod dialect;
+pub mod dialect;
 mod dialect_table;
 mod error;
 mod expression;

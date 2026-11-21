@@ -788,3 +788,70 @@ convex–convex no-fit polygons (a Minkowski sum, ~200 lines, quarter turns only
 recovers the round-part case above and still cannot nest into a concavity. Until then
 `Arranger` is a legitimate C++ holdout, and the one thing that must not happen is
 `hfw_plate_arrange` being proposed as its replacement because both are called "arrange".
+
+## P8.5 What the generators read, and who owns it (2026-11-21)
+
+The generated settings tables used to be built by reading next-layer's own source. That
+made the gate depend on a tree somebody else is porting module by module, and twice it
+went red for a reason no commit here caused: `ForeignSettings.cpp` became
+`ForeignSettings.rs`, then `PresetImport.cpp` became `PresetImport.rs`, and each time
+section 29 failed with fifty-eight sections behind it unverified. Teaching the parser a
+second syntax each time is tolerating the coupling, not fixing it.
+
+The fix was to own the data. The dialect is this repository's decision — which spellings
+this engine accepts — so it lives here now.
+
+### Every input, and whether HFW could own it
+
+| input | what it is | was | owned here now? |
+|---|---|---|---|
+| `next-layer/upstream/.../ConfigDefsFDM.cpp` | upstream's FDM setting definitions: name, type, location, category, default, unit, enum spellings | external | **no, and should not be** — it is upstream's table, vendored as reference material. Copied here it would become a second truth about somebody else's engine |
+| `next-layer/upstream/.../ConfigCommon.cpp` | the options FFF and SLA share | external | no, same table, same reason |
+| `next-layer/upstream/.../Legacy/PrintConfig.cpp` | names the modern table dropped, so an old profile still loads | external | no, same table |
+| `next-layer/src/qt/assets/settings-layout.json` | which settings the application's panel offers, which decides whether a ledger row is reachable or internal | external | **no** — it is the application's UI inventory, and a copy here would describe a panel this repository does not draw. It is a JSON resource, not ported code, so it has no Rust twin to chase |
+| `ForeignSettings.cpp`, now `src/app/src/ForeignSettings.rs` | the Orca/Bambu renames next-layer's oracle gates | external, read every build | **yes** — `crates/config/assets/dialect.json`, `gated_renames` |
+| `PresetImport.cpp`, now `src/app/src/PresetImport.rs` | the rest of the renames its preset importer applies | external, read every build | **yes** — `crates/config/assets/dialect.json`, `importer_renames` |
+| `~/.config/OrcaSlicer/**/*.json` | which names Orca profiles actually carry | read live, so the generated table depended on whose profile directory was present | **yes** — snapshotted into the same asset as `orca_names` |
+
+The authority moved with the data: a rename next-layer adds is added here by an explicit
+commit, reviewed like any other. `tools/refresh-dialect.py` proposes that update from
+next-layer's current tree and lists the paths it tried; it is not part of the gate, so a
+port there cannot turn the gate red. The gate reads `crates/config/assets/dialect.json`
+and nothing else for the dialect.
+
+And it flows back: `hfw_dialect_json()` exports the same document the engine applies —
+`renames`, `applied`, `partial`, `orca_only`, `engine_names` — so next-layer can delete
+`ForeignSettings` and read the renames from the engine instead of keeping a second copy
+that can drift. That is a next-layer commit, not one made from here.
+
+### What is still outside this repository
+
+One list, in `tools/external_inputs.py`, `EXTERNAL_INPUTS`: each entry names what the
+input is, who owns it, and **every path it may live at** — including the `.rs` twin for
+files that are being ported. A missing input prints all of them and stops:
+
+```
+missing panel: which settings the application's panel actually offers, ...
+  tried: /home/cwebb/dev/next-layer/src/qt/assets/settings-layout.json
+  owner: next-layer's own UI inventory. A JSON resource, not ported code, so it has no
+         Rust twin; it moves only if the panel is redesigned
+```
+
+Four entries remain: upstream's three C++ files and the panel inventory. Nothing in
+`crates/config` is generated from next-layer's own source any more.
+
+### The day `next-layer/upstream` is deleted
+
+The ledger, the surface and the dialect table are all measured against upstream's
+definition table; without it there is nothing to measure coverage against, and the
+honest consequence is that the ledger is frozen at its last generated state rather than
+regenerated from a partial tree — a table built from whichever files happened to be
+present would report `missing` about settings it had never seen, which is the one failure
+mode a generated inventory must not have.
+
+If upstream is ever vendored out of next-layer, the move is to snapshot the definition
+table into `crates/config/assets/engine-definitions.json` and have
+`tools/external_inputs.py` read that — `engine_definitions()` already returns exactly the
+structure the snapshot needs, so it is a writer and a switch, not a redesign. Until then
+the gate requires `next-layer/upstream`, and section 29's failure names the path it
+looked for instead of failing halfway through the run.

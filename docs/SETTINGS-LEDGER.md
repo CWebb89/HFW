@@ -852,10 +852,12 @@ are accepted-and-mapped, not implemented as separate behaviour.
 
 ## Orca dialect words
 
-Measured from `~/.config/OrcaSlicer`. Orca renamed a large part of the
+Measured from the Orca profile snapshot in
+`crates/config/assets/dialect.json`. Orca renamed a large part of the
 dialect, so these are the *same settings under a different word*, not new
-ones. The mapping is next-layer's own table in `ForeignSettings.cpp`, which
-`oracle/foreign_settings_check.py` already gates. HFW must accept every
+ones. The mapping is this repository's own dialect table, which is
+generated into `dialect_table.rs` and exported to the application as
+`hfw_dialect_json`. HFW must accept every
 left-hand name and apply it to the right-hand behaviour.
 
 | Orca name | Engine setting | HFW status |

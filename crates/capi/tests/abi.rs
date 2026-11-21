@@ -518,6 +518,28 @@ fn a_disabled_plate_object_leaves_the_job() {
 }
 
 #[test]
+fn the_dialect_an_importer_reads_is_the_one_this_engine_applies() {
+    let raw = hfw_capi::hfw_dialect_json();
+    assert!(!raw.is_null());
+    let text = unsafe { CStr::from_ptr(raw) }
+        .to_str()
+        .expect("the dialect is UTF-8");
+    assert!(text.starts_with('{'), "not one JSON document: {text}");
+    assert!(text.contains("\"dialect\":\"hfw-dialect\""));
+    assert!(
+        text.contains("\"wall_loops\":\"perimeters\""),
+        "the document does not carry the Orca spelling for perimeters"
+    );
+    assert!(text.contains("\"engine_names\":["));
+    assert!(
+        text.matches("\":\"").count() > 200,
+        "the renames and the key maps are mostly missing"
+    );
+    let again = unsafe { CStr::from_ptr(hfw_capi::hfw_dialect_json()) };
+    assert_eq!(text, again.to_str().expect("still UTF-8"));
+}
+
+#[test]
 fn the_settings_surface_arrives_as_one_json_document() {
     let raw = hfw_capi::hfw_settings_surface_json();
     assert!(!raw.is_null());

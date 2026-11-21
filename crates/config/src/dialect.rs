@@ -44,6 +44,60 @@ pub enum Intake {
     Unknown,
 }
 
+/// The dialect this crate accepts, as one JSON document.
+///
+/// This is what lets an application stop keeping its own copy of the rename table: an
+/// importer that reads `renames` accepts the same spellings this crate accepts, and one
+/// that reads `applied` gets the same keys for them. `renames` maps an Orca/Bambu spelling
+/// to the engine spelling, `applied` and `partial` map an engine setting to this crate's
+/// key (the two mean the same thing, or the ledger's note says how they differ), and
+/// `orca_only` lists names Orca profiles carry that the engine has no setting for.
+///
+/// Names come from the container format and contain only lowercase letters, digits and
+/// underscores, so nothing here needs escaping.
+pub fn json() -> String {
+    let mut out = String::from("{\"dialect\":\"hfw-dialect\",\"version\":1");
+
+    out.push_str(",\"engine_names\":[");
+    for (index, name) in ENGINE_NAMES.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
+    }
+    out.push(']');
+
+    for (field, pairs) in [
+        ("renames", RENAMES),
+        ("applied", APPLIED),
+        ("partial", PARTIAL),
+    ] {
+        out.push_str(&format!(",\"{field}\":{{"));
+        for (index, (left, right)) in pairs.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!("\"{left}\":\"{right}\""));
+        }
+        out.push('}');
+    }
+
+    out.push_str(",\"orca_only\":[");
+    for (index, name) in ORCA_ONLY.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
+    }
+    out.push(']');
+    out.push('}');
+    out
+}
+
 /// The result of feeding a preset to the engine.
 #[derive(Debug, Clone, Default)]
 pub struct IntakeReport {

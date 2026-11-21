@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
 """Generate docs/SETTINGS-LEDGER.md, the settings-coverage checklist for HFW.
 
-Inputs, all on this machine, all machine-generated rather than typed:
+Inputs, all machine-generated rather than typed. Everything outside this
+repository is listed once, in `tools/external_inputs.py`:
 
-  next-layer/upstream/src/slic3r-domain/src/Slic3r/Domain/ConfigDefsFDM.cpp
-      the FDM engine's authoritative definition table (what the app enumerates)
-  next-layer/upstream/src/slic3r-domain/src/Slic3r/Domain/ConfigCommon.cpp
+  next-layer/upstream/.../ConfigDefsFDM.cpp
+      upstream's authoritative definition table (what the app enumerates)
+  next-layer/upstream/.../ConfigCommon.cpp
       options shared by FFF and SLA
-  next-layer/upstream/src/slic3r-shared/src/Slic3r/Biz/Config/Legacy/PrintConfig.cpp
+  next-layer/upstream/.../Legacy/PrintConfig.cpp
       the legacy table, for names the modern table dropped
+  next-layer/src/qt/assets/settings-layout.json
+      which settings the application's panel offers, which is what makes a row
+      reachable or internal
+
+And from this repository:
+
   crates/config/src/parse.rs
       the key names HFW's parser accepts today
-  ~/.config/OrcaSlicer/**/*.json
-      which names Orca actually uses in profiles (optional, skipped if absent)
+  crates/config/assets/dialect.json
+      the dialect: Orca/Bambu spelling -> engine spelling. Owned here rather than
+      read out of next-layer's source, so a port there cannot turn the gate red;
+      `tools/refresh-dialect.py` proposes an update as a reviewed diff
+  crates/config/assets/dialect.json's `orca_names`
+      which names Orca actually uses in profiles, snapshotted when the dialect was
+      last refreshed, so the table does not depend on whose profile directory is
+      present
 
 Output is a markdown ledger: one row per setting, with a tier (implementation
 cost class) and a status (measured against HFW's parser today). Tiers are
@@ -28,29 +41,20 @@ import sys
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-HFW = Path(__file__).resolve().parent.parent
-NEXT_LAYER = next(
-    (path for path in (HFW.parent, HFW.parent.parent) if (path / "next-layer").is_dir()),
-    HFW.parent,
-) / "next-layer"
-DOMAIN = NEXT_LAYER / "upstream/src/slic3r-domain/src/Slic3r/Domain"
-LEGACY = (
-    NEXT_LAYER
-    / "upstream/src/slic3r-shared/src/Slic3r/Biz/Config/Legacy/PrintConfig.cpp"
-)
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import external_inputs as external
+
+HFW = HERE.parent
 HFW_PARSE = HFW / "crates/config/src/parse.rs"
 SURFACE = HFW / "crates/config/assets/settings-surface.json"
 SURFACE_TABLE = HFW / "crates/config/src/surface_table.rs"
 PER_OBJECT = HFW / "crates/engine/src/settings_key.rs"
-FOREIGN_SETTINGS = NEXT_LAYER / "src/qt/src/ForeignSettings.cpp"
-PRESET_IMPORT = NEXT_LAYER / "src/qt/src/PresetImport.cpp"
-PORT_ROOT = NEXT_LAYER / "src/app/src"
 LOOP_AXES = ("x", "y", "z", "e")
 LOOP_PREFIXES = ("machine_max_feedrate_", "machine_max_acceleration_",
                  "machine_max_jerk_")
 PER_TOOL_EXTRAS = ("nozzle_diameter",)
-HFW_PROFILES = HFW / "profiles"
-ORCA_CONFIG = Path.home() / ".config/OrcaSlicer"
 
 EMIT_PREFIXES = ("start_gcode", "end_gcode", "before_layer_gcode", "layer_gcode",
                  "toolchange_gcode", "between_objects_gcode", "color_change_gcode",
@@ -588,215 +592,18 @@ Tier n/a — not applicable to a Klipper FDM target (SLA, colour mixing, Bambu f
 Tier int — not surfaced by any UI and not read here; excluded, with the reason on the row.\
 """
 
-ADD_RE = re.compile(r'def\s*=\s*defs\.add\(\s*"([a-z0-9_]+)",\s*typeid\(([^)]*)\)\s*\)')
-LEGACY_ADD_RE = re.compile(r'def\s*=\s*this->add\(\s*"([a-z0-9_]+)",\s*(co[A-Za-z]+)\s*\)')
-
-
-LAYOUT = NEXT_LAYER / "src/qt/assets/settings-layout.json"
-
-
-def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
-
-
-def app_surface():
-    if not LAYOUT.exists():
-        return None
-    layout = json.loads(LAYOUT.read_text(encoding="utf-8", errors="replace"))
-    keys = set()
-    for pages in layout.get("tabs", {}).values():
-        for page in pages:
-            for section in page.get("sections", []):
-                keys.update(section.get("settings", []))
-    return keys
-
-
-def first_arg(block: str, call: str) -> str:
-    start = block.find(f"{call}(")
-    if start == -1:
-        return ""
-    depth = 0
-    for index in range(start + len(call) + 1, len(block)):
-        char = block[index]
-        if char in "([{":
-            depth += 1
-        elif char in ")]}":
-            if depth == 0:
-                return block[start + len(call) + 1:index].strip()
-            depth -= 1
-        elif char == "," and depth == 0:
-            return block[start + len(call) + 1:index].strip()
-    return ""
-
-
-def parse_modern(path: Path):
-    text = strip_comments(path.read_text(encoding="utf-8", errors="replace"))
-    entries = OrderedDict()
-    matches = list(ADD_RE.finditer(text))
-    for index, match in enumerate(matches):
-        name, ctype = match.group(1), match.group(2)
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        block = text[match.end():end]
-        locations = re.findall(r"def->location = (\w+);", block)
-        locations += re.findall(r"def->locations = \{([^}]*)\}", block)
-        category = re.search(r"def->category = ConfigItemDef::Category::(\w+);", block)
-        default = first_arg(block, "init_with") or first_arg(block, "SET_DEFAULT")
-        enums = re.findall(r'int\([A-Za-z_:\w]+\)\s*,\s*"([a-z0-9_]+)"', block)
-        unit = re.search(r'def->sidetext = L\("([^"]+)"\)', block)
-        if not unit:
-            unit = re.search(r'def->units = \{L\("([^"]+)"\)', block)
-        entries[name] = {
-            "type": ctype,
-            "locations": ",".join(sorted(set(locations))) or "?",
-            "category": category.group(1) if category else "",
-            "default": clean_default(default) if default else "",
-            "enums": enums,
-            "unit": unit.group(1) if unit else "",
-            "source": path.name,
-        }
-    return entries
-
-
-def parse_legacy(path: Path):
-    text = path.read_text(encoding="utf-8", errors="replace")
-    types: dict[str, str] = {}
-    for name, ctype in LEGACY_ADD_RE.findall(text):
-        types.setdefault(name, ctype)
-    return set(types), types
-
-
-def clean_default(raw: str) -> str:
-    flat = " ".join(raw.split())
-    flat = flat.replace("std::string(", "").replace("std::vector<std::string>", "")
-    if len(flat) > 48:
-        flat = flat[:45] + "..."
-    return flat
-
 
 def hfw_keys():
     keys = set()
     if HFW_PARSE.exists():
         keys.update(re.findall(r'^\s+"([a-z0-9_]+)" =>', HFW_PARSE.read_text(), re.M))
-    for profile in HFW_PROFILES.glob("*.cfg"):
+    for profile in (HFW / "profiles").glob("*.cfg"):
         for line in profile.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             keys.add(line.split("=", 1)[0].strip())
     return {key for key in keys if re.fullmatch(r"[a-z0-9_]+", key)}
-
-
-ORCA_METADATA = {
-    "inherits", "inherits_group", "from", "name", "instantiation", "version",
-    "is_custom_defined", "setting_id", "filament_id", "filament_vendor",
-    "compatible_printers", "compatible_printers_condition",
-    "other_compatible_printers", "printer_model", "printer_variant",
-    "printer_settings_id", "print_settings_id", "filament_settings_id",
-    "default_print_profile", "default_filament_profile", "type", "url",
-    "description", "rename", "include", "upward_compatible_machine",
-    "compatible_machine", "different_settings_to_system", "exclude_selected",
-}
-
-
-def orca_keys():
-    if not ORCA_CONFIG.is_dir():
-        return None
-    found = set()
-    for path in ORCA_CONFIG.glob("**/*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        except Exception:
-            continue
-        if not isinstance(data, dict):
-            continue
-        for key, value in data.items():
-            if key in ORCA_METADATA or not re.fullmatch(r"[a-z0-9_]+", key):
-                continue
-            if isinstance(value, (str, int, float, bool, list)):
-                found.add(key)
-    return found
-
-
-def loop_generated(path: Path):
-    text = path.read_text(encoding="utf-8", errors="replace")
-    entries = {}
-    for prefix in LOOP_PREFIXES:
-        marker = f'defs.add("{prefix}" + axis.name'
-        if marker not in text:
-            continue
-        block_start = text.index(marker)
-        block_end = text.find("def = defs.add(", block_start + len(marker))
-        block = text[block_start:block_end if block_end != -1 else len(text)]
-        version = re.search(r'"([a-z0-9_]+)"', block)
-        for axis in LOOP_AXES:
-            entries[f"{prefix}{axis}"] = {
-                "type": "std::vector<double>",
-                "locations": "Printer",
-                "category": "Machine Limits",
-                "default": " ".join((version.group(1) if version else "").split())[:48],
-                "enums": [],
-                "unit": "",
-                "source": path.name,
-            }
-    return entries
-
-
-def parse_foreign(path: Path):
-    """Orca/Bambu name -> engine name, from the C++ table or its Rust port.
-
-    The table has crossed the boundary once already: next-layer's port moved it to
-    `src/app/src/ForeignSettings.rs`, where the names and the value spellings are two
-    separate tables rather than the one `QStringLiteral` list the C++ held. Reading
-    either is what keeps this generator from reporting that the dialect vanished.
-    """
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if path.suffix == ".rs":
-        table = re.search(
-            r"const RENAMED: \[\(&str, &str\); (\d+)\] = \[(.*?)\n\];", text, re.S
-        )
-        if table is None:
-            raise SystemExit(f"{path}: no RENAMED table; the dialect table moved again")
-        pairs = re.findall(
-            r'\(\s*"([a-z0-9_]+)"\s*,\s*"([a-z0-9_]+)"\s*\)', table.group(2)
-        )
-        if len(pairs) != int(table.group(1)):
-            raise SystemExit(
-                f"{path}: the table declares {table.group(1)} renames and "
-                f"{len(pairs)} were read; the syntax changed under this parser"
-            )
-        return {foreign: engine for foreign, engine in pairs}
-    pairs = re.findall(
-        r'\{QStringLiteral\("([a-z0-9_]+)"\),\s*QStringLiteral\("([a-z0-9_]+)"\)\}',
-        text,
-    )
-    return {foreign: engine for foreign, engine in pairs}
-
-
-def parse_import(path: Path):
-    """The importer's own renames, from the C++ table or its Rust port."""
-    text = path.read_text(encoding="utf-8", errors="replace")
-    pairs = re.findall(
-        r'[{(]\s*"([a-z0-9_]+)"\s*,\s*"([a-z0-9_]+)"\s*,\s*Transform::\w+',
-        text,
-    )
-    return {foreign: engine for foreign, engine in pairs}
-
-
-def dialect_renames():
-    """Orca/Bambu spelling -> engine spelling, from both proven tables.
-
-    The importer carries the keys the application renames and the foreign-settings
-    table the ones its oracle gates. They overlap and disagree on four keys, so the
-    gated table wins: `overhang_1_4_speed` and its neighbours are
-    quarter-of-the-perimeter speeds whose index the two files number differently, and
-    `infill_combination` means different layers there. A key only the importer renames
-    is still a real rename -- without them a machine preset's `printable_area` and
-    `machine_max_speed_x` never reach this engine.
-    """
-    pairs = parse_import(preset_import())
-    pairs.update(parse_foreign(foreign_settings()))
-    return pairs
 
 
 def tier_for(name: str, entry: dict, surface: set | None) -> str:
@@ -1200,73 +1007,32 @@ def backlog_document(rows) -> str:
     ]
     return "\n".join(out)
 
-def resolve_source(cpp: Path) -> Path | None:
-    """Whichever file holds this table today: the C++ original, or its Rust port.
-
-    next-layer is porting module by module, and a module that moves takes the table
-    this generator reads with it -- `ForeignSettings.cpp` became
-    `src/app/src/ForeignSettings.rs` and the gate went red for four commits. A port
-    keeps the module name, so the twin is the same stem under the Rust app root.
-    """
-    if cpp.exists():
-        return cpp
-    ported = PORT_ROOT / f"{cpp.stem}.rs"
-    return ported if ported.exists() else None
-
-
 def require_inputs() -> int:
-    """Refuses to generate from an incomplete external tree.
+    """Refuses to generate from an incomplete tree, naming every path tried.
 
-    A missing source must stop the run rather than shrink the table. Both artifacts are
-    what stops a profile being silently mistranslated, so a table built from whichever
-    files happened to be present reports `missing` about settings it has never seen --
-    the one failure mode a generated inventory must not have. Every input therefore
-    names both places it can live, so the message says what to repoint rather than
-    only what is absent.
+    A missing source must stop the run rather than shrink the table: both artifacts
+    are what stops a profile being silently mistranslated, so a table built from
+    whichever files happened to be present would report `missing` about settings it
+    had never seen -- the one failure mode a generated inventory must not have.
+
+    The dialect is this repository's (`crates/config/assets/dialect.json`); what is
+    still read outside it is upstream's definition table and the application's panel
+    inventory, listed once in `tools/external_inputs.py` with every path each may
+    live at.
     """
-    required = (
-        DOMAIN / "ConfigDefsFDM.cpp",
-        DOMAIN / "ConfigCommon.cpp",
-        FOREIGN_SETTINGS,
-        PRESET_IMPORT,
-        HFW_PARSE,
-    )
-    missing = [path for path in required if resolve_source(path) is None]
-    for path in missing:
-        print(f"missing input: {path}", file=sys.stderr)
-        if path.parent != HFW:
-            print(f"  also looked for: {PORT_ROOT / f'{path.stem}.rs'}", file=sys.stderr)
-    return 1 if missing else 0
-
-
-def foreign_settings() -> Path:
-    """The dialect table, wherever the port last left it."""
-    path = resolve_source(FOREIGN_SETTINGS)
-    if path is None:
-        raise SystemExit(
-            f"no dialect table: neither {FOREIGN_SETTINGS} nor "
-            f"{PORT_ROOT / 'ForeignSettings.rs'} exists"
-        )
-    return path
-
-
-def preset_import() -> Path:
-    """The importer's rename table, wherever the port last left it."""
-    path = resolve_source(PRESET_IMPORT)
-    if path is None:
-        raise SystemExit(
-            f"no import table: neither {PRESET_IMPORT} nor "
-            f"{PORT_ROOT / 'PresetImport.rs'} exists"
-        )
-    return path
+    try:
+        external.require()
+    except external.Missing as missing:
+        print(missing, file=sys.stderr)
+        return 1
+    return 0
 
 
 def main() -> int:
     status = require_inputs()
     if status != 0:
         return status
-    entries = parse_modern(DOMAIN / "ConfigDefsFDM.cpp")
-    entries.update(loop_generated(DOMAIN / "ConfigDefsFDM.cpp"))
+    entries = external.engine_definitions()
     for name in PER_TOOL_EXTRAS:
         entries.setdefault(name, {
             "type": "std::vector<double>",
@@ -1277,16 +1043,12 @@ def main() -> int:
             "unit": "mm",
             "source": "ConfigBoxesFDM",
         })
-    common = parse_modern(DOMAIN / "ConfigCommon.cpp")
-    for name, entry in common.items():
-        entry["source"] = "ConfigCommon.cpp"
-        entry["category"] = entry["category"] or "Common"
-        entries.setdefault(name, entry)
 
-    legacy_names, legacy_types = parse_legacy(LEGACY)
+    legacy_types = external.legacy_names()
+    legacy_names = set(legacy_types)
     hfw = hfw_keys()
-    orca = orca_keys()
-    foreign = parse_foreign(foreign_settings())
+    orca = external.orca_names()
+    foreign = external.gated_renames()
 
     alias_index = {}
     for hfw_key, (prusa_key, status, note) in HFW_ALIAS.items():
@@ -1296,7 +1058,7 @@ def main() -> int:
         alias_index.setdefault(engine_name, (hfw_key, status, note))
 
     rows = []
-    surface = app_surface()
+    surface = external.panel_surface()
     for name, entry in entries.items():
         tier = tier_for(name, entry, surface)
         status, via = status_for(name, hfw, alias_index)
@@ -1460,10 +1222,12 @@ def main() -> int:
     if orca_extra:
         add("## Orca dialect words")
         add("")
-        add("Measured from `~/.config/OrcaSlicer`. Orca renamed a large part of the")
+        add("Measured from the Orca profile snapshot in")
+        add("`crates/config/assets/dialect.json`. Orca renamed a large part of the")
         add("dialect, so these are the *same settings under a different word*, not new")
-        add("ones. The mapping is next-layer's own table in `ForeignSettings.cpp`, which")
-        add("`oracle/foreign_settings_check.py` already gates. HFW must accept every")
+        add("ones. The mapping is this repository's own dialect table, which is")
+        add("generated into `dialect_table.rs` and exported to the application as")
+        add("`hfw_dialect_json`. HFW must accept every")
         add("left-hand name and apply it to the right-hand behaviour.")
         add("")
         add("| Orca name | Engine setting | HFW status |")
