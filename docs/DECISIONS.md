@@ -604,3 +604,28 @@ The project part grew a `placement` attribute on `<volume>` and the format versi
 9; an older file opens with every volume at its own coordinates, which is what version 8
 meant. Reverses by dropping the id type and the placement field, and by writing no
 `placement` attribute — files then read as version 8 plates.
+
+## An undo step is a snapshot, and the geometry in it is shared
+
+`Plate::snapshot` returns the whole document and `Plate::restore` puts it back. The
+choice that makes it usable is that geometry is not copied: `PlateObject` and
+`PlateVolume` hold `Arc<Mesh>`, so a snapshot is one pointer per object, and the first
+write to an object after a snapshot copies that object's mesh through `Arc::make_mut`
+and leaves the snapshot with the triangles it was taken with.
+
+The alternative was a snapshot of the *plate's* bytes — a project file in memory — which
+is a full serialisation and reparse per undo step: on a plate of 25 MB STL parts that is
+seconds and a second copy, and it makes undo depend on the file format staying readable.
+The second alternative was sharing the whole `PlateObject` behind one `Arc`, which shares
+paint and settings too; it was rejected because `Plate::objects()` hands out a slice of
+objects and a `Vec<Arc<PlateObject>>` cannot, so the catalogue would have been paid for
+by every caller to save a copy of a byte per triangle.
+
+What a snapshot holds is everything: objects with their ids, geometry, placements, paint,
+settings, volumes, layer heights, the timeline, the in-layer strokes, the caller's bytes
+and the next-id counter. A partial snapshot is a trap — the caller restores it and the
+document prints differently from the one it claims to reproduce — and the counter is in
+there so undo followed by an edit cannot reissue an id a selection or a paint session
+still holds. Reverses by dropping the snapshot module and the four exports; nothing else
+depends on them, and the `Arc` stays a `Mesh` again with one `Arc::new` removed per
+construction.

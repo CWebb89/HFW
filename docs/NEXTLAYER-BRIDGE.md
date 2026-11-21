@@ -209,21 +209,60 @@ what was read; and requires the two project files to be identical byte for byte
 (13,650 bytes). A field the engine holds but cannot give up therefore fails a gate
 rather than going missing quietly.
 
+### An undo step is a snapshot, and it costs pointers (2026-11-21)
+
+Reading a plate back answers "what is in the engine"; undo asks a second question —
+"what was in it, so it can be put back". `PlateDocument::Snapshot` holds the objects,
+the selection and the active plate, and it is cheap only because the app shares each
+object's immutable mesh between snapshots; a document the engine owns has to be able
+to do the same thing, or every undo step is a copy of the plate.
+
+`hfw_plate_snapshot` returns the plate as an opaque handle, and `hfw_plate_restore`
+puts one back. What it holds is the whole document — objects with their ids,
+geometry, placements, paint, settings, volumes and layer heights, the timeline, the
+in-layer strokes, the caller's bytes, and the counter that hands out the next id —
+because a restore that left any of those behind would be a document that prints
+differently from the one it claims to reproduce. The id counter is in there so that
+undoing and then adding a part cannot hand out an id a selection, a paint session or
+another undo step still holds.
+
+**The geometry is shared, not copied.** Each object's mesh is behind an `Arc` in
+`crates/plate`, so a snapshot is one pointer per object and one counter bump; the
+first write to an object after that copies its geometry (`Arc::make_mut`) and leaves
+the snapshot holding the triangles it was taken with. That is the same trade the
+application already made with `shared_ptr<TriangleMesh>`, which is why a stack of
+undo steps here costs the document plus the edits made since, not one document per
+step — `crates/plate/src/snapshot.rs` asserts the pointer identity, the copy on
+write, and that a snapshot outlives its plate and restores into another one.
+
+Two consequences worth stating. A snapshot is *not* a project file: restoring keeps
+the plate in memory and touches no bytes, so an undo step neither re-parses 25 MB of
+STL nor risks the file being the thing that disagrees. And a restore is total: what
+the snapshot does not hold, the plate does not keep.
+
+The visible defect this closed while being tested: `Settings::key_value` wrote a
+percentage as `f64` multiplication would, so a panel that set 55 % read back
+`55.00000000000001%`. It now prints the shortest decimal that parses back to the
+share it came from, and `crates/engine/src/settings_key.rs` pins six of them — a
+read-back that a settings panel shows has to be the text the engine took.
+
 ### What next-layer has not declared (2026-11-21)
 
-`next-layer/src/app/src/hfw.rs` declares **28** of the **89** functions
-`crates/capi/include/hfw.h` exports, so a 61-row gap sits between what the engine
-can do and what the application has told its own compiler about. Counted with
-`grep -oE '\bhfw_[a-z0-9_]+\s*\(' <file> | sort -u`, one row per symbol: the
-brief's 29 and 86 are one higher on each side, which is what counting
-`HFW_ABI_VERSION` — a `#define`, not an exported function — would do.
+`next-layer/src/app/src/hfw.rs` declares **52** of the **95** functions
+`crates/capi/include/hfw.h` exports, so a 43-row gap sits between what the engine
+can do and what the application has told its own compiler about. Recounted
+2026-11-21 by adding an export, against the header and against that file, one row
+per symbol:
 
-The 28 declared are exactly the mesh-and-slice core: load, transform, bounds,
-vertices, indices, volume, free; plate new/add/placement/enabled/remove/arrange/
-bounds/slice; gcode text/len/verified/free. Everything the document, the timeline,
-the preview, the threaded job and the project file need is exported and undeclared.
-**Nothing is missing from the engine for these four modules**; the gap is on the
-application's side of the boundary.
+    grep -oE '\bhfw_[a-z0-9_]+\s*\(' crates/capi/include/hfw.h | sort -u | wc -l
+    grep -oE '\bfn hfw_[a-z0-9_]+' ../next-layer/src/app/src/hfw.rs | sort -u | wc -l
+
+The number in the previous version of this paragraph, 28 of 89, was the gap measured
+before the application's own boundary file grew: the mesh-and-slice core is still
+the base of it, and the project file, the snapshot read-back, the timeline, the
+in-layer strokes and the caller's bytes have since been declared too. What remains
+is the document's edit gestures and the threaded job — **nothing is missing from the
+engine for those**; the gap is on the application's side of the boundary.
 
 Module names are next-layer's own: `HfwEngine` (the boundary helpers in
 `HfwEngine.cpp` — snapshot, round trip, slice), `PlateDocument` (the document and
@@ -235,14 +274,9 @@ next-layer would call it today.
 | --- | --- | --- | --- |
 | `hfw_settings_surface_json` | every setting with its dialect name, status and per-object flag, plus the capability backlog | PresetStore | static, do not free |
 | `hfw_mesh_load_extensions` | the extensions `hfw_mesh_load_file` reads, for a file dialog | PlateDocument (`importWildcards`) | static, do not free |
-| `hfw_mesh_stl_bytes` | a mesh as binary or ASCII STL bytes | SliceRuntime (a plate goes in as one STL) and PlateDocument (project save) | `hfw_buffer_free` |
-| `hfw_mesh_new` | a mesh from vertices and indices, triangle order kept so paint stays aligned | HfwEngine (rebuilding a snapshot) | `hfw_mesh_free` |
-| `hfw_mesh_cut` | a mesh split by a plane into two closed halves | PlateDocument (`cutMesh`) | `hfw_mesh_free` ×2 |
 | `hfw_mesh_part_count` | how many separate shells a mesh holds | — nothing splits shells today | none |
 | `hfw_mesh_part` | one shell as its own mesh handle | — same | `hfw_mesh_free` |
 | `hfw_text_mesh` | a text string extruded into a closed prism | PlateDocument (`Text.cpp`, emboss) | `hfw_mesh_free` |
-| `hfw_mesh_paint_set` | writes a per-triangle channel on a mesh handle | — paint lives on plate objects | none |
-| `hfw_mesh_paint_get` | reads a mesh handle's channel back | — same | none |
 | `hfw_plate_object_name` | renames an object in place | PlateDocument (`renameObject`) | none |
 | `hfw_plate_object_bake` | folds an object's placement into its triangles | SliceRuntime (before the one-STL handoff) | none |
 | `hfw_plate_object_duplicate` | copies an object and returns the copy's id | PlateDocument (`duplicateObject`) | none |
@@ -250,7 +284,6 @@ next-layer would call it today.
 | `hfw_plate_object_mirror` | mirrors an object in place, winding corrected | PlateDocument (mirror tool) | none |
 | `hfw_plate_object_set` | one print-level setting on one object, by name and value | PlateDocument (`setObjectSetting`) | none |
 | `hfw_plate_object_clear_settings` | drops every override an object carries | PlateDocument | none |
-| `hfw_plate_object_paint` | writes a support or seam channel on one object | PlateDocument (paint brush) | none |
 | `hfw_plate_object_add_volume` | attaches a part, negative or modifier volume, returns its id | PlateDocument (`addVolume`) | none |
 | `hfw_plate_object_add_volume_placed` | the same, with the volume placed inside the object | PlateDocument (`addVolume`) | none |
 | `hfw_plate_object_volume_placement` | moves or scales a volume inside its object | PlateDocument (`setVolumePosition`, `setVolumeScale`, `setVolumeRotation`) | none |
@@ -260,49 +293,39 @@ next-layer would call it today.
 | `hfw_plate_object_volume_count` | how many volumes an object carries | PlateDocument (`volumes`) | none |
 | `hfw_plate_object_volume_kind` | which of the five kinds a volume is, by id | PlateDocument (`volumes`) | none |
 | `hfw_plate_volume_set` | one setting on a modifier volume, on top of the object's | PlateDocument (`setVolumeSetting`) | none |
-| `hfw_plate_object_layer_heights` | an object's own `(z, height)` pairs | PlateDocument (variable layer height) | none |
 | `hfw_plate_object_bounds` | one object's bounds on the bed | PlateDocument (`volumeInfo`, object size) | none |
 | `hfw_plate_object_ids` | every id on the plate, in insertion order | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_plate_object_name_get` | reads an object's name back | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_plate_object_placement_get` | reads an object's placement back | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_plate_object_enabled_get` | reads whether an object prints | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_plate_object_mesh` | an object's geometry as a new handle, paint included | HfwEngine (`readPlateSnapshot`, round trip) | `hfw_mesh_free` |
-| `hfw_plate_object_settings_json` | an object's overrides as the rows `_set` accepts | HfwEngine (`readPlateSnapshot`) | `hfw_string_free` |
 | `hfw_plate_object_volume_mesh` | a volume's geometry as a new handle | HfwEngine (`readPlateSnapshot`) | `hfw_mesh_free` |
-| `hfw_plate_object_volume_settings_json` | a modifier volume's settings as JSON rows | HfwEngine (`readPlateSnapshot`) | `hfw_string_free` |
-| `hfw_plate_object_paint_get` | reads an object's channel back | HfwEngine (`readPlateSnapshot`) | none |
-| `hfw_plate_object_layer_heights_get` | reads an object's own layer heights back | HfwEngine (`readPlateSnapshot`) | none |
-| `hfw_plate_set_metadata` | stores the application's own bytes with the plate | HfwEngine (`savePlateDocument`) | none |
-| `hfw_plate_metadata_get` | returns those bytes, NUL-terminated, length reported | HfwEngine (`readPlateDocument`) | `hfw_buffer_free` |
 | `hfw_plate_project_bytes` | the plate as a project `.3mf`, with this engine's own part beside it | HfwEngine (`savePlateDocument`) | `hfw_buffer_free` |
 | `hfw_plate_open_project` | a plate read back from project bytes | HfwEngine (`readPlateDocument`) | `hfw_plate_free` |
+| `hfw_plate_snapshot` | the whole document as it is now, sharing its geometry with the plate | PlateDocument (`pushUndo`) | `hfw_snapshot_free` |
+| `hfw_plate_restore` | puts a snapshot back, ids and id counter included | PlateDocument (`restore`) | none |
+| `hfw_snapshot_free` | releases a snapshot; the geometry is shared, so this frees pointers | every undo stack that pops a step | owns itself |
+| `hfw_snapshot_object_count` | how many objects a snapshot holds | — nothing needs it that cannot read the plate | none |
 | `hfw_plate_slice_placed` | slices the plate after centring it on the profile's bed | SliceRuntime (`sliceWithHfw(placeOnBed)`) | `hfw_gcode_free` |
 | `hfw_slice_meshes` | slices a bare list of meshes with no document | — every next-layer slice goes through a plate | `hfw_gcode_free` |
 | `hfw_plate_preview_json` | every planned bead per layer as JSON, labelled as the file is | SliceRuntime (preview, phase 4) | `hfw_string_free` |
-| `hfw_plate_set_in_layer` | sets the calibration strokes printed inside a layer | SliceRuntime (`PlateInLayerPolyline`) | none |
-| `hfw_plate_in_layer_count` | how many strokes the plate carries | SliceRuntime | none |
-| `hfw_plate_in_layer_points` | how many points stroke *i* has, to size a buffer | SliceRuntime | none |
-| `hfw_plate_in_layer_get` | reads a stroke back with its width, height, speed and prefix | HfwEngine (`readPlateSnapshot`) | none |
-| `hfw_plate_set_markers` | sets the plate's pause, colour and custom-G-code timeline | SliceRuntime (`PlateLayerGcode`) | none |
-| `hfw_plate_marker_count` | how many markers the plate carries | SliceRuntime | none |
-| `hfw_plate_marker_get` | reads a marker's kind, height and G-code back | HfwEngine (`readPlateSnapshot`) | none |
 | `hfw_job_start` | plans a plate on its own thread, over a private copy of it | SliceRuntime (async slice) | `hfw_job_free` |
 | `hfw_job_poll` | status and progress of that job, never blocking | SliceRuntime (progress bar) | none |
 | `hfw_job_cancel` | asks the job to stop; a stopped job yields no file | SliceRuntime (cancel button) | none |
 | `hfw_job_wait` | blocks until the job finishes | SliceRuntime | none |
 | `hfw_job_take_gcode` | takes the finished file; the job handle is consumed | SliceRuntime | `hfw_gcode_free` |
 | `hfw_job_free` | releases a job, cancelling and joining it first | SliceRuntime | owns itself |
-| `hfw_string_free` | releases a string the engine returned | every caller of the JSON getters | owns itself |
-| `hfw_buffer_free` | releases a byte buffer the engine returned | every caller of `_stl_bytes`, `_project_bytes`, `_metadata_get` | owns itself |
 
-Read as a work list, the split is clean: 24 rows are `PlateDocument`'s edit gestures
+Read as a work list, the split is clean: 18 rows are `PlateDocument`'s edit gestures
 (name, duplicate, rotate, mirror, bake, settings, paint, volumes with their ids and
-placements, layer heights, the cut and text tools), 15 are what `readPlateSnapshot` and
-the project file need to read a plate back, 14 are `SliceRuntime` and its timeline
-(slice, preview, markers, strokes, the threaded job), 1 is `PresetStore`, 2 are the free
-functions every getter's caller needs, and 5 have no caller in next-layer at all: the
-two mesh-part calls, the mesh-level paint pair and `hfw_slice_meshes`, because a plate
-object and not a bare mesh is the only thing the application paints or slices.
+placements, layer heights, the undo step, the cut and text tools), 10 are what
+`readPlateSnapshot` and the project file still need to read a plate back, 9 are
+`SliceRuntime` and its timeline (slice, preview, strokes, the threaded job), 1 is
+`PresetStore`, 2 are the free functions every getter's caller needs, and 4 have no
+caller in next-layer at all: the two mesh-part calls and `hfw_slice_meshes`, because a
+plate object and not a bare mesh is the only thing the application slices, plus
+`hfw_snapshot_object_count`, which reports what a snapshot holds when reading the plate
+after a restore says the same thing.
 
 ### What a document carries across (2026-11-21)
 

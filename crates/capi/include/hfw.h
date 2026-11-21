@@ -27,6 +27,9 @@ typedef struct HfwMesh HfwMesh;
 /** An opaque plate document owned by the library. */
 typedef struct HfwPlate HfwPlate;
 
+/** An opaque snapshot of a plate document, owned by the library. */
+typedef struct HfwSnapshot HfwSnapshot;
+
 /** An opaque slice result owned by the library. */
 typedef struct HfwGcode HfwGcode;
 
@@ -641,6 +644,41 @@ HfwGcode *hfw_plate_slice_placed(const HfwPlate *plate,
 
 /** Releases a plate, and with it every object on it. A NULL handle is ignored. */
 void hfw_plate_free(HfwPlate *plate);
+
+/**
+ * Takes the plate as it is now and returns it as a handle.
+ *
+ * This is what an undo step is: the whole document -- every object with its id,
+ * geometry, placement, paint, settings, volumes and layer heights, the timeline, the
+ * in-layer strokes, the caller's own bytes and the counter that hands out the next
+ * id -- kept so it can be put back exactly. Taking one copies no triangles: the
+ * snapshot shares each object's geometry with the plate, and the first write to an
+ * object after this copies that object's geometry and leaves the snapshot holding
+ * what it was taken with. A stack of snapshots therefore costs the document plus the
+ * edits made since the first of them, not one document per step.
+ *
+ * The snapshot owns its shares: freeing the plate leaves it intact, and it can be
+ * restored into any plate. Release it with `hfw_snapshot_free`. Returns NULL when
+ * `plate` is null.
+ */
+HfwSnapshot *hfw_plate_snapshot(const HfwPlate *plate);
+
+/**
+ * Replaces everything `plate` holds with everything `snapshot` holds.
+ *
+ * The snapshot is not consumed: the same one restores again, which is what redo is.
+ * A restored document prints, reads back and reopens as the one that was
+ * snapshotted, ids included, so a selection or a paint session holding an id is
+ * still holding the object it named. Returns 0 on success, -1 when either handle is
+ * null.
+ */
+int32_t hfw_plate_restore(HfwPlate *plate, const HfwSnapshot *snapshot);
+
+/** Releases a snapshot handle. A NULL pointer is ignored. */
+void hfw_snapshot_free(HfwSnapshot *snapshot);
+
+/** How many objects a snapshot holds, or -1 when the handle is null. */
+ptrdiff_t hfw_snapshot_object_count(const HfwSnapshot *snapshot);
 
 /** Returns the G-code text, NUL-terminated, owned by the handle. */
 const char *hfw_gcode_text(const HfwGcode *gcode);

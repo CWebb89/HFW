@@ -117,6 +117,9 @@ int main(int argc, char **argv) {
     check(document != NULL, "a plate is created");
     if (document != NULL) {
         uint64_t first = hfw_plate_add(document, mesh);
+        HfwSnapshot *taken = hfw_plate_snapshot(document);
+        check(taken != NULL, "a snapshot is taken");
+        check(hfw_snapshot_object_count(taken) == 1, "the snapshot counts what was on the plate");
         uint64_t second = hfw_plate_add(document, mesh);
         check(first != 0 && second != 0 && first != second, "two objects are added by id");
         check(hfw_plate_object_count(document) == 2, "the plate counts both objects");
@@ -159,6 +162,11 @@ int main(int argc, char **argv) {
         check(hfw_plate_object_enabled(document, first, 1) == 0, "an object is enabled again");
         check(hfw_plate_object_remove(document, second) == 0, "an object is removed");
         check(hfw_plate_object_count(document) == 1, "the plate counts one object");
+        check(hfw_plate_restore(document, taken) == 0, "the snapshot is restored");
+        check(hfw_plate_object_count(document) == 1 &&
+                  hfw_plate_restore(document, NULL) == -1,
+              "a restored plate holds what was snapshotted, and a null snapshot is refused");
+        hfw_snapshot_free(taken);
 
         char *preview = hfw_plate_preview_json(document, argv[2], 0.2, 0.2);
         check(preview != NULL, "the preview document is produced");

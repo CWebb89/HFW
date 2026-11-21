@@ -22,6 +22,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::Arc;
 
 use hfw_engine::{
     merge_stacks, run_with_volumes, InLayerPolyline, Job, Marker, Mesh, MeshDiagnostics, MeshError,
@@ -30,6 +31,9 @@ use hfw_engine::{
 
 pub mod arrange;
 pub mod project;
+pub mod snapshot;
+
+pub use snapshot::PlateSnapshot;
 
 /// Identity of one object on the plate.
 ///
@@ -257,11 +261,16 @@ pub fn check_sequential<'a>(
 }
 
 /// One body on the plate: what it is called, where it is, and how it prints.
+///
+/// The geometry is behind an [`Arc`] rather than owned, so a snapshot of the plate
+/// costs one pointer per object instead of one mesh: the snapshot and the live plate
+/// share the same triangles until something writes to them, which is what makes an
+/// undo stack a stack of documents rather than a stack of copies.
 #[derive(Clone, Debug)]
 pub struct PlateObject {
     id: ObjectId,
     name: String,
-    mesh: Mesh,
+    mesh: Arc<Mesh>,
     placement: MeshTransform,
     enabled: bool,
     positioned: bool,
@@ -285,7 +294,7 @@ pub struct PlateObject {
 pub struct PlateVolume {
     id: VolumeId,
     kind: VolumeKind,
-    mesh: Mesh,
+    mesh: Arc<Mesh>,
     placement: MeshTransform,
     overrides: Vec<(String, String)>,
 }
@@ -343,9 +352,11 @@ impl PlateObject {
     }
 
     /// The geometry, for a caller that is about to rewrite it — that is what
-    /// baking a placement does.
+    /// baking a placement does. A snapshot holding the same geometry keeps the
+    /// triangles it has: the write copies them first, because what a snapshot shows
+    /// cannot change.
     pub fn mesh_mut(&mut self) -> &mut Mesh {
-        &mut self.mesh
+        Arc::make_mut(&mut self.mesh)
     }
 
     /// Where the geometry sits on the bed.
@@ -367,7 +378,7 @@ impl PlateObject {
             return Ok(());
         }
         let moved = self.mesh.transformed(self.placement)?;
-        self.mesh = moved;
+        self.mesh = Arc::new(moved);
         self.placement = MeshTransform::default();
         Ok(())
     }
@@ -511,7 +522,7 @@ impl PlateObject {
         self.volumes.push(PlateVolume {
             id,
             kind,
-            mesh,
+            mesh: Arc::new(mesh),
             placement,
             overrides: Vec::new(),
         });
@@ -667,7 +678,7 @@ impl PlateObject {
     /// The geometry with the placement applied.
     pub fn placed_mesh(&self) -> Result<Mesh, PlateError> {
         if is_identity(&self.placement) {
-            return Ok(self.mesh.clone());
+            return Ok(Mesh::clone(&self.mesh));
         }
         Ok(self.mesh.transformed(self.placement)?)
     }
@@ -853,7 +864,7 @@ impl Plate {
         self.objects.push(PlateObject {
             id,
             name,
-            mesh,
+            mesh: Arc::new(mesh),
             placement: MeshTransform::default(),
             enabled: true,
             positioned,

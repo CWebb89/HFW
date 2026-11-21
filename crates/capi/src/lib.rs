@@ -43,7 +43,7 @@ use hfw_engine::{
 };
 use hfw_font::Face;
 use hfw_mesh::CutPlane;
-use hfw_plate::{ObjectId, Plate, PlateObject, VolumeId};
+use hfw_plate::{ObjectId, Plate, PlateObject, PlateSnapshot, VolumeId};
 use hfw_text::text_prism;
 
 /// What `hfw_mesh_load_file` reads, in the order the app's file dialog offers them.
@@ -100,6 +100,11 @@ pub struct HfwMesh {
 /// An opaque plate document owned by this library.
 pub struct HfwPlate {
     plate: Plate,
+}
+
+/// An opaque snapshot of a plate document, owned by this library.
+pub struct HfwSnapshot {
+    snapshot: PlateSnapshot,
 }
 
 /// An opaque slice result owned by this library.
@@ -2396,6 +2401,94 @@ pub unsafe extern "C" fn hfw_plate_free(plate: *mut HfwPlate) {
         return;
     }
     drop(unsafe { Box::from_raw(plate) });
+}
+
+/// Takes the plate as it is now, and returns it as a handle.
+///
+/// This is what an undo step is: the whole document -- every object with its id,
+/// geometry, placement, paint, settings, volumes and layer heights, the timeline, the
+/// in-layer strokes, the caller's own bytes and the counter that hands out the next
+/// id -- kept so it can be put back exactly. Taking one copies no triangles: the
+/// snapshot shares each object's geometry with the plate, and the first write to an
+/// object after this copies that object's geometry and leaves the snapshot holding
+/// what it was taken with. A stack of snapshots therefore costs the document plus
+/// every edit made since the first of them, not one document per step.
+///
+/// The snapshot owns its shares: freeing the plate leaves it intact, and it can be
+/// restored into any plate. Release it with [`hfw_snapshot_free`]. Returns NULL when
+/// `plate` is null.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_snapshot(plate: *const HfwPlate) -> *mut HfwSnapshot {
+    let build = || -> Result<*mut HfwSnapshot, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        Ok(Box::into_raw(Box::new(HfwSnapshot {
+            snapshot: plate.plate.snapshot(),
+        })))
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Replaces everything `plate` holds with everything `snapshot` holds.
+///
+/// The snapshot is not consumed: the same one restores again, which is what redo is.
+/// A document that is restored prints, reads back and reopens as the one that was
+/// snapshotted, ids included, so a selection or a paint session holding an id is
+/// holding the object it named. Returns 0 on success, -1 when either handle is null.
+///
+/// # Safety
+///
+/// Both handles must be live, and `plate` writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_restore(
+    plate: *mut HfwPlate,
+    snapshot: *const HfwSnapshot,
+) -> i32 {
+    let restore = || -> Result<i32, String> {
+        if snapshot.is_null() {
+            return Err("snapshot handle is null".to_owned());
+        }
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let snapshot = unsafe { &*snapshot };
+        let plate = unsafe { &mut *plate };
+        plate.plate.restore(&snapshot.snapshot);
+        Ok(0)
+    };
+    report(restore(), -1)
+}
+
+/// Releases a snapshot handle. A null handle is ignored.
+///
+/// # Safety
+///
+/// `snapshot` must be a handle returned by [`hfw_plate_snapshot`] that has not been
+/// freed.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_snapshot_free(snapshot: *mut HfwSnapshot) {
+    if snapshot.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(snapshot) });
+}
+
+/// How many objects a snapshot holds, or -1 when the handle is null.
+///
+/// # Safety
+///
+/// `snapshot` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_snapshot_object_count(snapshot: *const HfwSnapshot) -> isize {
+    if snapshot.is_null() {
+        set_error("snapshot handle is null");
+        return -1;
+    }
+    clear_error();
+    unsafe { &*snapshot }.snapshot.object_count() as isize
 }
 
 /// Returns the G-code text, NUL-terminated.

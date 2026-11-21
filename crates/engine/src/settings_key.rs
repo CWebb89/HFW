@@ -542,7 +542,18 @@ fn decimal(value: f64) -> String {
 }
 
 fn percent(share: f64) -> String {
-    format!("{}%", decimal(share * 100.0))
+    let scaled = share * 100.0;
+    for precision in 0..=12 {
+        let text = format!("{scaled:.precision$}");
+        if text
+            .parse::<f64>()
+            .is_ok_and(|parsed| parsed / 100.0 == share)
+        {
+            let text = if text == "-0" { "0".to_owned() } else { text };
+            return format!("{text}%");
+        }
+    }
+    format!("{}%", decimal(scaled))
 }
 
 fn lower(value: &str) -> String {
@@ -710,6 +721,21 @@ mod tests {
                     "`{key}` = `{candidate}` came back as `{written}` and changed the settings"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_percentage_reads_back_as_the_text_it_was_set_with() {
+        for text in ["55%", "0.5%", "99.9%", "100%", "0%", "7.25%"] {
+            let mut settings = Settings::new(0.4, 3);
+            settings
+                .apply_key("infill_density", text)
+                .expect("the value applies");
+            assert_eq!(
+                settings.key_value("infill_density").expect("it reads back"),
+                text,
+                "a panel that reads `{text}` back gets something else to display"
+            );
         }
     }
 

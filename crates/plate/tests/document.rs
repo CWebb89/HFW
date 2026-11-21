@@ -1143,3 +1143,158 @@ fn a_volume_placement_survives_a_project_round_trip() {
         [("sparse_infill_density".to_owned(), "0.9".to_owned())]
     );
 }
+
+/// One undo step: the plate as it was, put back as it was.
+#[test]
+fn a_snapshot_puts_the_document_back_after_an_edit() {
+    let mut plate = plate();
+    let first = plate.add("cube", cube()).expect("a cube adds");
+    let second = plate.add("drawn cube", cube()).expect("a second cube adds");
+    let settings = plate.settings().clone();
+    plate
+        .object_mut(first)
+        .expect("the object is there")
+        .set_placement(MeshTransform {
+            translation_mm: [10.0, 0.0, 0.0],
+            ..MeshTransform::default()
+        });
+    plate
+        .set_object_setting(second, "sparse_infill_density", "0.9")
+        .expect("an override lands");
+    let volume = plate
+        .object_mut(first)
+        .expect("the object is there")
+        .add_volume(hfw_engine::VolumeKind::Modifier, cube())
+        .expect("a volume attaches");
+    plate
+        .object_mut(first)
+        .expect("the object is there")
+        .set_volume_setting(volume, "sparse_infill_density", "0.9", &settings)
+        .expect("the modifier takes settings");
+    plate.set_metadata(b"{\"plates\":[{\"name\":\"one\"}]}".to_vec());
+
+    let snapshot = plate.snapshot();
+    assert_eq!(snapshot.object_count(), 2);
+    assert_eq!(snapshot.object_ids(), [first, second]);
+
+    let before = plate.project_job(0.2, 0.2).expect("the plate slices");
+    let config = hfw_config::PrinterConfig::default();
+    let before = hfw_gcode::generate(&before.layers, &config, Some("plate"))
+        .expect("the job before the edit is written")
+        .text;
+
+    plate.remove(second).expect("the object is removed");
+    plate
+        .object_mut(first)
+        .expect("the object is there")
+        .set_placement(MeshTransform::default());
+    plate
+        .object_mut(first)
+        .expect("the object is there")
+        .set_name("renamed");
+    plate.set_metadata(b"{}".to_vec());
+    let third = plate
+        .add("later", Mesh::box_mm(5.0, 5.0, 5.0).expect("a box builds"))
+        .expect("a box adds");
+    assert_ne!(third, first);
+
+    plate.restore(&snapshot);
+
+    let ids: Vec<ObjectId> = plate.objects().iter().map(|object| object.id()).collect();
+    assert_eq!(ids, [first, second], "every id came back, and no other");
+    assert_eq!(
+        plate.object(first).expect("the object is back").name(),
+        "cube"
+    );
+    assert_eq!(
+        plate
+            .object(first)
+            .expect("the object is back")
+            .placement()
+            .translation_mm,
+        [10.0, 0.0, 0.0]
+    );
+    assert_eq!(
+        plate
+            .object(first)
+            .expect("the object is back")
+            .volume_ids()
+            .len(),
+        1,
+        "the volume came back with the object"
+    );
+    assert_eq!(
+        plate.metadata(),
+        b"{\"plates\":[{\"name\":\"one\"}]}",
+        "the caller's own bytes came back"
+    );
+    let object = plate.object(second).expect("the object is back");
+    assert_eq!(
+        object.overrides().collect::<Vec<_>>(),
+        ["sparse_infill_density"],
+        "the override that was there is the one that came back"
+    );
+    assert_eq!(
+        object
+            .settings()
+            .expect("the object carries its own settings")
+            .key_value("sparse_infill_density")
+            .expect("the key is published"),
+        "90%",
+        "and it still says what the panel set"
+    );
+    assert_eq!(
+        plate
+            .object(first)
+            .expect("the object is back")
+            .settings()
+            .map(|settings| settings.key_value("sparse_infill_density").is_err()),
+        None,
+        "the object that never had an override still has none"
+    );
+    let _ = &settings;
+
+    let after = plate.project_job(0.2, 0.2).expect("the plate slices again");
+    let after = hfw_gcode::generate(&after.layers, &config, Some("plate"))
+        .expect("the job after the restore is written")
+        .text;
+    assert_eq!(
+        before, after,
+        "a restored document does not print like the edited one"
+    );
+}
+
+/// Two states of a document, both kept, each restoring to itself.
+#[test]
+fn several_snapshots_restore_in_turn() {
+    let mut plate = plate();
+    let empty = plate.snapshot();
+    let id = plate.add("cube", cube()).expect("a cube adds");
+    plate
+        .object_mut(id)
+        .expect("the object is there")
+        .set_placement(MeshTransform {
+            translation_mm: [30.0, 0.0, 0.0],
+            ..MeshTransform::default()
+        });
+    let moved = plate.snapshot();
+    plate.clear_object_settings(id).expect("the settings clear");
+    let cleared = plate.snapshot();
+
+    plate.restore(&empty);
+    assert_eq!(plate.len(), 0);
+    plate.restore(&moved);
+    assert_eq!(plate.len(), 1);
+    assert_eq!(
+        plate
+            .object(id)
+            .expect("the object is there")
+            .placement()
+            .translation_mm,
+        [30.0, 0.0, 0.0]
+    );
+    plate.restore(&cleared);
+    assert_eq!(plate.len(), 1);
+    plate.restore(&empty);
+    assert_eq!(plate.len(), 0, "the first snapshot still restores");
+}

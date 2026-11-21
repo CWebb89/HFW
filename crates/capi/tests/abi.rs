@@ -26,8 +26,9 @@ use hfw_capi::{
     hfw_plate_object_volume_ids, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
     hfw_plate_object_volume_placement, hfw_plate_object_volume_placement_get,
     hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
-    hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_set_metadata,
-    hfw_plate_slice, hfw_plate_slice_placed, hfw_plate_volume_set, hfw_slice_meshes,
+    hfw_plate_project_bytes, hfw_plate_restore, hfw_plate_set_in_layer, hfw_plate_set_markers,
+    hfw_plate_set_metadata, hfw_plate_slice, hfw_plate_slice_placed, hfw_plate_snapshot,
+    hfw_plate_volume_set, hfw_slice_meshes, hfw_snapshot_free, hfw_snapshot_object_count,
     hfw_string_free, hfw_text_mesh, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED,
     HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT,
     HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
@@ -2023,4 +2024,178 @@ fn a_plates_callers_own_bytes_survive_the_project() {
     unsafe { hfw_plate_free(reopened) };
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(mesh) };
+}
+
+/// An undo step across the boundary: the plate as it was, put back as it was.
+#[test]
+fn a_snapshot_restores_the_document_through_the_abi() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!cube.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    let first = unsafe { hfw_plate_add(plate, cube) };
+    let second = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(first, 0);
+    assert_ne!(second, 0);
+    let name = c_string("bracket");
+    assert_eq!(
+        unsafe { hfw_plate_object_name(plate, second, name.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    let key = c_string("sparse_infill_density");
+    let value = c_string("55%");
+    assert_eq!(
+        unsafe { hfw_plate_object_set(plate, second, key.as_ptr(), value.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    let modifier = unsafe { hfw_plate_object_add_volume(plate, second, HFW_VOLUME_MODIFIER, cube) };
+    assert_ne!(modifier, 0, "{}", last_error());
+    let metadata = c_string(r#"{"plates":[{"name":"one"}]}"#);
+    assert_eq!(
+        unsafe { hfw_plate_set_metadata(plate, metadata.as_ptr(), metadata.as_bytes().len()) },
+        0,
+        "{}",
+        last_error()
+    );
+
+    let snapshot = unsafe { hfw_plate_snapshot(plate) };
+    assert!(
+        !snapshot.is_null(),
+        "the snapshot is taken: {}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_snapshot_object_count(snapshot) },
+        2,
+        "the snapshot counts what was on the plate"
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_object_remove(plate, second) },
+        0,
+        "{}",
+        last_error()
+    );
+    let third = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(third, 0);
+    assert_eq!(unsafe { hfw_plate_object_count(plate) }, 2);
+
+    assert_eq!(
+        unsafe { hfw_plate_restore(plate, snapshot) },
+        0,
+        "the snapshot restores: {}",
+        last_error()
+    );
+
+    let mut ids = [0u64; 4];
+    let count = unsafe { hfw_plate_object_ids(plate, ids.as_mut_ptr(), ids.len()) };
+    assert_eq!(count, 2);
+    assert_eq!(
+        &ids[..2],
+        &[first, second],
+        "every id came back, and no other"
+    );
+
+    let mut text = vec![0i8; 64];
+    assert_eq!(
+        unsafe { hfw_plate_object_name_get(plate, second, text.as_mut_ptr(), text.len()) },
+        7,
+        "the name is written: {}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(text.as_ptr()) }.to_str(),
+        Ok("bracket"),
+        "the name came back with the object"
+    );
+
+    let settings = unsafe { hfw_plate_object_settings_json(plate, second) };
+    assert!(!settings.is_null(), "{}", last_error());
+    assert_eq!(
+        unsafe { CStr::from_ptr(settings) }.to_str(),
+        Ok(r#"{"sparse_infill_density":"55%"}"#),
+        "the override came back with the object"
+    );
+    let mut kind = -1;
+    assert_eq!(
+        unsafe { hfw_plate_object_volume_kind(plate, second, modifier, &mut kind) },
+        0,
+        "the volume came back by the id it had: {}",
+        last_error()
+    );
+    assert_eq!(kind, HFW_VOLUME_MODIFIER);
+
+    let mut length = 0usize;
+    let metadata = unsafe { hfw_plate_metadata_get(plate, &mut length) };
+    assert!(!metadata.is_null(), "{}", last_error());
+    assert_eq!(
+        unsafe { std::slice::from_raw_parts(metadata.cast::<u8>(), length) },
+        br#"{"plates":[{"name":"one"}]}"#,
+        "the caller's own bytes came back"
+    );
+
+    assert_eq!(
+        unsafe { hfw_plate_restore(plate, snapshot) },
+        0,
+        "the same snapshot restores again, which is what redo is"
+    );
+    assert_eq!(
+        unsafe { hfw_plate_restore(plate, std::ptr::null()) },
+        -1,
+        "a null snapshot is refused rather than restoring nothing"
+    );
+    assert!(
+        unsafe { hfw_plate_snapshot(std::ptr::null()) }.is_null(),
+        "a null plate has no snapshot"
+    );
+    assert_eq!(unsafe { hfw_snapshot_object_count(std::ptr::null()) }, -1);
+
+    unsafe { hfw_snapshot_free(snapshot) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
+}
+
+/// A snapshot owns its geometry, so it survives the plate it came from and restores
+/// into another one.
+#[test]
+fn a_snapshot_outlives_the_plate_it_was_taken_from() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(id, 0);
+    let snapshot = unsafe { hfw_plate_snapshot(plate) };
+    assert!(!snapshot.is_null(), "{}", last_error());
+    unsafe { hfw_mesh_free(cube) };
+    unsafe { hfw_plate_free(plate) };
+
+    let other = hfw_plate_new();
+    assert_eq!(
+        unsafe { hfw_plate_restore(other, snapshot) },
+        0,
+        "a snapshot restores into a plate that never held it: {}",
+        last_error()
+    );
+    assert_eq!(unsafe { hfw_plate_object_count(other) }, 1);
+    let mut ids = [0u64; 2];
+    let count = unsafe { hfw_plate_object_ids(other, ids.as_mut_ptr(), ids.len()) };
+    assert_eq!(count, 1);
+    assert_eq!(ids[0], id, "the id travels with the snapshot");
+    let mut triangles = 0usize;
+    let mesh = unsafe { hfw_plate_object_mesh(other, ids[0]) };
+    assert!(
+        !mesh.is_null(),
+        "the geometry survives its plate: {}",
+        last_error()
+    );
+    triangles += unsafe { hfw_mesh_triangle_count(mesh) };
+    assert!(triangles > 0, "the restored object has its triangles");
+
+    unsafe { hfw_mesh_free(mesh) };
+    unsafe { hfw_snapshot_free(snapshot) };
+    unsafe { hfw_plate_free(other) };
 }

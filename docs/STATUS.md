@@ -133,6 +133,12 @@ Two more that matter when deciding whether to trust the output:
   it packs unpositioned objects on a MaxRects layout and leaves objects a project
   file positioned where they are. A part that does not fit is refused with its size
   rather than dropped.
+- Undo is a snapshot, not a copy: `Plate::snapshot` / `Plate::restore` (across the ABI,
+  `hfw_plate_snapshot` / `hfw_plate_restore` / `hfw_snapshot_free`) keep the whole
+  document — objects with their ids, timeline, in-layer strokes, the caller's bytes and
+  the id counter — and share each object's geometry with the live plate, so the first
+  write after a snapshot copies that object's mesh and the snapshot is unaffected. A
+  restored plate slices to byte-identical G-code, which is the test.
 - Volumes are identified and placed: `hfw_plate_object_add_volume` returns an id that
   removing another volume does not renumber (`hfw_plate_object_volume_ids` reads them
   all back), and `hfw_plate_object_add_volume_placed` / `hfw_plate_object_volume_placement`
