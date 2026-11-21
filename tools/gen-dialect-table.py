@@ -114,6 +114,9 @@ def emit_array(items: list[tuple[str, ...]], width: int = 4) -> str:
 
 def main() -> int:
     tool = load_ledger_tool()
+    status = tool.require_inputs()
+    if status != 0:
+        return status
     engine = engine_names(tool)
     known = set(engine)
 

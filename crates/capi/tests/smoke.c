@@ -58,6 +58,32 @@ int main(int argc, char **argv) {
     check(hfw_mesh_triangle_count(mesh) > 0, "the mesh has triangles");
     check(hfw_mesh_volume(mesh) > 1.0, "the mesh encloses a volume");
 
+    const char *extensions = hfw_mesh_load_extensions();
+    check(extensions != NULL && strstr(extensions, ".obj") != NULL,
+          "the load extensions name the formats, OBJ among them");
+
+    size_t stl_len = 0;
+    char *stl = hfw_mesh_stl_bytes(mesh, 1, &stl_len);
+    check(stl != NULL, "a mesh writes itself out as binary STL");
+    if (stl != NULL) {
+        check(stl_len == 84 + 50 * (size_t)hfw_mesh_triangle_count(mesh),
+              "the binary file is a header and fifty bytes per triangle");
+        HfwMesh *reread = hfw_mesh_from_bytes((const uint8_t *)stl, stl_len);
+        check(reread != NULL, "the bytes read back as a mesh");
+        if (reread != NULL) {
+            check(fabs(hfw_mesh_volume(reread) - hfw_mesh_volume(mesh)) < 1e-3,
+                  "the round trip keeps the volume");
+            hfw_mesh_free(reread);
+        }
+        hfw_buffer_free(stl, stl_len);
+    }
+    char *ascii = hfw_mesh_stl_bytes(mesh, 0, &stl_len);
+    check(ascii != NULL && stl_len > 6 && strncmp(ascii, "solid ", 6) == 0,
+          "the text form is an ASCII STL");
+    if (ascii != NULL) {
+        hfw_buffer_free(ascii, stl_len);
+    }
+
     HfwTransform shift;
     memset(&shift, 0, sizeof shift);
     shift.scale[0] = 1.0;

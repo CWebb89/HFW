@@ -81,7 +81,9 @@ hfw_abi_version() -> u32
 hfw_settings_surface_json() -> *const c_char     // static, process-lifetime, do not free
 hfw_last_error() -> *const c_char                     // per thread, cleared by success
 
-hfw_mesh_load_file(path) -> *mut HfwMesh              // STL or 3MF
+hfw_mesh_load_file(path) -> *mut HfwMesh              // STL, OBJ or 3MF
+hfw_mesh_load_extensions() -> *const c_char            // static: ".3mf,.stl,.obj"
+hfw_mesh_stl_bytes(const *HfwMesh, binary, *out_len) -> *mut c_char  // STL out, hfw_buffer_free
 hfw_mesh_from_bytes(bytes, len) -> *mut HfwMesh       // STL bytes
 hfw_mesh_transform(const *HfwMesh, HfwTransform) -> *mut HfwMesh   // new handle, source kept
 hfw_mesh_bounds(const *HfwMesh, *HfwBounds) -> i32

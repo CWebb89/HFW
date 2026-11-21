@@ -741,8 +741,6 @@ def loop_generated(path: Path):
 
 
 def parse_foreign(path: Path):
-    if not path.exists():
-        return {}
     pairs = re.findall(
         r'\{QStringLiteral\("([a-z0-9_]+)"\),\s*QStringLiteral\("([a-z0-9_]+)"\)\}',
         path.read_text(encoding="utf-8", errors="replace"),
@@ -751,8 +749,6 @@ def parse_foreign(path: Path):
 
 
 def parse_import(path: Path):
-    if not path.exists():
-        return {}
     pairs = re.findall(
         r'\{"([a-z0-9_]+)",\s*"([a-z0-9_]+)",\s*Transform::\w+,',
         path.read_text(encoding="utf-8", errors="replace"),
@@ -1100,12 +1096,33 @@ def backlog_document(rows) -> str:
     ]
     return "\n".join(out)
 
-def main() -> int:
-    for required in (DOMAIN / "ConfigDefsFDM.cpp", HFW_PARSE):
-        if not required.exists():
-            print(f"missing input: {required}", file=sys.stderr)
-            return 1
+def require_inputs() -> int:
+    """Refuses to generate from an incomplete external tree.
 
+    A missing source must stop the run rather than shrink the table. Both artifacts are
+    what stops a profile being silently mistranslated, so a table built from whichever
+    files happened to be present reports `missing` about settings it has never seen —
+    the one failure mode a generated inventory must not have. `next-layer` moved its
+    foreign-settings table out of `src/qt/src/ForeignSettings.cpp` once already, which
+    is exactly when this fires.
+    """
+    required = (
+        DOMAIN / "ConfigDefsFDM.cpp",
+        DOMAIN / "ConfigCommon.cpp",
+        FOREIGN_SETTINGS,
+        PRESET_IMPORT,
+        HFW_PARSE,
+    )
+    missing = [path for path in required if not path.exists()]
+    for path in missing:
+        print(f"missing input: {path}", file=sys.stderr)
+    return 1 if missing else 0
+
+
+def main() -> int:
+    status = require_inputs()
+    if status != 0:
+        return status
     entries = parse_modern(DOMAIN / "ConfigDefsFDM.cpp")
     entries.update(loop_generated(DOMAIN / "ConfigDefsFDM.cpp"))
     for name in PER_TOOL_EXTRAS:

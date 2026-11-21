@@ -1074,7 +1074,8 @@ fn run_plate(o: &Options, path: &Path) -> Result<(), String> {
     let layer_height = o
         .layer_height
         .ok_or_else(|| "--plate needs --profile or --layer-height".to_owned())?;
-    let first_layer_height = o.first_layer_height.unwrap_or(layer_height);    let bytes =
+    let first_layer_height = o.first_layer_height.unwrap_or(layer_height);
+    let bytes =
         fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
     let plate = hfw_plate::Plate::from_project(&bytes, o.settings.clone())
         .map_err(|error| format!("{}: {error}", path.display()))?;

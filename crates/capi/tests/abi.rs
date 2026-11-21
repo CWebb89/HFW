@@ -7,12 +7,13 @@ use hfw_capi::{
     hfw_abi_version, hfw_buffer_free, hfw_gcode_free, hfw_gcode_len, hfw_gcode_text,
     hfw_gcode_verified, hfw_job_cancel, hfw_job_poll, hfw_job_start, hfw_job_take_gcode,
     hfw_job_wait, hfw_last_error, hfw_mesh_bounds, hfw_mesh_cut, hfw_mesh_free,
-    hfw_mesh_from_bytes, hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_file, hfw_mesh_new,
-    hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_part, hfw_mesh_part_count, hfw_mesh_transform,
-    hfw_mesh_triangle_count, hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume,
-    hfw_plate_add, hfw_plate_add_positioned, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free, hfw_plate_in_layer_count,
-    hfw_plate_in_layer_get, hfw_plate_marker_count, hfw_plate_marker_get, hfw_plate_metadata_get,
-    hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
+    hfw_mesh_from_bytes, hfw_mesh_index_count, hfw_mesh_indices, hfw_mesh_load_extensions,
+    hfw_mesh_load_file, hfw_mesh_new, hfw_mesh_paint_get, hfw_mesh_paint_set, hfw_mesh_part,
+    hfw_mesh_part_count, hfw_mesh_stl_bytes, hfw_mesh_transform, hfw_mesh_triangle_count,
+    hfw_mesh_vertex_count, hfw_mesh_vertices, hfw_mesh_volume, hfw_plate_add,
+    hfw_plate_add_positioned, hfw_plate_arrange, hfw_plate_bounds, hfw_plate_free,
+    hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count, hfw_plate_marker_get,
+    hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume, hfw_plate_object_bounds,
     hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
     hfw_plate_object_enabled, hfw_plate_object_enabled_get, hfw_plate_object_ids,
     hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mesh,
@@ -23,10 +24,9 @@ use hfw_capi::{
     hfw_plate_object_volume_count, hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh,
     hfw_plate_object_volume_settings_json, hfw_plate_open_project, hfw_plate_preview_json,
     hfw_plate_project_bytes, hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_set_metadata,
-    hfw_plate_slice, hfw_plate_slice_placed, hfw_plate_volume_set, hfw_slice_meshes, hfw_string_free,
-    hfw_text_mesh,
-    HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE,
-    HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT,
+    hfw_plate_slice, hfw_plate_slice_placed, hfw_plate_volume_set, hfw_slice_meshes,
+    hfw_string_free, hfw_text_mesh, HfwBounds, HfwJobProgress, HfwTransform, HFW_JOB_CANCELLED,
+    HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT,
     HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
 };
 
@@ -133,6 +133,46 @@ fn the_same_bytes_through_memory_and_through_a_file_agree() {
     });
     unsafe { hfw_mesh_free(from_file) };
     unsafe { hfw_mesh_free(from_memory) };
+}
+
+#[test]
+fn a_mesh_writes_itself_out_as_stl_and_reads_back() {
+    let extensions = unsafe { CStr::from_ptr(hfw_mesh_load_extensions()) }
+        .to_str()
+        .expect("the extension list is text");
+    assert!(
+        extensions.contains(".obj") && extensions.contains(".3mf"),
+        "{extensions}"
+    );
+
+    let path = c_string(&fixture("cube.stl"));
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let volume = unsafe { hfw_mesh_volume(mesh) };
+    let triangles = unsafe { hfw_mesh_triangle_count(mesh) };
+
+    let mut len = 0usize;
+    let binary = unsafe { hfw_mesh_stl_bytes(mesh, 1, &mut len) };
+    assert!(!binary.is_null(), "write failed: {}", last_error());
+    assert_eq!(len, 84 + 50 * triangles as usize, "a binary STL's size");
+    let reread = unsafe { hfw_mesh_from_bytes(binary as *const u8, len) };
+    assert!(!reread.is_null(), "the bytes read back: {}", last_error());
+    assert!((unsafe { hfw_mesh_volume(reread) } - volume).abs() < 1e-3);
+    assert_eq!(unsafe { hfw_mesh_triangle_count(reread) }, triangles);
+    unsafe {
+        hfw_mesh_free(reread);
+        hfw_buffer_free(binary, len);
+    }
+
+    let mut text_len = 0usize;
+    let ascii = unsafe { hfw_mesh_stl_bytes(mesh, 0, &mut text_len) };
+    assert!(!ascii.is_null(), "write failed: {}", last_error());
+    let text = unsafe { std::slice::from_raw_parts(ascii as *const u8, text_len) };
+    assert!(text.starts_with(b"solid ") && text.ends_with(b"endsolid next-layer\n"));
+    unsafe {
+        hfw_buffer_free(ascii, text_len);
+        hfw_mesh_free(mesh);
+    }
 }
 
 #[test]
@@ -349,10 +389,16 @@ fn bare_geometry_is_placed_on_the_bed_by_the_placing_slice() {
     let placed = unsafe { hfw_plate_slice_placed(plate, profile.as_ptr(), 0.2, 0.2) };
     assert!(!placed.is_null(), "placing slice failed: {}", last_error());
 
-    let kept_box = footprint(unsafe { CStr::from_ptr(hfw_gcode_text(kept)) }.to_str().unwrap());
-    let placed_box = footprint(unsafe { CStr::from_ptr(hfw_gcode_text(placed)) }
-        .to_str()
-        .unwrap());
+    let kept_box = footprint(
+        unsafe { CStr::from_ptr(hfw_gcode_text(kept)) }
+            .to_str()
+            .unwrap(),
+    );
+    let placed_box = footprint(
+        unsafe { CStr::from_ptr(hfw_gcode_text(placed)) }
+            .to_str()
+            .unwrap(),
+    );
     assert!(
         (kept_box.2 - kept_box.0 - (placed_box.2 - placed_box.0)).abs() < 1e-3
             && (kept_box.3 - kept_box.1 - (placed_box.3 - placed_box.1)).abs() < 1e-3,

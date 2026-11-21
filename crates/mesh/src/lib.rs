@@ -1,14 +1,16 @@
 //! Indexed triangle mesh storage and basic structural validation.
 //!
-//! STL parsing, 3MF import and optional repair are explicit operations kept
+//! STL, OBJ and 3MF import and optional repair are explicit operations kept
 //! separate from the canonical in-memory mesh representation.
 
 #![forbid(unsafe_code)]
 
 pub mod cut;
+mod obj;
 mod threemf;
 
 pub use cut::{Cut, CutPlane};
+pub use obj::{from_obj_text, load_obj};
 pub use threemf::{
     archive_parts, from_3mf_reader, from_3mf_text, load_3mf, load_3mf_objects,
     metadata_from_reader, model_part_xml, objects_from_3mf_text, three_mf_metadata, write_archive,
@@ -164,6 +166,8 @@ pub enum MeshError {
     Io(String),
     /// The input bytes are neither a supported binary nor ASCII STL file.
     InvalidStl(String),
+    /// The input text is not a readable Wavefront OBJ file.
+    InvalidObj(String),
     /// The file is a ZIP but not a readable 3MF model part.
     InvalidThreeMf(String),
     /// A model transform contains invalid parameters.
@@ -202,6 +206,7 @@ impl fmt::Display for MeshError {
             Self::NonPositiveDimension => formatter.write_str("box dimensions must be positive"),
             Self::Io(message) => write!(formatter, "could not read STL file: {message}"),
             Self::InvalidStl(message) => write!(formatter, "invalid STL file: {message}"),
+            Self::InvalidObj(message) => write!(formatter, "invalid OBJ file: {message}"),
             Self::InvalidThreeMf(message) => write!(formatter, "invalid 3MF file: {message}"),
             Self::InvalidTransform(message) => {
                 write!(formatter, "invalid mesh transform: {message}")
@@ -754,22 +759,81 @@ impl Mesh {
         ]
     }
 
-    /// Loads a model by file extension: STL or 3MF.
+    /// Loads a model by file extension: STL, OBJ or 3MF.
     ///
     /// 3MF carries its own units and per-item placement, so the returned mesh is
-    /// already in millimetres and already arranged; an STL is read raw and the
-    /// caller applies units as before.
+    /// already in millimetres and already arranged; an STL or an OBJ is read raw and
+    /// the caller applies units as before.
     pub fn load_model<P: AsRef<Path>>(path: P) -> Result<Self, MeshError> {
-        let is_3mf = path
+        let extension = path
             .as_ref()
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("3mf"));
-        if is_3mf {
-            load_3mf(path)
-        } else {
-            Self::load_stl(path)
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        match extension.as_str() {
+            "3mf" => load_3mf(path),
+            "obj" => load_obj(path),
+            _ => Self::load_stl(path),
         }
+    }
+
+    /// Writes the mesh as the bytes of an STL file.
+    ///
+    /// Binary is what a slicer reads and what a plate of parts is staged as; the
+    /// ASCII form exists because a project file stores its meshes as text and a diff
+    /// of one stays readable. Both carry the face normal computed from the triangle:
+    /// STL's normal field is advisory, and a writer that zeroes it leaves some
+    /// viewers shading by the winding alone.
+    pub fn to_stl_bytes(&self, binary: bool) -> Vec<u8> {
+        if binary {
+            self.to_binary_stl_bytes()
+        } else {
+            self.to_ascii_stl_bytes()
+        }
+    }
+
+    fn to_binary_stl_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(84 + self.triangles.len() * 50);
+        let mut header = [0_u8; 80];
+        let label = b"next-layer binary STL";
+        header[..label.len()].copy_from_slice(label);
+        bytes.extend_from_slice(&header);
+        let count = u32::try_from(self.triangles.len()).unwrap_or(u32::MAX);
+        bytes.extend_from_slice(&count.to_le_bytes());
+
+        for triangle in &self.triangles {
+            let [a, b, c] = self.triangle_vertices_for(*triangle);
+            for value in face_normal_mm(a, b, c) {
+                bytes.extend_from_slice(&(value as f32).to_le_bytes());
+            }
+            for point in [a, b, c] {
+                for value in point.to_mm() {
+                    bytes.extend_from_slice(&(value as f32).to_le_bytes());
+                }
+            }
+            bytes.extend_from_slice(&[0, 0]);
+        }
+        bytes
+    }
+
+    fn to_ascii_stl_bytes(&self) -> Vec<u8> {
+        let mut text = String::with_capacity(120 + self.triangles.len() * 160);
+        text.push_str("solid next-layer\n");
+        for triangle in &self.triangles {
+            let [a, b, c] = self.triangle_vertices_for(*triangle);
+            let [nx, ny, nz] = face_normal_mm(a, b, c);
+            text.push_str(&format!(
+                "  facet normal {nx:.6} {ny:.6} {nz:.6}\n    outer loop\n"
+            ));
+            for point in [a, b, c] {
+                let [x, y, z] = point.to_mm();
+                text.push_str(&format!("      vertex {x:.6} {y:.6} {z:.6}\n"));
+            }
+            text.push_str("    endloop\n  endfacet\n");
+        }
+        text.push_str("endsolid next-layer\n");
+        text.into_bytes()
     }
 
     /// Loads a binary or ASCII STL file and welds coincident vertices.
@@ -964,6 +1028,26 @@ impl Mesh {
     }
 }
 
+/// The unit normal of a triangle, in millimetres; zero-length for a degenerate one.
+fn face_normal_mm(a: Point3, b: Point3, c: Point3) -> [f64; 3] {
+    let [ax, ay, az] = a.to_mm();
+    let [bx, by, bz] = b.to_mm();
+    let [cx, cy, cz] = c.to_mm();
+    let u = [bx - ax, by - ay, bz - az];
+    let v = [cx - ax, cy - ay, cz - az];
+    let normal = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    if length > 0.0 {
+        [normal[0] / length, normal[1] / length, normal[2] / length]
+    } else {
+        [0.0; 3]
+    }
+}
+
 fn determinant3(a: Point3, b: Point3, c: Point3) -> Option<i128> {
     let by_cz = (b.y as i128).checked_mul(c.z as i128)?;
     let bz_cy = (b.z as i128).checked_mul(c.y as i128)?;
@@ -1101,6 +1185,30 @@ mod tests {
         let mesh = Mesh::from_stl_bytes(stl).expect("ASCII STL");
         assert_eq!(mesh.vertex_count(), 3);
         assert_eq!(mesh.triangle_count(), 1);
+    }
+
+    #[test]
+    fn a_written_binary_stl_reads_back_as_the_same_mesh() {
+        let mesh = Mesh::box_mm(20.0, 30.0, 10.0).expect("a box");
+        let bytes = mesh.to_stl_bytes(true);
+        assert_eq!(bytes.len(), 84 + mesh.triangle_count() * 50);
+        let read = Mesh::from_stl_bytes(&bytes).expect("binary STL");
+        assert_eq!(read.triangle_count(), mesh.triangle_count());
+        assert_eq!(read.vertex_count(), mesh.vertex_count());
+        assert_eq!(read.z_bounds(), mesh.z_bounds());
+        assert_eq!(read.xy_bounds_mm(), mesh.xy_bounds_mm());
+    }
+
+    #[test]
+    fn a_written_ascii_stl_reads_back_as_the_same_mesh() {
+        let mesh = Mesh::box_mm(20.0, 30.0, 10.0).expect("a box");
+        let bytes = mesh.to_stl_bytes(false);
+        let text = String::from_utf8(bytes.clone()).expect("ASCII STL is text");
+        assert!(text.starts_with("solid next-layer"), "{text}");
+        let read = Mesh::from_stl_bytes(&bytes).expect("ASCII STL");
+        assert_eq!(read.triangle_count(), mesh.triangle_count());
+        assert_eq!(read.z_bounds(), mesh.z_bounds());
+        assert_eq!(read.xy_bounds_mm(), mesh.xy_bounds_mm());
     }
 
     #[test]

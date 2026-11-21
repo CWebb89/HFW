@@ -46,6 +46,9 @@ use hfw_mesh::CutPlane;
 use hfw_plate::{ObjectId, Plate, PlateObject};
 use hfw_text::text_prism;
 
+/// What `hfw_mesh_load_file` reads, in the order the app's file dialog offers them.
+static LOAD_EXTENSIONS: &CStr = c".3mf,.stl,.obj";
+
 /// Version of the surface this library exports.
 ///
 /// It changes whenever a symbol is removed, a signature changes, or a struct
@@ -1175,6 +1178,16 @@ pub unsafe extern "C" fn hfw_mesh_load_file(path: *const c_char) -> *mut HfwMesh
     )
 }
 
+/// The file extensions [`hfw_mesh_load_file`] reads, comma separated with the
+/// leading dot: `.3mf,.stl,.obj`.
+///
+/// The pointer refers to a NUL-terminated string that lives for the life of the
+/// process; do not free it.
+#[no_mangle]
+pub extern "C" fn hfw_mesh_load_extensions() -> *const c_char {
+    LOAD_EXTENSIONS.as_ptr()
+}
+
 /// Cuts a mesh with a plane, returning the part below and the part above.
 ///
 /// Both halves are closed: the cut's own opening is capped, and a cut that passes through
@@ -1345,6 +1358,39 @@ pub unsafe extern "C" fn hfw_mesh_from_bytes(bytes: *const u8, len: usize) -> *m
             mesh,
             paint: Paint::default(),
         })))
+    };
+    report(build(), ptr::null_mut())
+}
+
+/// Writes a mesh as the bytes of an STL file.
+///
+/// A non-zero `binary` selects the binary form, which is what a slicer reads; zero
+/// writes the ASCII form, which is text a project file can store and a diff can read.
+/// Either way the face normal is computed from the triangle. The pointer is
+/// `*out_len` bytes long and must be released with [`hfw_buffer_free`].
+///
+/// # Safety
+///
+/// `mesh` must be a live handle that has not been freed, `out_len` must point at a
+/// writable `size_t`, and the bytes must not be used after they are freed.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_mesh_stl_bytes(
+    mesh: *const HfwMesh,
+    binary: c_int,
+    out_len: *mut usize,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        let mesh = unsafe { mesh.as_ref() }.ok_or_else(|| "mesh is null".to_owned())?;
+        if out_len.is_null() {
+            return Err("the length pointer is null".to_owned());
+        }
+        let bytes = mesh.mesh.to_stl_bytes(binary != 0).into_boxed_slice();
+        let len = bytes.len();
+        let pointer = Box::into_raw(bytes) as *mut c_char;
+        unsafe {
+            *out_len = len;
+        }
+        Ok(pointer)
     };
     report(build(), ptr::null_mut())
 }

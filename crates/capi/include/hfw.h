@@ -67,11 +67,28 @@ const char *hfw_settings_surface_json(void);
 const char *hfw_last_error(void);
 
 /**
- * Loads a mesh from an STL or 3MF file.
+ * Loads a mesh from an STL, OBJ or 3MF file.
  *
  * Release the result with hfw_mesh_free(). Returns NULL on failure.
  */
 HfwMesh *hfw_mesh_load_file(const char *path);
+
+/**
+ * The file extensions hfw_mesh_load_file() reads, comma separated with the leading
+ * dot: ".3mf,.stl,.obj". The pointer lives for the life of the process; do not free
+ * it.
+ */
+const char *hfw_mesh_load_extensions(void);
+
+/**
+ * Writes a mesh as the bytes of an STL file.
+ *
+ * A non-zero `binary` selects the binary form, which is what a slicer reads; zero
+ * writes the ASCII form, which is text a project file can store and a diff can read.
+ * The bytes are `*out_len` long and are released with hfw_buffer_free(); returns
+ * NULL on failure.
+ */
+char *hfw_mesh_stl_bytes(const HfwMesh *mesh, int binary, size_t *out_len);
 
 /**
  * Builds a mesh from the bytes of an STL file held in memory.
