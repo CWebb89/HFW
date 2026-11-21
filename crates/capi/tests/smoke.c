@@ -318,6 +318,38 @@ int main(int argc, char **argv) {
             check(hfw_plate_object_volume_visible(document, first, hole) == -1,
                   "a removed volume cannot be asked about");
 
+            check(hfw_plate_object_label(document, first, "left wing") == 0,
+                  "an object is labelled");
+            check(hfw_plate_object_name(document, first, "bracket") == 0,
+                  "and keeps a name of its own");
+            char label[32];
+            check(hfw_plate_object_label_get(document, first, label, sizeof label) == 9 &&
+                      strcmp(label, "left wing") == 0,
+                  "the label reads back apart from the name");
+            char object_name[32];
+            check(hfw_plate_object_name_get(document, first, object_name, sizeof object_name) == 7 &&
+                      strcmp(object_name, "bracket") == 0,
+                  "the name a label does not replace is still there");
+            check(hfw_plate_object_source(document, first, "/tmp/bracket.stl") == 0 &&
+                      hfw_plate_object_source_get(document, first, label, sizeof label) == 16 &&
+                      strcmp(label, "/tmp/bracket.stl") == 0,
+                  "an object records where it came from");
+            check(hfw_plate_object_dialect(document, first) == HFW_DIALECT_ENGINE &&
+                      hfw_plate_object_set_dialect(document, first, HFW_DIALECT_ORCA) == 0 &&
+                      hfw_plate_object_dialect(document, first) == HFW_DIALECT_ORCA,
+                  "an object remembers which dialect its settings are named in");
+            check(hfw_plate_object_apply_foreign(document, first, "sparse_infill_density", "40%") == 0,
+                  "a setting the engine knows is applied");
+            check(hfw_plate_object_apply_foreign(document, first, "spaghetti_detector", "3") == 1,
+                  "a name it does not know is kept instead");
+            char *kept = hfw_plate_object_foreign_json(document, first);
+            check(kept != NULL && strstr(kept, "\"reason\":\"unknown_name\"") != NULL &&
+                      strstr(kept, "\"value\":\"3\"") != NULL,
+                  "the kept setting carries its own text and the reason it was dropped");
+            hfw_string_free(kept);
+            check(hfw_plate_object_foreign_clear(document, first) == 0,
+                  "a re-import starts from nothing");
+
         hfw_plate_free(document);
     }
 

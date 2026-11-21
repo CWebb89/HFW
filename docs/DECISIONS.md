@@ -663,3 +663,35 @@ it is in the project file (version 10) and in a snapshot.
 
 Reverses by keeping one bed: the bed array stays a one-element vector, `object.bed` is
 always 0, and the twelve bed exports go away.
+
+## What an object says about itself, and why it is not a side table
+
+`next-layer`'s `Object` carries `name`, `label`, `path`, `foreignSettings` and
+`orcaDialect`, and `PlateDocument` displays `label` when there is one and `name` when
+there is not. This engine carried `name` alone, and `ignored_overrides` recorded a
+refused key without its value or its reason -- which meant anything the panel wanted to
+say about a dropped setting had to live outside the document, in a table keyed by object
+id that survived an undo only because a snapshot restores the id counter.
+
+That is the defect, not the missing fields: a second source of truth for object identity
+across undo. The fix is to hold the data where the object is, so there is one source.
+
+- **Name and label are separate strings.** One field cannot both keep what a save has to
+  write back and carry a rename that must be reversible; `display_name()` is derived.
+- **The source path is the object's**, not the caller's opaque bytes. It is shown, it is
+  used to reload, and an undo must not lose it.
+- **A kept foreign setting is `{ key, value, reason }`.** The key and value are the
+  file's own spelling -- verbatim, because a save writes them back out under the names
+  the other slicer reads -- and the reason is typed rather than a sentence, because a
+  panel groups them and a test asserts them. It is derived from `KeyError` where the
+  refusal happens instead of being inferred from an error string by the caller.
+  `unknown_name` and `unusable_value` are the two the engine can produce; a third
+  variant with no producer would be a guess.
+- **The dialect is per object.** One document can hold a part from each slicer.
+- **`Plate::apply_foreign_setting` returns "applied" or "kept" and treats neither as an
+  error**, because a foreign file carrying names this engine has never heard of is the
+  normal case, not a failure.
+
+Reverses by collapsing label into name and dropping the record type -- the project
+format would then need a version 12 that ignores `label=`, `source=`, `dialect=` and
+`<foreign>`, or a migration that folds them.

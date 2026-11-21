@@ -43,7 +43,7 @@ use hfw_engine::{
 };
 use hfw_font::Face;
 use hfw_mesh::CutPlane;
-use hfw_plate::{ObjectId, Plate, PlateObject, PlateSnapshot, VolumeId};
+use hfw_plate::{Dialect, ForeignRefusal, ObjectId, Plate, PlateObject, PlateSnapshot, VolumeId};
 use hfw_text::text_prism;
 
 /// What `hfw_mesh_load_file` reads, in the order the app's file dialog offers them.
@@ -1710,6 +1710,18 @@ pub unsafe extern "C" fn hfw_mesh_triangle_count(mesh: *const HfwMesh) -> usize 
     report(count(), 0)
 }
 
+/// An object's settings are named the way this engine names them.
+pub const HFW_DIALECT_ENGINE: i32 = 0;
+
+/// An object's settings are named the way Bambu Studio and OrcaSlicer name them.
+pub const HFW_DIALECT_ORCA: i32 = 1;
+
+/// A setting was kept because this engine has no setting by that name.
+pub const HFW_FOREIGN_UNKNOWN_NAME: i32 = 0;
+
+/// A setting was kept because this engine does not accept that value.
+pub const HFW_FOREIGN_UNUSABLE_VALUE: i32 = 1;
+
 /// Painted support: enforcers and blockers.
 pub const HFW_PAINT_SUPPORT: i32 = 0;
 
@@ -2076,6 +2088,309 @@ pub unsafe extern "C" fn hfw_plate_object_name(
         Ok(0)
     };
     report(rename(), -1)
+}
+
+/// Labels object `id` the way a user did, keeping the name it arrived with.
+///
+/// Name and label are separate because a rename has to be reversible and a save writes
+/// the file's own name back; what a list shows is the label when there is one and the
+/// name otherwise. An empty label clears it. Returns 0 on success, -1 when the object is
+/// not on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call and `label` a readable string.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_label(
+    plate: *mut HfwPlate,
+    id: u64,
+    label: *const c_char,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let label = unsafe { text_of(label, "label") }?;
+        let object = unsafe { &mut *plate }
+            .plate
+            .object_mut(id_from_number(id)?)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        object.set_label(label);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Writes object `id`'s label into `out` and returns the bytes it needs excluding the
+/// terminating NUL.
+///
+/// An unlabelled object reports 0 and writes an empty string. A buffer that is too
+/// short writes nothing and reports the length, so a caller can size and retry. Returns
+/// -1 when the object is not on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for `len` bytes, or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_label_get(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut c_char,
+    len: usize,
+) -> isize {
+    let read = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        unsafe { write_text(object.label(), out, len) }
+    };
+    report(read(), -1)
+}
+
+/// Records the file object `id` was imported from, or clears it with an empty string.
+///
+/// The path is the object's own, not the caller's bytes: a panel shows it, a reload
+/// needs it, and an undo that lost it is a document that cannot say where its parts came
+/// from. Returns 0 on success, -1 when the object is not on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call and `path` a readable string.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_source(
+    plate: *mut HfwPlate,
+    id: u64,
+    path: *const c_char,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let path = unsafe { text_of(path, "path") }?;
+        let object = unsafe { &mut *plate }
+            .plate
+            .object_mut(id_from_number(id)?)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        object.set_source(path);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Writes object `id`'s source path into `out` and returns the bytes it needs excluding
+/// the terminating NUL.
+///
+/// An object that came from nowhere -- a primitive -- reports 0 and writes an empty
+/// string. A buffer that is too short writes nothing and reports the length. Returns -1
+/// when the object is not on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle and `out` writable for `len` bytes, or null.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_source_get(
+    plate: *const HfwPlate,
+    id: u64,
+    out: *mut c_char,
+    len: usize,
+) -> isize {
+    let read = || -> Result<isize, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        unsafe { write_text(object.source(), out, len) }
+    };
+    report(read(), -1)
+}
+
+/// Which vocabulary object `id`'s settings are named in: `HFW_DIALECT_ENGINE` (0) for
+/// this engine's own names, `HFW_DIALECT_ORCA` (1) for Bambu Studio and OrcaSlicer
+/// names. Returns -1 when the object is not on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_dialect(plate: *const HfwPlate, id: u64) -> i32 {
+    let read = || -> Result<i32, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        Ok(dialect_number(object.dialect()))
+    };
+    report(read(), -1)
+}
+
+/// Records which vocabulary object `id`'s settings are named in, which is what a save
+/// uses to decide whose names to write.
+///
+/// Returns 0 on success, -1 when the object is not on the plate or the dialect is not
+/// one this engine knows.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_set_dialect(
+    plate: *mut HfwPlate,
+    id: u64,
+    dialect: i32,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let dialect = dialect_of(dialect)?;
+        let object = unsafe { &mut *plate }
+            .plate
+            .object_mut(id_from_number(id)?)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        object.set_dialect(dialect);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Applies one setting to object `id`, or keeps it on the object with the reason this
+/// engine would not take it.
+///
+/// This is what an import does with another slicer's per-object settings: the ones this
+/// engine understands become overrides and the rest stay on the object verbatim, with
+/// why they were not applied, so a save writes them back out and a panel can report what
+/// was dropped. Returns 0 when the setting was applied, 1 when it was kept instead, and
+/// -1 when the object is not on the plate -- a file from another slicer carrying names
+/// this engine has never heard of is expected, not an error.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call, and `key` and `value` readable
+/// strings.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_apply_foreign(
+    plate: *mut HfwPlate,
+    id: u64,
+    key: *const c_char,
+    value: *const c_char,
+) -> i32 {
+    let apply = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let key = unsafe { text_of(key, "key") }?;
+        let value = unsafe { text_of(value, "value") }?;
+        let plate = unsafe { &mut *plate };
+        let applied = plate
+            .plate
+            .apply_foreign_setting(id_from_number(id)?, &key, &value)
+            .map_err(|error| error.to_string())?;
+        Ok(i32::from(!applied))
+    };
+    report(apply(), -1)
+}
+
+/// Keeps one setting on object `id` verbatim, with why it was not applied.
+///
+/// This is how a rebuilt document re-attaches what it read back: `reason` is
+/// `HFW_FOREIGN_UNKNOWN_NAME` (0) or `HFW_FOREIGN_UNUSABLE_VALUE` (1). Returns 0 on
+/// success, -1 when the object is not on the plate or the reason is not one of those.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call, and `key` and `value` readable
+/// strings.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_foreign_set(
+    plate: *mut HfwPlate,
+    id: u64,
+    key: *const c_char,
+    value: *const c_char,
+    reason: i32,
+) -> i32 {
+    let set = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let key = unsafe { text_of(key, "key") }?;
+        let value = unsafe { text_of(value, "value") }?;
+        let reason = refusal_of(reason)?;
+        let object = unsafe { &mut *plate }
+            .plate
+            .object_mut(id_from_number(id)?)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        object.record_foreign(key, value, reason);
+        Ok(0)
+    };
+    report(set(), -1)
+}
+
+/// Drops every setting object `id` kept from a foreign file.
+///
+/// Returns 0 on success, -1 when the object is not on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle writable for the call.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_foreign_clear(plate: *mut HfwPlate, id: u64) -> i32 {
+    let clear = || -> Result<i32, String> {
+        if plate.is_null() {
+            return Err("plate handle is null".to_owned());
+        }
+        let object = unsafe { &mut *plate }
+            .plate
+            .object_mut(id_from_number(id)?)
+            .ok_or_else(|| format!("no object {id} is on the plate"))?;
+        object.clear_foreign_settings();
+        Ok(0)
+    };
+    report(clear(), -1)
+}
+
+/// Returns object `id`'s kept settings as a JSON array, in the order they were refused:
+/// `[{"key":…,"value":…,"reason":…,"note":…}]`.
+///
+/// The key and value are the file's own spelling, which is what a save writes back; the
+/// reason is `unknown_name` or `unusable_value` and the note is the sentence a panel
+/// shows. Release the string with `hfw_string_free`. Returns NULL when the object is not
+/// on the plate.
+///
+/// # Safety
+///
+/// `plate` must be a live handle.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_object_foreign_json(
+    plate: *const HfwPlate,
+    id: u64,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let object = object_of(&plate.plate, id)?;
+        let mut json = String::from("[");
+        for (index, held) in object.foreign_settings().iter().enumerate() {
+            if index > 0 {
+                json.push(',');
+            }
+            json.push('{');
+            push_json_text(&mut json, "key");
+            json.push(':');
+            push_json_text(&mut json, held.key());
+            json.push(',');
+            push_json_text(&mut json, "value");
+            json.push(':');
+            push_json_text(&mut json, held.value());
+            json.push(',');
+            push_json_text(&mut json, "reason");
+            json.push(':');
+            push_json_text(&mut json, held.reason().name());
+            json.push(',');
+            push_json_text(&mut json, "note");
+            json.push(':');
+            push_json_text(&mut json, held.reason().note());
+            json.push('}');
+        }
+        json.push(']');
+        CString::new(json)
+            .map(CString::into_raw)
+            .map_err(|_| "the foreign settings JSON contains a NUL".to_owned())
+    };
+    report(build(), ptr::null_mut())
 }
 
 /// Moves object `id` on the plate without touching its triangles.
@@ -3082,6 +3397,50 @@ fn volume_id(volume: u64) -> Result<VolumeId, String> {
 
 fn id_from_number(id: u64) -> Result<ObjectId, String> {
     ObjectId::from_number(id).ok_or_else(|| "object id 0 is not an object".to_owned())
+}
+
+/// Writes `text` into a caller's buffer and reports the bytes it needs.
+///
+/// A buffer that is too short writes nothing and reports the length, so a caller can
+/// size the call and retry rather than truncating a name.
+unsafe fn write_text(text: &str, out: *mut c_char, len: usize) -> Result<isize, String> {
+    let needed = text.len();
+    if out.is_null() || len < needed + 1 {
+        return Ok(needed as isize);
+    }
+    let buffer = unsafe { std::slice::from_raw_parts_mut(out as *mut u8, len) };
+    buffer[..needed].copy_from_slice(text.as_bytes());
+    buffer[needed] = 0;
+    Ok(needed as isize)
+}
+
+fn dialect_number(dialect: Dialect) -> i32 {
+    match dialect {
+        Dialect::Engine => HFW_DIALECT_ENGINE,
+        Dialect::Orca => HFW_DIALECT_ORCA,
+    }
+}
+
+fn dialect_of(number: i32) -> Result<Dialect, String> {
+    match number {
+        HFW_DIALECT_ENGINE => Ok(Dialect::Engine),
+        HFW_DIALECT_ORCA => Ok(Dialect::Orca),
+        other => Err(format!(
+            "dialect {other} is not one this engine knows: {HFW_DIALECT_ENGINE} is its own \
+             names and {HFW_DIALECT_ORCA} is Bambu Studio or OrcaSlicer's"
+        )),
+    }
+}
+
+fn refusal_of(number: i32) -> Result<ForeignRefusal, String> {
+    match number {
+        HFW_FOREIGN_UNKNOWN_NAME => Ok(ForeignRefusal::UnknownName),
+        HFW_FOREIGN_UNUSABLE_VALUE => Ok(ForeignRefusal::UnusableValue),
+        other => Err(format!(
+            "reason {other} is not one of {HFW_FOREIGN_UNKNOWN_NAME} (no such name) or \
+             {HFW_FOREIGN_UNUSABLE_VALUE} (a value this engine refuses)"
+        )),
+    }
 }
 
 /// Reads a row-major 4x4 matrix a caller passed, as this engine's transform.

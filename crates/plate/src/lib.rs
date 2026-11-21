@@ -322,6 +322,119 @@ impl Bed {
     }
 }
 
+/// Whether an object's settings are named the way this engine names them or the way
+/// the slicer the object came from names them.
+///
+/// A Bambu Studio or OrcaSlicer project writes its own words; exporting it under this
+/// engine's names would hand the other slicer a file it silently drops half of, so an
+/// object remembers which vocabulary it arrived in.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Dialect {
+    /// This engine's own setting names.
+    #[default]
+    Engine,
+    /// Bambu Studio and OrcaSlicer names, renamed by the caller before they arrive.
+    Orca,
+}
+
+impl Dialect {
+    /// The word a project file writes for this dialect.
+    pub fn name(self) -> &'static str {
+        match self {
+            Dialect::Engine => "engine",
+            Dialect::Orca => "orca",
+        }
+    }
+
+    /// The dialect a project file's word names, or nothing when it is not one.
+    pub fn from_name(text: &str) -> Option<Self> {
+        match text.trim() {
+            "engine" => Some(Dialect::Engine),
+            "orca" => Some(Dialect::Orca),
+            _ => None,
+        }
+    }
+}
+
+/// Why a setting a file carried was not applied.
+///
+/// Typed rather than a sentence, so a panel can say "9 names this engine does not have,
+/// 3 values it cannot take" and a test can assert which, and derived where the refusal
+/// happens instead of being parsed back out of an error message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ForeignRefusal {
+    /// This engine has no setting by that name.
+    UnknownName,
+    /// The setting exists, but the value is not one it accepts.
+    UnusableValue,
+}
+
+impl ForeignRefusal {
+    /// The word a project file writes for this refusal.
+    pub fn name(self) -> &'static str {
+        match self {
+            ForeignRefusal::UnknownName => "unknown_name",
+            ForeignRefusal::UnusableValue => "unusable_value",
+        }
+    }
+
+    /// The refusal a project file's word names, or nothing when it is not one.
+    pub fn from_name(text: &str) -> Option<Self> {
+        match text.trim() {
+            "unknown_name" => Some(ForeignRefusal::UnknownName),
+            "unusable_value" => Some(ForeignRefusal::UnusableValue),
+            _ => None,
+        }
+    }
+
+    /// What a panel shows a user about the settings that were kept and not applied.
+    pub fn note(self) -> &'static str {
+        match self {
+            ForeignRefusal::UnknownName => "this engine has no setting by that name",
+            ForeignRefusal::UnusableValue => "this engine does not accept that value",
+        }
+    }
+}
+
+/// One setting an object's file carried that this engine did not apply.
+///
+/// The key and the value are kept **verbatim, in the spelling the file used**, so
+/// opening a project from another slicer and saving it again loses nothing: a second
+/// save writes them back out under their own names. Only the reason travels with them,
+/// so a panel can say why a setting is being carried rather than applied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForeignSetting {
+    key: String,
+    value: String,
+    reason: ForeignRefusal,
+}
+
+impl ForeignSetting {
+    /// A setting that was kept rather than applied.
+    pub fn new(key: impl Into<String>, value: impl Into<String>, reason: ForeignRefusal) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+            reason,
+        }
+    }
+
+    /// The name the file wrote, in that file's own dialect.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The value the file wrote, verbatim.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    /// Why it was not applied.
+    pub fn reason(&self) -> ForeignRefusal {
+        self.reason
+    }
+}
+
 /// One body on the plate: what it is called, where it is, and how it prints.
 ///
 /// The geometry is behind an [`Arc`] rather than owned, so a snapshot of the plate
@@ -332,6 +445,9 @@ impl Bed {
 pub struct PlateObject {
     id: ObjectId,
     name: String,
+    label: String,
+    source: String,
+    dialect: Dialect,
     mesh: Arc<Mesh>,
     placement: MeshTransform,
     enabled: bool,
@@ -343,7 +459,7 @@ pub struct PlateObject {
     next_volume_id: u64,
     layer_heights: Vec<(f64, f64)>,
     overrides: BTreeSet<String>,
-    ignored_overrides: BTreeSet<String>,
+    foreign: Vec<ForeignSetting>,
 }
 
 /// A second body attached to an object: geometry plus what it does.
@@ -432,14 +548,64 @@ impl PlateObject {
         self.bed
     }
 
-    /// The name a file or a user gave it.
+    /// The name a file or a model gave this object.
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// Renames the object.
+    /// Renames the object itself, leaving any label the user gave it alone.
     pub fn set_name(&mut self, name: impl Into<String>) {
         self.name = name.into();
+    }
+
+    /// What the user renamed the object to, or an empty string when they have not.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Renames the object as a user did, keeping the name it came with.
+    ///
+    /// Name and label are two fields rather than one because a rename must be
+    /// reversible and a save has to write the file's own name back: `display_name` is
+    /// what a list shows, and it is the only one of the two a caller should show.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+
+    /// What a list, an error message or a panel should call this object: the label a
+    /// user gave it, or failing that the name it arrived with.
+    pub fn display_name(&self) -> &str {
+        if self.label.is_empty() {
+            &self.name
+        } else {
+            &self.label
+        }
+    }
+
+    /// Where the object came from -- the file it was imported from -- or an empty
+    /// string when it came from nowhere, such as a primitive.
+    ///
+    /// It lives on the object rather than in the caller's own bytes because a panel
+    /// shows it, a reload needs it, and an undo that lost it would be a document that
+    /// no longer knows where its parts came from.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Records where the object came from.
+    pub fn set_source(&mut self, source: impl Into<String>) {
+        self.source = source.into();
+    }
+
+    /// The dialect this object's settings are named in.
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
+    /// Records which dialect the object's settings are named in, which is what a save
+    /// uses to decide whose names to write.
+    pub fn set_dialect(&mut self, dialect: Dialect) {
+        self.dialect = dialect;
     }
 
     /// The geometry as the document holds it, before the placement.
@@ -758,10 +924,10 @@ impl PlateObject {
         self.overrides.iter().map(String::as_str)
     }
 
-    /// The profile keys this object was given that the engine cannot scope to an
-    /// object, so they were not applied.
-    pub fn ignored_overrides(&self) -> impl Iterator<Item = &str> {
-        self.ignored_overrides.iter().map(String::as_str)
+    /// The settings an object's file carried that this engine did not apply, in the
+    /// order they were refused, with the text the file wrote and why.
+    pub fn foreign_settings(&self) -> &[ForeignSetting] {
+        &self.foreign
     }
 
     /// Records that a key was applied to this object alone.
@@ -769,9 +935,31 @@ impl PlateObject {
         self.overrides.insert(key.into());
     }
 
-    /// Records that a key was refused because it cannot be scoped to an object.
-    pub fn mark_ignored_override(&mut self, key: impl Into<String>) {
-        self.ignored_overrides.insert(key.into());
+    /// Keeps a setting the file carried and this engine did not apply.
+    ///
+    /// The key and value are the file's own spelling, not a translated form: they are
+    /// what a save has to write back out. A key already recorded keeps its first
+    /// position and takes the new value, so importing the same file twice does not
+    /// grow the list.
+    pub fn record_foreign(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+        reason: ForeignRefusal,
+    ) {
+        let key = key.into();
+        let value = value.into();
+        if let Some(existing) = self.foreign.iter_mut().find(|held| held.key == key) {
+            existing.value = value;
+            existing.reason = reason;
+            return;
+        }
+        self.foreign.push(ForeignSetting::new(key, value, reason));
+    }
+
+    /// Drops every kept foreign setting, which is what a re-import starts from.
+    pub fn clear_foreign_settings(&mut self) {
+        self.foreign.clear();
     }
 
     /// The geometry with the placement applied.
@@ -1102,6 +1290,9 @@ impl Plate {
         self.objects.push(PlateObject {
             id,
             name,
+            label: String::new(),
+            source: String::new(),
+            dialect: Dialect::Engine,
             mesh: Arc::new(mesh),
             placement: MeshTransform::default(),
             enabled: true,
@@ -1113,7 +1304,7 @@ impl Plate {
             next_volume_id: 1,
             layer_heights: Vec::new(),
             overrides: BTreeSet::new(),
-            ignored_overrides: BTreeSet::new(),
+            foreign: Vec::new(),
         });
         Ok(id)
     }
@@ -1127,7 +1318,7 @@ impl Plate {
         let mut copy = self.object(id).ok_or(PlateError::NoSuchObject(id))?.clone();
         self.next_id += 1;
         let new_id = ObjectId(self.next_id);
-        copy.name = format!("{} copy", copy.name);
+        copy.label = format!("{} copy", copy.display_name());
         copy.id = new_id;
         self.objects.push(copy);
         Ok(new_id)
@@ -1290,12 +1481,44 @@ impl Plate {
         Ok(())
     }
 
+    /// Applies one setting from a file, and keeps it instead when this engine will not
+    /// take it.
+    ///
+    /// This is what an import does with a foreign project's per-object settings: the
+    /// ones this engine understands become overrides, and the rest stay on the object
+    /// with their own text and the reason they were not applied, so a save writes them
+    /// back out and a panel can say what was dropped. Returns `true` when the setting
+    /// was applied and `false` when it was kept, which is not an error -- a file from
+    /// another slicer is expected to carry settings this engine has never heard of.
+    pub fn apply_foreign_setting(
+        &mut self,
+        id: ObjectId,
+        key: &str,
+        value: &str,
+    ) -> Result<bool, PlateError> {
+        match self.set_object_setting(id, key, value) {
+            Ok(()) => Ok(true),
+            Err(PlateError::Setting(error)) => {
+                let reason = match error {
+                    hfw_engine::KeyError::Unknown(_) => ForeignRefusal::UnknownName,
+                    hfw_engine::KeyError::Value { .. } => ForeignRefusal::UnusableValue,
+                };
+                let object = self.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
+                object.record_foreign(key, value, reason);
+                Ok(false)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// Drops an object's own settings, so it prints with the plate's again.
+    ///
+    /// The settings it kept from a foreign file stay: they were never applied, and a
+    /// save still has to write them back out.
     pub fn clear_object_settings(&mut self, id: ObjectId) -> Result<(), PlateError> {
         let object = self.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
         object.settings = None;
         object.overrides.clear();
-        object.ignored_overrides.clear();
         Ok(())
     }
 

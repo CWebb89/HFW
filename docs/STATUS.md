@@ -139,6 +139,14 @@ Two more that matter when deciding whether to trust the output:
   the id counter — and share each object's geometry with the live plate, so the first
   write after a snapshot copies that object's mesh and the snapshot is unaffected. A
   restored plate slices to byte-identical G-code, which is the test.
+- An object carries what a panel needs about it and the document cannot lose: a `name`
+  and a separate `label` (what a user renamed it to, with `display_name()` as the thing
+  to show), the `source` path it was imported from, the `dialect` its settings are
+  named in, and the settings a foreign file carried that this engine did not apply --
+  kept verbatim with a typed reason (`unknown_name`, `unusable_value`), so a second save
+  writes them back out and a panel says what was dropped. `apply_foreign_setting`
+  applies or keeps and reports which; all of it rides the snapshot and the project file
+  (format version 11).
 - A document holds several plates: `hfw_plate_bed_count`/`_add`/`_remove`, a name and a
   lock per plate, `hfw_plate_add_on_bed` and `hfw_plate_object_set_bed` for membership
   (an object keeps its id when it moves), `hfw_plate_bed_object_ids` to read one plate

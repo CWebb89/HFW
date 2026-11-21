@@ -187,6 +187,18 @@ size_t hfw_mesh_triangle_count(const HfwMesh *mesh);
 /** Painted seam: 0 none, 1 enforcer, 2 blocker per triangle; applied to the outer wall. */
 #define HFW_PAINT_SEAM 1
 
+/** An object's settings are named the way this engine names them. */
+#define HFW_DIALECT_ENGINE 0
+
+/** An object's settings are named the way Bambu Studio and OrcaSlicer name them. */
+#define HFW_DIALECT_ORCA 1
+
+/** A setting was kept on an object because this engine has no setting by that name. */
+#define HFW_FOREIGN_UNKNOWN_NAME 0
+
+/** A setting was kept on an object because this engine does not accept that value. */
+#define HFW_FOREIGN_UNUSABLE_VALUE 1
+
 /**
  * Writes one paint channel onto `mesh`.
  *
@@ -876,6 +888,91 @@ int32_t hfw_plate_object_volume_visible(const HfwPlate *plate, uint64_t id, uint
  */
 int32_t hfw_plate_object_volume_set_visible(HfwPlate *plate, uint64_t id, uint64_t volume,
                                             int32_t visible);
+
+/**
+ * Labels object `id` the way a user did, keeping the name it arrived with.
+ *
+ * Name and label are separate because a rename has to be reversible and a save writes
+ * the file's own name back; what a list shows is the label when there is one and the
+ * name otherwise. An empty label clears it. Returns 0 on success, -1 when the object is
+ * not on the plate.
+ */
+int32_t hfw_plate_object_label(HfwPlate *plate, uint64_t id, const char *label);
+
+/**
+ * Writes object `id`'s label into `out` and returns the bytes it needs excluding the
+ * terminating NUL. An unlabelled object reports 0 and writes an empty string; a buffer
+ * that is too short writes nothing. Returns -1 when the object is not on the plate.
+ */
+ptrdiff_t hfw_plate_object_label_get(const HfwPlate *plate, uint64_t id, char *out, size_t len);
+
+/**
+ * Records the file object `id` was imported from, or clears it with an empty string.
+ *
+ * The path is the object's own, not the caller's bytes: a panel shows it, a reload needs
+ * it, and an undo that lost it is a document that cannot say where its parts came from.
+ * Returns 0 on success, -1 when the object is not on the plate.
+ */
+int32_t hfw_plate_object_source(HfwPlate *plate, uint64_t id, const char *path);
+
+/**
+ * Writes object `id`'s source path into `out` and returns the bytes it needs excluding
+ * the terminating NUL. An object that came from nowhere reports 0 and writes an empty
+ * string. Returns -1 when the object is not on the plate.
+ */
+ptrdiff_t hfw_plate_object_source_get(const HfwPlate *plate, uint64_t id, char *out, size_t len);
+
+/**
+ * Which vocabulary object `id`'s settings are named in: `HFW_DIALECT_ENGINE` for this
+ * engine's own names, `HFW_DIALECT_ORCA` for Bambu Studio and OrcaSlicer names, which is
+ * what a save uses to decide whose names to write. Returns -1 when the object is not on
+ * the plate.
+ */
+int32_t hfw_plate_object_dialect(const HfwPlate *plate, uint64_t id);
+
+/**
+ * Records which vocabulary object `id`'s settings are named in. Returns 0 on success, -1
+ * when the object is not on the plate or the dialect is not one this engine knows.
+ */
+int32_t hfw_plate_object_set_dialect(HfwPlate *plate, uint64_t id, int32_t dialect);
+
+/**
+ * Applies one setting to object `id`, or keeps it on the object with the reason this
+ * engine would not take it.
+ *
+ * This is what an import does with another slicer's per-object settings: the ones this
+ * engine understands become overrides, and the rest stay on the object verbatim with why
+ * they were not applied, so a save writes them back out and a panel can report what was
+ * dropped. Returns 0 when the setting was applied, 1 when it was kept instead, and -1
+ * when the object is not on the plate -- a file carrying names this engine has never
+ * heard of is expected, not an error.
+ */
+int32_t hfw_plate_object_apply_foreign(HfwPlate *plate, uint64_t id, const char *key,
+                                       const char *value);
+
+/**
+ * Keeps one setting on object `id` verbatim, with why it was not applied: `reason` is
+ * `HFW_FOREIGN_UNKNOWN_NAME` or `HFW_FOREIGN_UNUSABLE_VALUE`.
+ *
+ * This is how a rebuilt document re-attaches what it read back. Returns 0 on success, -1
+ * when the object is not on the plate or the reason is not one of those.
+ */
+int32_t hfw_plate_object_foreign_set(HfwPlate *plate, uint64_t id, const char *key,
+                                     const char *value, int32_t reason);
+
+/** Drops every setting object `id` kept from a foreign file. 0 on success, -1 on error. */
+int32_t hfw_plate_object_foreign_clear(HfwPlate *plate, uint64_t id);
+
+/**
+ * Returns object `id`'s kept settings as a JSON array, in the order they were refused:
+ * `[{"key":…,"value":…,"reason":…,"note":…}]`.
+ *
+ * The key and value are the file's own spelling, which is what a save writes back; the
+ * reason is `unknown_name` or `unusable_value`, and the note is the sentence a panel
+ * shows. Release the string with `hfw_string_free`. Returns NULL when the object is not on
+ * the plate.
+ */
+char *hfw_plate_object_foreign_json(const HfwPlate *plate, uint64_t id);
 
 /** Releases a string this library returned. A NULL pointer is ignored. */
 void hfw_string_free(char *text);

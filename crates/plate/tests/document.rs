@@ -243,7 +243,16 @@ fn a_duplicate_carries_everything_and_takes_a_new_id() {
     assert_eq!(plate.len(), 2);
     let original = plate.object(first).expect("the original is still there");
     let duplicated = plate.object(copy).expect("the copy is there");
-    assert_eq!(duplicated.name(), "bracket copy");
+    assert_eq!(
+        duplicated.name(),
+        "bracket",
+        "the name it came with is kept"
+    );
+    assert_eq!(
+        duplicated.display_name(),
+        "bracket copy",
+        "the copy is what a list shows as a copy"
+    );
     assert_eq!(duplicated.overrides().count(), original.overrides().count());
     assert_eq!(
         duplicated.mesh().triangle_count(),
@@ -1615,4 +1624,155 @@ fn a_snapshot_restores_the_plates_and_what_is_hidden() {
         .volume(volume)
         .expect("the volume came back");
     assert!(restored.visible());
+}
+
+/// Name, label, source path and dialect are the object's own, and a label is what a
+/// list shows without losing the name the file gave.
+#[test]
+fn an_objects_label_sits_beside_its_name_with_its_source_and_dialect() {
+    let mut plate = plate();
+    let id = plate.add("Bracket.stl", cube()).expect("a cube adds");
+    let object = plate.object(id).expect("the object is there");
+    assert_eq!(object.name(), "Bracket.stl");
+    assert_eq!(object.label(), "");
+    assert_eq!(
+        object.display_name(),
+        "Bracket.stl",
+        "with no label the name is what a list shows"
+    );
+    assert_eq!(object.source(), "", "a bare mesh came from nowhere");
+    assert_eq!(object.dialect(), hfw_plate::Dialect::Engine);
+
+    let object = plate.object_mut(id).expect("the object is there");
+    object.set_label("left wing");
+    object.set_source("/home/user/models/Bracket.stl");
+    object.set_dialect(hfw_plate::Dialect::Orca);
+    assert_eq!(object.display_name(), "left wing");
+    assert_eq!(
+        object.name(),
+        "Bracket.stl",
+        "renaming does not destroy the name a save writes back"
+    );
+
+    let object = plate.object_mut(id).expect("the object is there");
+    object.set_label("");
+    assert_eq!(object.display_name(), "Bracket.stl", "clearing restores it");
+}
+
+/// A setting the engine will not take keeps its own text and why, and the ones it takes
+/// become overrides.
+#[test]
+fn a_refused_foreign_setting_keeps_its_text_and_its_reason() {
+    let mut plate = plate();
+    let id = plate.add("Bracket.stl", cube()).expect("a cube adds");
+
+    assert!(
+        plate
+            .apply_foreign_setting(id, "sparse_infill_density", "40%")
+            .expect("the object is there"),
+        "a setting this engine knows is applied"
+    );
+    assert!(
+        !plate
+            .apply_foreign_setting(id, "spaghetti_detector", "3")
+            .expect("the object is there"),
+        "a name it does not know is kept, not applied"
+    );
+    assert!(
+        !plate
+            .apply_foreign_setting(id, "walls", "many")
+            .expect("the object is there"),
+        "a value it cannot take is kept too"
+    );
+
+    let object = plate.object(id).expect("the object is there");
+    let kept = object.foreign_settings();
+    assert_eq!(kept.len(), 2, "both refusals are on the object");
+    assert_eq!(kept[0].key(), "spaghetti_detector");
+    assert_eq!(
+        kept[0].value(),
+        "3",
+        "the value is the text the file wrote, not a translated one"
+    );
+    assert_eq!(kept[0].reason(), hfw_plate::ForeignRefusal::UnknownName);
+    assert_eq!(kept[1].key(), "walls");
+    assert_eq!(kept[1].value(), "many");
+    assert_eq!(kept[1].reason(), hfw_plate::ForeignRefusal::UnusableValue);
+    assert!(!kept[0].reason().note().is_empty());
+    assert_eq!(
+        object.overrides().collect::<Vec<_>>(),
+        ["sparse_infill_density"],
+        "only the applied one is an override"
+    );
+
+    plate
+        .object_mut(id)
+        .expect("the object is there")
+        .clear_foreign_settings();
+    assert!(
+        plate
+            .object(id)
+            .expect("the object is there")
+            .foreign_settings()
+            .is_empty(),
+        "a re-import starts from nothing"
+    );
+}
+
+/// The label, the path, the dialect and the refusals with their reasons are part of the
+/// document, so a save keeps them and an undo restores them.
+#[test]
+fn the_labels_paths_dialect_and_refusals_survive_a_project_and_a_snapshot() {
+    let mut plate = plate();
+    let id = plate.add("Bracket.stl", cube()).expect("a cube adds");
+    let object = plate.object_mut(id).expect("the object is there");
+    object.set_label("left wing");
+    object.set_source("/home/user/models/Bracket.stl");
+    object.set_dialect(hfw_plate::Dialect::Orca);
+    object.record_foreign(
+        "spaghetti_detector",
+        "3",
+        hfw_plate::ForeignRefusal::UnknownName,
+    );
+    object.record_foreign(
+        "support_style",
+        "tree",
+        hfw_plate::ForeignRefusal::UnusableValue,
+    );
+
+    let snapshot = plate.snapshot();
+    plate
+        .object_mut(id)
+        .expect("the object is there")
+        .set_label("wrong");
+    plate
+        .object_mut(id)
+        .expect("the object is there")
+        .clear_foreign_settings();
+    plate.restore(&snapshot);
+    let restored = plate.object(id).expect("the object is there");
+    assert_eq!(restored.display_name(), "left wing");
+    assert_eq!(
+        restored.foreign_settings().len(),
+        2,
+        "an undo that lost why a setting was dropped would be a panel that lies"
+    );
+    assert_eq!(
+        restored.foreign_settings()[1].reason(),
+        hfw_plate::ForeignRefusal::UnusableValue
+    );
+
+    let bytes = plate.to_project().expect("the project writes");
+    let reopened = Plate::from_project(&bytes, Settings::default()).expect("the project reads");
+    let reopened = reopened.object(id).expect("the object is there");
+    assert_eq!(reopened.name(), "Bracket.stl");
+    assert_eq!(reopened.label(), "left wing");
+    assert_eq!(reopened.source(), "/home/user/models/Bracket.stl");
+    assert_eq!(reopened.dialect(), hfw_plate::Dialect::Orca);
+    let kept = reopened.foreign_settings();
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[0].key(), "spaghetti_detector");
+    assert_eq!(kept[0].value(), "3");
+    assert_eq!(kept[0].reason(), hfw_plate::ForeignRefusal::UnknownName);
+    assert_eq!(kept[1].reason(), hfw_plate::ForeignRefusal::UnusableValue);
 }

@@ -24,7 +24,7 @@ use hfw_engine::{
 };
 use hfw_mesh::{archive_parts, model_part_xml, objects_from_3mf_text, MeshTransform};
 
-use crate::{ObjectId, Plate, PlateError};
+use crate::{Dialect, ForeignRefusal, ForeignSetting, ObjectId, Plate, PlateError};
 
 /// The part that carries what the 3MF format has no field for.
 pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
@@ -36,10 +36,12 @@ pub const PROJECT_PART: &str = "Metadata/hfw_project.xml";
 /// version 7 the settings a modifier volume prints its region with, version 8 the
 /// caller's own bytes, version 9 a volume's own placement inside its object, version
 /// 10 more than one plate (each with its name and lock) and a volume's name and
-/// visibility. Older files still open: they simply carry none of what they predate,
-/// every object lands on the document's first plate, and a volume with no name sits
-/// there unnamed and visible.
-pub const PROJECT_VERSION: u32 = 10;
+/// visibility, version 11 an object's label, its source path, the dialect its settings
+/// are named in and the settings a foreign file carried that this engine kept rather
+/// than applied. Older files still open: they simply carry none of what they predate,
+/// every object lands on the document's first plate, a volume with no name sits there
+/// unnamed and visible, and an object with no label shows the name it arrived with.
+pub const PROJECT_VERSION: u32 = 11;
 
 /// Oldest project format this reader accepts.
 const OLDEST_PROJECT_VERSION: u32 = 1;
@@ -189,6 +191,17 @@ impl Plate {
                     return Err(PlateError::NoSuchBed(saved.bed));
                 }
                 plate.set_object_bed(id, saved.bed)?;
+                let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
+                object.set_label(saved.label.clone());
+                object.set_source(saved.source.clone());
+                object.set_dialect(saved.dialect);
+                for foreign in &saved.foreign {
+                    object.record_foreign(
+                        foreign.key().to_owned(),
+                        foreign.value().to_owned(),
+                        foreign.reason(),
+                    );
+                }
                 if let Some(placement) = saved.placement {
                     let object = plate.object_mut(id).ok_or(PlateError::NoSuchObject(id))?;
                     object.set_placement(placement);
@@ -251,6 +264,10 @@ impl Plate {
 struct SavedObject {
     index: usize,
     bed: usize,
+    label: String,
+    source: String,
+    dialect: Dialect,
+    foreign: Vec<ForeignSetting>,
     enabled: bool,
     placement: Option<MeshTransform>,
     settings: Vec<(String, String)>,
@@ -284,9 +301,13 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
     for (index, object) in plate.objects.iter().enumerate() {
         let placement = object.placement();
         xml.push_str(&format!(
-            "  <object index=\"{index}\" plate=\"{}\" enabled=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\">\n",
+            "  <object index=\"{index}\" plate=\"{}\" enabled=\"{}\" label=\"{}\" source=\"{}\" \
+             dialect=\"{}\" placement=\"{} {} {} {} {} {} {} {} {}\">\n",
             object.bed(),
             if object.enabled { 1 } else { 0 },
+            escape(object.label()),
+            escape(object.source()),
+            object.dialect().name(),
             placement.scale[0],
             placement.scale[1],
             placement.scale[2],
@@ -313,6 +334,14 @@ fn project_part(plate: &Plate) -> Result<String, PlateError> {
         for (z, height) in object.layer_heights() {
             xml.push_str(&format!(
                 "    <layer z=\"{z:.6}\" height=\"{height:.6}\"/>\n"
+            ));
+        }
+        for foreign in object.foreign_settings() {
+            xml.push_str(&format!(
+                "    <foreign key=\"{}\" value=\"{}\" reason=\"{}\"/>\n",
+                escape(foreign.key()),
+                escape(foreign.value()),
+                foreign.reason().name()
             ));
         }
         for (channel, states) in paint_channels(&object.paint) {
@@ -613,11 +642,47 @@ fn parse_project(xml: &str) -> Result<SavedProject, PlateError> {
             }
             None => None,
         };
+        let mut foreign = Vec::new();
+        for entry in elements(&block, "foreign") {
+            let key = attribute_in(&entry, "foreign", "key")
+                .ok_or_else(|| PlateError::Slice("a kept setting names no key".to_owned()))?;
+            let value = attribute_in(&entry, "foreign", "value")
+                .ok_or_else(|| PlateError::Slice("a kept setting has no value".to_owned()))?;
+            let reason = attribute_in(&entry, "foreign", "reason").unwrap_or_default();
+            let reason = ForeignRefusal::from_name(&reason).ok_or_else(|| {
+                PlateError::Slice(format!(
+                    "a kept setting says it was refused because {reason:?}, which is not one \
+                     of unknown_name or unusable_value"
+                ))
+            })?;
+            foreign.push(ForeignSetting::new(
+                unescape(&key),
+                unescape(&value),
+                reason,
+            ));
+        }
+        let dialect = match attribute_in(&block, "object", "dialect") {
+            Some(text) => Dialect::from_name(&text).ok_or_else(|| {
+                PlateError::Slice(format!(
+                    "an object says its settings are named in {text:?}, which is not one of \
+                     engine or orca"
+                ))
+            })?,
+            None => Dialect::Engine,
+        };
         saved.push(SavedObject {
             index,
             bed: attribute_in(&block, "object", "plate")
                 .and_then(|bed| bed.trim().parse().ok())
                 .unwrap_or(0),
+            label: attribute_in(&block, "object", "label")
+                .map(|label| unescape(&label))
+                .unwrap_or_default(),
+            source: attribute_in(&block, "object", "source")
+                .map(|source| unescape(&source))
+                .unwrap_or_default(),
+            dialect,
+            foreign,
             enabled: enabled.trim() != "0",
             placement,
             settings,

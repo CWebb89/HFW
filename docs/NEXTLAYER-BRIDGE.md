@@ -248,8 +248,8 @@ read-back that a settings panel shows has to be the text the engine took.
 
 ### What next-layer has not declared (2026-11-21)
 
-`next-layer/src/app/src/hfw.rs` declares **52** of the **111** functions
-`crates/capi/include/hfw.h` exports, so a 59-row gap sits between what the engine
+`next-layer/src/app/src/hfw.rs` declares **52** of the **121** functions
+`crates/capi/include/hfw.h` exports, so a 69-row gap sits between what the engine
 can do and what the application has told its own compiler about. Recounted
 2026-11-21 by adding exports, against the header and against that file, one row
 per symbol:
@@ -283,6 +283,16 @@ next-layer would call it today.
 | `hfw_plate_object_rotate` | turns an object about its own centre on one axis | PlateDocument (`rotateSelection`) | none |
 | `hfw_plate_object_mirror` | mirrors an object in place, winding corrected | PlateDocument (mirror tool) | none |
 | `hfw_plate_object_set` | one print-level setting on one object, by name and value | PlateDocument (`setObjectSetting`) | none |
+| `hfw_plate_object_apply_foreign` | applies a setting, or keeps it with why it was dropped | PlateDocument (`applyForeignSettings`) | none |
+| `hfw_plate_object_foreign_set` | keeps a setting verbatim with its reason, for a rebuild | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_foreign_clear` | drops what an object kept from a foreign file | PlateDocument (re-import) | none |
+| `hfw_plate_object_foreign_json` | the kept settings, their own text and why, as JSON | PlateDocument (the dropped-settings panel) | `hfw_string_free` |
+| `hfw_plate_object_label` | renames an object as a user did, keeping its name | PlateDocument (`renameObject`) | none |
+| `hfw_plate_object_label_get` | reads a label back apart from the name | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_source` | records the file the object came from | PlateDocument (`importObject`) | none |
+| `hfw_plate_object_source_get` | reads that path back | HfwEngine (`readPlateSnapshot`) | none |
+| `hfw_plate_object_dialect` | whose names the object's settings are written in | PlateDocument (export) | none |
+| `hfw_plate_object_set_dialect` | records it, so a save writes the right vocabulary | PlateDocument (`applyForeignSettings`) | none |
 | `hfw_plate_object_clear_settings` | drops every override an object carries | PlateDocument | none |
 | `hfw_plate_object_add_volume` | attaches a part, negative or modifier volume, returns its id | PlateDocument (`addVolume`) | none |
 | `hfw_plate_object_add_volume_placed` | the same, with the volume placed inside the object | PlateDocument (`addVolume`) | none |
@@ -332,13 +342,13 @@ next-layer would call it today.
 | `hfw_job_take_gcode` | takes the finished file; the job handle is consumed | SliceRuntime | `hfw_gcode_free` |
 | `hfw_job_free` | releases a job, cancelling and joining it first | SliceRuntime | owns itself |
 
-Read as a work list, the split is clean: 29 rows are `PlateDocument`'s edit gestures
-(name, duplicate, rotate, mirror, bake, settings, paint, volumes with their names,
-visibility, ids and placements, layer heights, the plates and what moves between
-them, the undo step, the cut and text tools), 14 are what `readPlateSnapshot` and the
-project file still need to read a plate back, 10 are `SliceRuntime` and its timeline
-(slice of a plate, preview, strokes, the threaded job), 1 is `PresetStore`, 2 are the
-free functions every getter's caller needs, and 4 have no caller in next-layer at all:
+Read as a work list, the split is clean: 33 rows are `PlateDocument`'s edit gestures
+(name and label, duplicate, rotate, mirror, bake, settings and the foreign ones it
+keeps, paint, volumes with their names, visibility, ids and placements, layer heights,
+the plates and what moves between them, the undo step, the cut and text tools), 20 are
+what `readPlateSnapshot` and the project file still need to read a plate back, 10 are
+`SliceRuntime` and its timeline (slice of a plate, preview, strokes, the threaded job),
+1 is `PresetStore`, 2 are the free functions every getter's caller needs, and 4 have no caller in next-layer at all:
 the two mesh-part calls and `hfw_slice_meshes`, because a plate object and not a bare
 mesh is the only thing the application slices, plus `hfw_snapshot_object_count`, which
 reports what a snapshot holds when reading the plate after a restore says the same
@@ -404,6 +414,39 @@ stating, because they are the questions the application will ask:
   drawing it: `PlateDocument::sliceObjectsFor` skips an invisible volume, so a hidden
   negative volume cuts nothing. Both travel in the project file (format version 10) and
   in a snapshot.
+
+**An object knows its label, where it came from, whose vocabulary it speaks, and
+what it dropped.** The seventh concept, and the last thing `PlateDocument` keeps in a
+side table keyed by object id: `Object` holds `name`, `label`, `path`,
+`foreignSettings` and `orcaDialect`, and `displayName()` is `label` if it is set and
+`name` otherwise. This engine had `name` alone, and `ignored_overrides` recorded a
+refused key without its value or its reason, so anything the panel wanted to say about a
+dropped setting had to live outside the document -- and outlive an undo only because the
+snapshot happens to restore `next_id`.
+
+The shape, and why each part is where it is:
+
+- **Name and label are two fields.** `name` is what the file or model gave, `label` is
+  the user's rename, and `display_name()` is the only one of the two a caller shows.
+  One field would make a rename destroy what a save has to write back, and a rename no
+  longer reversible.
+- **The source path belongs to the object** (`source`, empty meaning "came from
+  nowhere"), not to the caller's opaque bytes: a panel shows it, a reload needs it, and
+  an undo that lost it is a document that cannot say where its parts came from.
+- **A kept foreign setting is a record, not a name**: `ForeignSetting { key, value,
+  reason }` with the **key and value verbatim in the file's own spelling** -- that is
+  what a second save writes back out -- and a **typed** reason (`unknown_name`,
+  `unusable_value`) rather than a sentence, so a panel can group ("9 names, 3 values")
+  and a test can assert which. The reason is derived where the refusal happens, from
+  `KeyError`, rather than parsed back out of an error message by the caller.
+- **The dialect is per object** (`engine` or `orca`), because the vocabulary belongs to
+  the object, not the plate: one document can hold a part from each slicer.
+- **`apply_foreign_setting` applies or keeps, and says which**: the return value is
+  "applied" or "kept", and neither is an error, because a file from another slicer
+  carrying names this engine has never heard of is expected.
+- **All of it rides the snapshot and the project file** (format version 11): an undo
+  that lost why a setting was dropped would be a panel that lies about the document it
+  is showing.
 
 **Geometry — binary STL bytes.** `ProjectObjectRecord.mesh: Vec<u8>`, and the same for
 a volume. Exports: `hfw_mesh_stl_bytes(mesh, 1, &len)` out, `hfw_mesh_from_bytes` in.

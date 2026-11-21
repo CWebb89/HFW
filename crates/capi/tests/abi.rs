@@ -16,16 +16,19 @@ use hfw_capi::{
     hfw_plate_bed_remove, hfw_plate_bed_set_locked, hfw_plate_bed_slice, hfw_plate_bounds,
     hfw_plate_free, hfw_plate_in_layer_count, hfw_plate_in_layer_get, hfw_plate_marker_count,
     hfw_plate_marker_get, hfw_plate_metadata_get, hfw_plate_new, hfw_plate_object_add_volume,
-    hfw_plate_object_add_volume_placed, hfw_plate_object_bed, hfw_plate_object_bounds,
-    hfw_plate_object_clear_settings, hfw_plate_object_count, hfw_plate_object_duplicate,
-    hfw_plate_object_enabled, hfw_plate_object_enabled_get, hfw_plate_object_ids,
-    hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get, hfw_plate_object_mesh,
-    hfw_plate_object_mirror, hfw_plate_object_name, hfw_plate_object_name_get,
-    hfw_plate_object_paint, hfw_plate_object_paint_get, hfw_plate_object_placement,
-    hfw_plate_object_placement_get, hfw_plate_object_placement_matrix,
+    hfw_plate_object_add_volume_placed, hfw_plate_object_apply_foreign, hfw_plate_object_bed,
+    hfw_plate_object_bounds, hfw_plate_object_clear_settings, hfw_plate_object_count,
+    hfw_plate_object_dialect, hfw_plate_object_duplicate, hfw_plate_object_enabled,
+    hfw_plate_object_enabled_get, hfw_plate_object_foreign_clear, hfw_plate_object_foreign_json,
+    hfw_plate_object_foreign_set, hfw_plate_object_ids, hfw_plate_object_label,
+    hfw_plate_object_label_get, hfw_plate_object_layer_heights, hfw_plate_object_layer_heights_get,
+    hfw_plate_object_mesh, hfw_plate_object_mirror, hfw_plate_object_name,
+    hfw_plate_object_name_get, hfw_plate_object_paint, hfw_plate_object_paint_get,
+    hfw_plate_object_placement, hfw_plate_object_placement_get, hfw_plate_object_placement_matrix,
     hfw_plate_object_placement_matrix_get, hfw_plate_object_remove, hfw_plate_object_remove_volume,
     hfw_plate_object_rotate, hfw_plate_object_set, hfw_plate_object_set_bed,
-    hfw_plate_object_settings_json, hfw_plate_object_volume_count, hfw_plate_object_volume_ids,
+    hfw_plate_object_set_dialect, hfw_plate_object_settings_json, hfw_plate_object_source,
+    hfw_plate_object_source_get, hfw_plate_object_volume_count, hfw_plate_object_volume_ids,
     hfw_plate_object_volume_kind, hfw_plate_object_volume_mesh, hfw_plate_object_volume_name,
     hfw_plate_object_volume_name_get, hfw_plate_object_volume_placement,
     hfw_plate_object_volume_placement_get, hfw_plate_object_volume_set_visible,
@@ -34,8 +37,10 @@ use hfw_capi::{
     hfw_plate_set_markers, hfw_plate_set_metadata, hfw_plate_slice, hfw_plate_slice_placed,
     hfw_plate_snapshot, hfw_plate_volume_set, hfw_slice_meshes, hfw_snapshot_free,
     hfw_snapshot_object_count, hfw_string_free, hfw_text_mesh, HfwBounds, HfwJobProgress,
-    HfwTransform, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED, HFW_MARKER_CUSTOM,
-    HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT, HFW_VOLUME_MODIFIER, HFW_VOLUME_NEGATIVE,
+    HfwTransform, HFW_DIALECT_ENGINE, HFW_DIALECT_ORCA, HFW_FOREIGN_UNKNOWN_NAME,
+    HFW_FOREIGN_UNUSABLE_VALUE, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED,
+    HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT, HFW_VOLUME_MODIFIER,
+    HFW_VOLUME_NEGATIVE,
 };
 
 fn fixture(name: &str) -> String {
@@ -2471,6 +2476,217 @@ fn a_volumes_name_and_visibility_cross_the_abi() {
         "a volume that does not exist is refused"
     );
 
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
+}
+
+/// An object's label, source path, dialect and kept foreign settings cross the ABI,
+/// and a rebuild from a read-back is the same document.
+#[test]
+fn a_labels_path_dialect_and_refused_settings_cross_the_abi() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!cube.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    assert_ne!(id, 0, "{}", last_error());
+
+    assert_eq!(
+        unsafe { hfw_plate_object_dialect(plate, id) },
+        HFW_DIALECT_ENGINE,
+        "an object is named the way this engine names things until told otherwise"
+    );
+    let label = c_string("left wing");
+    assert_eq!(
+        unsafe { hfw_plate_object_label(plate, id, label.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    let source = c_string("/home/user/models/cube.stl");
+    assert_eq!(
+        unsafe { hfw_plate_object_source(plate, id, source.as_ptr()) },
+        0,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_set_dialect(plate, id, HFW_DIALECT_ORCA) },
+        0,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_set_dialect(plate, id, 7) },
+        -1,
+        "a dialect this engine does not know is refused"
+    );
+
+    let mut text = vec![0i8; 64];
+    assert_eq!(
+        unsafe { hfw_plate_object_label_get(plate, id, text.as_mut_ptr(), text.len()) },
+        9,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(text.as_ptr()) }.to_str(),
+        Ok("left wing")
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_source_get(plate, id, text.as_mut_ptr(), text.len()) },
+        26,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(text.as_ptr()) }.to_str(),
+        Ok("/home/user/models/cube.stl")
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_dialect(plate, id) },
+        HFW_DIALECT_ORCA
+    );
+
+    let key = c_string("sparse_infill_density");
+    let value = c_string("40%");
+    assert_eq!(
+        unsafe { hfw_plate_object_apply_foreign(plate, id, key.as_ptr(), value.as_ptr()) },
+        0,
+        "a setting this engine knows is applied: {}",
+        last_error()
+    );
+    let refused = c_string("spaghetti_detector");
+    assert_eq!(
+        unsafe { hfw_plate_object_apply_foreign(plate, id, refused.as_ptr(), value.as_ptr()) },
+        1,
+        "a name it does not know is kept, not refused as an error"
+    );
+    let bad_value = c_string("walls");
+    let bad = c_string("many");
+    assert_eq!(
+        unsafe { hfw_plate_object_apply_foreign(plate, id, bad_value.as_ptr(), bad.as_ptr()) },
+        1,
+        "a value it cannot take is kept too"
+    );
+
+    let json = unsafe { hfw_plate_object_foreign_json(plate, id) };
+    assert!(!json.is_null(), "{}", last_error());
+    let kept = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .expect("the JSON is text")
+        .to_owned();
+    assert_eq!(
+        kept,
+        r#"[{"key":"spaghetti_detector","value":"40%","reason":"unknown_name","note":"this engine has no setting by that name"},{"key":"walls","value":"many","reason":"unusable_value","note":"this engine does not accept that value"}]"#,
+        "the kept settings carry their own text and why"
+    );
+
+    let again = hfw_plate_new();
+    let copy = unsafe { hfw_plate_add(again, cube) };
+    let copy_label = c_string("left wing");
+    assert_eq!(
+        unsafe { hfw_plate_object_label(again, copy, copy_label.as_ptr()) },
+        0
+    );
+    for (name, text, reason) in [
+        ("spaghetti_detector", "40%", HFW_FOREIGN_UNKNOWN_NAME),
+        ("walls", "many", HFW_FOREIGN_UNUSABLE_VALUE),
+    ] {
+        let name = c_string(name);
+        let value = c_string(text);
+        assert_eq!(
+            unsafe {
+                hfw_plate_object_foreign_set(again, copy, name.as_ptr(), value.as_ptr(), reason)
+            },
+            0,
+            "a kept setting re-attaches: {}",
+            last_error()
+        );
+    }
+    let rebuilt = unsafe { hfw_plate_object_foreign_json(again, copy) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(rebuilt) }.to_str(),
+        Ok(kept.as_str()),
+        "a document rebuilt from what it read back keeps the same refusals"
+    );
+    assert_eq!(
+        unsafe {
+            let ignored = c_string("x");
+            hfw_plate_object_foreign_set(again, copy, ignored.as_ptr(), ignored.as_ptr(), 9)
+        },
+        -1,
+        "a reason this engine does not know is refused"
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_foreign_clear(again, copy) },
+        0,
+        "{}",
+        last_error()
+    );
+    let cleared = unsafe { hfw_plate_object_foreign_json(again, copy) };
+    assert_eq!(
+        unsafe { CStr::from_ptr(cleared) }.to_str(),
+        Ok("[]"),
+        "a re-import starts from nothing"
+    );
+
+    unsafe { hfw_string_free(json) };
+    unsafe { hfw_string_free(rebuilt) };
+    unsafe { hfw_string_free(cleared) };
+    unsafe { hfw_plate_free(again) };
+    unsafe { hfw_plate_free(plate) };
+    unsafe { hfw_mesh_free(cube) };
+}
+
+/// The label is what a caller shows, and the name is what a save writes back.
+#[test]
+fn a_label_sits_beside_the_name_through_a_project_round_trip() {
+    let path = c_string(&fixture("cube.stl"));
+    let cube = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    let plate = hfw_plate_new();
+    let id = unsafe { hfw_plate_add(plate, cube) };
+    let name = c_string("cube.stl");
+    assert_eq!(
+        unsafe { hfw_plate_object_name(plate, id, name.as_ptr()) },
+        0
+    );
+    let label = c_string("left wing");
+    assert_eq!(
+        unsafe { hfw_plate_object_label(plate, id, label.as_ptr()) },
+        0
+    );
+
+    let mut length = 0usize;
+    let bytes = unsafe { hfw_plate_project_bytes(plate, &mut length) };
+    assert!(!bytes.is_null(), "save failed: {}", last_error());
+    let reopened =
+        unsafe { hfw_plate_open_project(bytes.cast(), length, c_string(&profile()).as_ptr()) };
+    assert!(!reopened.is_null(), "open failed: {}", last_error());
+    let mut text = vec![0i8; 32];
+    assert_eq!(
+        unsafe { hfw_plate_object_name_get(reopened, id, text.as_mut_ptr(), text.len()) },
+        8,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(text.as_ptr()) }.to_str(),
+        Ok("cube.stl")
+    );
+    assert_eq!(
+        unsafe { hfw_plate_object_label_get(reopened, id, text.as_mut_ptr(), text.len()) },
+        9,
+        "{}",
+        last_error()
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(text.as_ptr()) }.to_str(),
+        Ok("left wing")
+    );
+
+    unsafe { hfw_buffer_free(bytes, length) };
+    unsafe { hfw_plate_free(reopened) };
     unsafe { hfw_plate_free(plate) };
     unsafe { hfw_mesh_free(cube) };
 }
