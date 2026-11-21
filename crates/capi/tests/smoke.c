@@ -202,6 +202,15 @@ int main(int argc, char **argv) {
         check(preview != NULL && strstr(preview, "Outer wall") != NULL,
               "the preview labels a bead the way the G-code does");
         hfw_string_free(preview);
+        size_t preview_bytes = 0;
+        char *block = hfw_plate_preview_buffer(document, argv[2], 0.2, 0.2, &preview_bytes);
+        check(block != NULL, "the preview buffer is produced");
+        check(block != NULL && preview_bytes > 80, "the preview buffer has records in it");
+        check(block != NULL && memcmp(block, "HFWPRVW\0", 8) == 0,
+              "the preview buffer names its format");
+        if (block != NULL) {
+            hfw_buffer_free(block, preview_bytes);
+        }
         HfwJob *job = hfw_job_start(document, argv[2], 0.2, 0.2);
         check(job != NULL, "a job starts on its own thread");
         if (job != NULL) {

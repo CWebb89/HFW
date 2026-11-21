@@ -35,11 +35,11 @@ use hfw_capi::{
     hfw_plate_object_volume_name_get, hfw_plate_object_volume_placement,
     hfw_plate_object_volume_placement_get, hfw_plate_object_volume_set_visible,
     hfw_plate_object_volume_settings_json, hfw_plate_object_volume_visible, hfw_plate_open_project,
-    hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_restore, hfw_plate_set_in_layer,
-    hfw_plate_set_markers, hfw_plate_set_metadata, hfw_plate_slice, hfw_plate_slice_placed,
-    hfw_plate_snapshot, hfw_plate_volume_set, hfw_slice_meshes, hfw_snapshot_free,
-    hfw_snapshot_object_count, hfw_string_free, hfw_text_mesh, HfwBounds, HfwJobProgress,
-    HfwTransform, HFW_DIALECT_ENGINE, HFW_DIALECT_ORCA, HFW_FOREIGN_UNKNOWN_NAME,
+    hfw_plate_preview_buffer, hfw_plate_preview_json, hfw_plate_project_bytes, hfw_plate_restore,
+    hfw_plate_set_in_layer, hfw_plate_set_markers, hfw_plate_set_metadata, hfw_plate_slice,
+    hfw_plate_slice_placed, hfw_plate_snapshot, hfw_plate_volume_set, hfw_slice_meshes,
+    hfw_snapshot_free, hfw_snapshot_object_count, hfw_string_free, hfw_text_mesh, HfwBounds,
+    HfwJobProgress, HfwTransform, HFW_DIALECT_ENGINE, HFW_DIALECT_ORCA, HFW_FOREIGN_UNKNOWN_NAME,
     HFW_FOREIGN_UNUSABLE_VALUE, HFW_JOB_CANCELLED, HFW_JOB_DONE, HFW_JOB_STAGE_FINISHED,
     HFW_MARKER_CUSTOM, HFW_MARKER_PAUSE, HFW_PAINT_SUPPORT, HFW_VOLUME_MODIFIER,
     HFW_VOLUME_NEGATIVE,
@@ -655,6 +655,75 @@ fn the_preview_labels_every_bead_the_way_the_gcode_does() {
         }
     }
     unsafe { hfw_gcode_free(gcode) };
+    unsafe { hfw_plate_free(plate) };
+}
+
+#[test]
+fn the_preview_buffer_carries_the_same_job_in_the_block_a_renderer_reads() {
+    let path = c_string(&fixture("cube.stl"));
+    let profile = c_string(&profile());
+    let mesh = unsafe { hfw_mesh_load_file(path.as_ptr()) };
+    assert!(!mesh.is_null(), "load failed: {}", last_error());
+    let plate = hfw_plate_new();
+    assert!(!plate.is_null());
+    assert_ne!(unsafe { hfw_plate_add(plate, mesh) }, 0);
+    let mut len = 0usize;
+    let bytes = unsafe { hfw_plate_preview_buffer(plate, profile.as_ptr(), 0.2, 0.2, &mut len) };
+    assert!(!bytes.is_null(), "buffer failed: {}", last_error());
+    assert!(len > 80, "only {len} bytes");
+    let block = unsafe { std::slice::from_raw_parts(bytes as *const u8, len) }.to_vec();
+    unsafe { hfw_buffer_free(bytes, len) };
+
+    let word = |offset: usize| {
+        let mut raw = [0u8; 4];
+        raw.copy_from_slice(&block[offset..offset + 4]);
+        u32::from_le_bytes(raw)
+    };
+    assert_eq!(&block[..8], b"HFWPRVW\0");
+    assert_eq!(word(8), 1, "the layout version");
+    let moves = word(12) as usize;
+    let layers = word(16) as usize;
+    assert_eq!(word(20) as usize, 13, "the role table lists every role");
+    assert_eq!(word(24) as usize, 32, "the move stride");
+    assert_eq!(word(28) as usize, 16, "the layer stride");
+    assert_eq!(word(48) as usize, 4, "quad vertices per move");
+    assert_eq!(word(52) as usize, 6, "quad indices per move");
+    assert_eq!(
+        word(44) as usize,
+        len,
+        "the header's length is the length reported"
+    );
+    assert_eq!(len, 80 + moves * 32 + layers * 16 + 13 * 32);
+
+    let table = word(36) as usize;
+    let mut covered = 0usize;
+    for layer in 0..layers {
+        let at = table + layer * 16;
+        let first = word(at) as usize;
+        let count = word(at + 4) as usize;
+        assert_eq!(first, covered, "layer {layer} starts where the last ended");
+        assert_eq!(word(at + 8) as usize, first * 4, "layer {layer}'s vertices");
+        covered += count;
+    }
+    assert_eq!(covered, moves, "the layers cover every move");
+
+    let preview = unsafe { hfw_plate_preview_json(plate, profile.as_ptr(), 0.2, 0.2) };
+    assert!(!preview.is_null(), "preview failed: {}", last_error());
+    let text = unsafe { CStr::from_ptr(preview) }
+        .to_str()
+        .expect("UTF-8")
+        .to_owned();
+    unsafe { hfw_string_free(preview) };
+    assert_eq!(
+        text.matches("\"index\":").count(),
+        layers,
+        "the two preview forms disagree about how many layers the job has"
+    );
+    let beads = text.matches("{\"role\":").count();
+    assert!(
+        moves >= beads,
+        "{moves} moves for {beads} beads: every bead has at least one segment"
+    );
     unsafe { hfw_plate_free(plate) };
 }
 

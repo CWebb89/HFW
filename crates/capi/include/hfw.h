@@ -911,6 +911,22 @@ char *hfw_plate_preview_json(const HfwPlate *plate, const char *profile,
                              double first_layer_height, double layer_height);
 
 /**
+ * Plans the plate and returns the preview buffer, or NULL on error, writing its length
+ * into `out_len`.
+ *
+ * The same beads as `hfw_plate_preview_json`, in the form a renderer uploads: one flat
+ * little-endian block, 32 bytes per move, each move carrying its two endpoints in
+ * millimetres, the bead's width at each end in micrometres, the speed the profile asks
+ * for it, the layer it prints in and its role. A per-layer table names each layer's first
+ * move, its first vertex and the height it prints at, so selecting a layer range is two
+ * integers and one slice of the block. The layout, field by field, is documented in
+ * `docs/PREVIEW-RENDERER.md`. Release the bytes with `hfw_buffer_free`.
+ */
+char *hfw_plate_preview_buffer(const HfwPlate *plate, const char *profile,
+                               double first_layer_height, double layer_height,
+                               size_t *out_len);
+
+/**
  * Reading a plate back.
  *
  * A document the application holds has to survive being handed to the engine and

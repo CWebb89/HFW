@@ -447,6 +447,49 @@ pub unsafe extern "C" fn hfw_plate_preview_json(
     report(build(), ptr::null_mut())
 }
 
+/// Plans the plate and returns the preview buffer, and writes its length into `out_len`.
+///
+/// This is [`hfw_plate_preview_json`]'s content in the form a renderer wants: one flat
+/// block of fixed-stride records, 32 bytes per move, with a per-layer table naming each
+/// layer's first move, its first vertex and its height. The layout is documented on
+/// `preview::buffer` and in `docs/PREVIEW-RENDERER.md`. Release the bytes with
+/// [`hfw_buffer_free`].
+///
+/// # Safety
+///
+/// `plate` must be a live handle, `profile` a NUL-terminated path, and `out_len` writable.
+#[no_mangle]
+pub unsafe extern "C" fn hfw_plate_preview_buffer(
+    plate: *const HfwPlate,
+    profile: *const c_char,
+    first_layer_height: f64,
+    layer_height: f64,
+    out_len: *mut usize,
+) -> *mut c_char {
+    let build = || -> Result<*mut c_char, String> {
+        let plate = unsafe { plate_of(plate) }?;
+        let profile = unsafe { text_of(profile, "profile") }?;
+        if out_len.is_null() {
+            return Err("the length pointer is null".to_owned());
+        }
+        let (job, cfg) = plan_plate(
+            &plate.plate,
+            &profile,
+            first_layer_height,
+            layer_height,
+            None,
+        )?;
+        let bytes = preview::buffer(&job, &cfg).into_boxed_slice();
+        let len = bytes.len();
+        let pointer = Box::into_raw(bytes) as *mut c_char;
+        unsafe {
+            *out_len = len;
+        }
+        Ok(pointer)
+    };
+    report(build(), ptr::null_mut())
+}
+
 /// A job running on its own thread.
 ///
 /// Planning and writing a plate takes minutes, and a settings panel that freezes

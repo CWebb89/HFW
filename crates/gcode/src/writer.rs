@@ -1806,7 +1806,14 @@ fn base_speed(feature: Feature, cfg: &PrinterConfig, first_layer: bool) -> f64 {
 ///
 /// A zero rung means "no opinion", so a profile can set two of the four and let
 /// the other two fall through to the feature speed rather than to zero.
-fn path_speed(feature: Feature, cfg: &PrinterConfig, first_layer: bool, overhang: f64) -> f64 {
+///
+/// This is the speed a profile *asks* a bead to print at. The writer may still slow the
+/// move down: the volumetric-rate slope across consecutive beads, the layer-time cooling
+/// rule and the over-bridge and raft limits are decided while the file is written, from
+/// state that spans layers. A preview that colours by speed shows this number, so it
+/// shows which beads the profile gave which speed rather than the `F` each move ends up
+/// with in the file.
+pub fn path_speed(feature: Feature, cfg: &PrinterConfig, first_layer: bool, overhang: f64) -> f64 {
     if cfg.dynamic_overhang_speeds && !first_layer {
         if let Some(quarter) = overhang_quarter(overhang) {
             let rung = cfg.overhang_speeds[quarter];
